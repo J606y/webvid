@@ -44,6 +44,11 @@ func env(key, def string) string {
 }
 
 func main() {
+	// 管理子命令（如 reset-password）不启动服务，处理完直接退出。
+	if runCLI() {
+		return
+	}
+
 	port := env("NL_PORT", "5243")
 	dataDir := env("NL_DATA_DIR", "./data")
 	filesDir := env("NL_FILES_DIR", "./files")
