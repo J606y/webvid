@@ -1,0 +1,25 @@
+# 运行数据与本机产物（含真实凭据的 newlist.db、样例媒体、截图，绝不入库）
+/data/
+/files/
+/files2/
+/docker-test/
+/_shots/
+
+# 编译产物（构建时再生成）
+*.exe
+*.exe~
+/webvid
+/newlist
+
+# 日志
+*.log
+
+# 依赖与前端构建产物（npm run build 生成，随后被 go:embed 嵌入）
+node_modules/
+/public/dist/
+
+# 工具 / 编辑器 / 系统
+/.claude/
+.DS_Store
+Thumbs.db
+*.swp

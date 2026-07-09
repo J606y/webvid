@@ -1,0 +1,13 @@
+# 运行数据与本机产物不进构建上下文
+data/
+files/
+files2/
+docker-test/
+_shots/
+*.exe
+frontend/node_modules/
+# 前端产物在镜像内重新构建（防旧 dist 混入）
+public/dist/
+docs/
+.git/
+.claude/

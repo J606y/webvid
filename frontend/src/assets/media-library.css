@@ -1,0 +1,102 @@
+/* 视频库 / 照片墙两页共享样式：经各页 <style scoped src> 引入，编译时按各自组件作用域下沉，
+   不泄漏到其它组件（.art/.play/.cell 等通用类名在 Admin/Play/Files 等也有，故不能上提全局）。
+   各页专属的卡片样式（.v-card/.v-grid/.play/.prog-bar、.p-card/.photo-grid/.cell、.shelf-card 宽度）
+   仍留在各页 inline <style scoped>。 */
+
+/* ---- Featured 横幅 ---- */
+.feat {
+  margin: 4px 0 36px;
+  border-radius: 22px;
+  overflow: hidden;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+.feat-item { position: relative; height: 100%; cursor: pointer; background: #101018; }
+.feat-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.feat-mask {
+  position: absolute; inset: 0;
+  background: linear-gradient(to top, rgba(5, 6, 10, 0.94) 0%, rgba(5, 6, 10, 0.35) 42%, transparent 72%);
+}
+.feat-info { position: absolute; left: 40px; bottom: 32px; right: 40px; }
+.feat-kicker {
+  font-size: 12px; letter-spacing: 3px; color: var(--text-dim);
+  text-transform: uppercase; margin-bottom: 8px;
+}
+.feat-title { font-size: 34px; font-weight: 800; margin-bottom: 8px; text-shadow: 0 2px 14px rgba(0,0,0,.6); }
+.feat-meta { margin-bottom: 18px; font-size: 13px; }
+.hero-btn { box-shadow: 0 6px 24px rgba(122, 162, 255, 0.4); }
+.feat :deep(.el-carousel__indicators--horizontal) {
+  left: auto; right: 26px; bottom: 14px; transform: none;
+}
+.feat :deep(.el-carousel__button) { width: 7px; height: 7px; border-radius: 50%; opacity: 0.4; }
+.feat :deep(.el-carousel__indicator.is-active .el-carousel__button) { opacity: 1; }
+
+/* ---- 目录视图大标题 ---- */
+.lib-head { display: flex; align-items: center; gap: 12px; margin: 6px 0 22px; }
+.lib-title { font-size: 28px; font-weight: 800; margin: 0; }
+.back-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 36px; height: 36px; border-radius: 50%;
+  border: 1px solid var(--glass-border); cursor: pointer;
+  background: rgba(255, 255, 255, 0.08); color: var(--text-main);
+  backdrop-filter: blur(12px) saturate(1.6);
+  -webkit-backdrop-filter: blur(12px) saturate(1.6);
+  transition: background 0.2s;
+}
+.back-btn:hover { background: rgba(255, 255, 255, 0.16); }
+.spacer { flex: 1; }
+
+/* ---- 货架 ---- */
+.shelf { margin-bottom: 36px; }
+.shelf-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px;
+}
+.shelf-head h2 { font-size: 20px; font-weight: 700; margin: 0; }
+.shelf-ops { display: flex; align-items: center; gap: 14px; }
+.see-all, .see-more {
+  display: flex; align-items: center; gap: 2px;
+  background: none; border: none; padding: 4px 2px; cursor: pointer;
+  font-size: 13px; color: var(--text-dim);
+  transition: color 0.2s;
+}
+.see-all:hover, .see-more:hover { color: var(--text-main); }
+.shelf-row {
+  display: flex; gap: 16px;
+  overflow-x: auto;
+  padding: 6px 6px 12px; margin: -6px -6px 0;
+  scrollbar-width: none;
+}
+.shelf-row::-webkit-scrollbar { display: none; }
+
+/* ---- 卡片公共（画面 + 兜底层） ---- */
+.art img { position: relative; z-index: 1; width: 100%; height: 100%; object-fit: cover; display: block; }
+.abs { position: absolute; inset: 0; }
+
+.sentinel { height: 1px; }
+.loading-more { text-align: center; padding: 14px 0; font-size: 13px; }
+
+/* ---- 空态 ---- */
+.empty {
+  padding: 60px 24px; text-align: center;
+  display: flex; flex-direction: column; align-items: center; gap: 10px;
+}
+.empty p { margin: 0; font-size: 16px; }
+.empty p.dim { font-size: 13px; margin-bottom: 10px; }
+
+/* ---- 移动端（公共部分） ---- */
+@media (max-width: 768px) {
+  .feat { margin-bottom: 24px; border-radius: 16px; }
+  .feat-info { left: 16px; right: 16px; bottom: 16px; }
+  .feat-kicker { letter-spacing: 2px; margin-bottom: 4px; }
+  .feat-title { font-size: 20px; margin-bottom: 4px; }
+  .feat-meta { margin-bottom: 10px; font-size: 12px; }
+  .hero-btn { height: 34px; padding: 0 16px; font-size: 13px; }
+  .feat :deep(.el-carousel__indicators--horizontal) { right: 14px; bottom: 8px; }
+  .lib-head { margin-bottom: 16px; }
+  .lib-title { font-size: 22px; }
+  .back-btn { width: 32px; height: 32px; }
+  .shelf { margin-bottom: 26px; }
+  .shelf-head { margin-bottom: 10px; }
+  .shelf-head h2 { font-size: 17px; }
+  .shelf-row { gap: 10px; }
+}

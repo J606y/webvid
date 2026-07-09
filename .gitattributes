@@ -1,0 +1,19 @@
+# 默认自动识别文本/二进制
+* text=auto
+
+# 以下文件必须 LF 行尾：CRLF 会让 Linux 上 bash/systemd/构建脚本报 \r 错误
+*.sh        text eol=lf
+*.yml       text eol=lf
+*.yaml      text eol=lf
+Dockerfile  text eol=lf
+Makefile    text eol=lf
+
+# 二进制，勿做行尾转换
+*.exe   binary
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.webp  binary
+*.woff  binary
+*.woff2 binary

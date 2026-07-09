@@ -1,0 +1,22 @@
+services:
+  webvid:
+    build: .
+    image: webvid:latest
+    container_name: webvid
+    ports:
+      - "5243:5243"
+    volumes:
+      - ./data:/data    # 数据库/缩略图缓存/转码临时文件
+      - ./files:/files  # 首启自动挂载为「/本地存储」
+    # 容器内以非 root 用户 webvid(uid=1000) 运行（见 Dockerfile）。上面两个是 bind mount，
+    # 容器内 uid=1000 能否写入取决于宿主机 ./data、./files 目录本身的属主/权限，与镜像内
+    # chown 无关。二选一：
+    #   1) 首次启动前在宿主执行 `chown -R 1000:1000 data files`（Linux/未加 -R 的 macOS 同理）；
+    #   2) 或者不改宿主目录权限，取消下面 user 的注释并填成当前宿主用户的 uid:gid
+    #      （`id -u`:`id -g`），覆盖镜像默认的 webvid 用户。
+    # user: "1000:1000"
+    environment:
+      TZ: Asia/Shanghai
+      # 首启管理员密码（仅数据库初建时生效；不设则随机生成并打印在容器日志）
+      # NL_ADMIN_PASSWORD: admin123
+    restart: unless-stopped

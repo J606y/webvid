@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <!-- 锁定缩放：禁止双指缩放 + 聚焦输入框时自动放大（iOS） -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <!-- iOS/Android 添加到主界面后以独立 App 方式运行（隐藏 Safari 工具栏「系统按键」） -->
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black" />
+  <meta name="apple-mobile-web-app-title" content="WebVid" />
+  <meta name="theme-color" content="#0a0a12" />
+  <!-- 标准 PWA 清单：现代 iOS(16.4+)/Android 据此以独立 App 方式运行 -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <title>WebVid</title>
+  <style>body{background:#0a0a12;margin:0}</style>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/src/main.js"></script>
+</body>
+</html>

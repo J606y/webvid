@@ -1,0 +1,68 @@
+name: release
+
+# 打 v* 标签自动构建并发布；也支持在 Actions 页手动触发（填标签名）。
+# 产物：webvid-linux-{amd64,arm64,armv7}.tar.gz + checksums.txt，供 install.sh 下载。
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '要发布的版本标签（如 v1.0.0）'
+        required: true
+
+permissions:
+  contents: write   # 创建 Release / 上传资产需要写权限
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 1) 前端构建：产物落 public/dist，随后被后端 go:embed 嵌入单二进制。
+      #    只构建一次，三种架构共用同一份前端产物。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm --prefix frontend ci --no-audit --no-fund
+      - run: npm --prefix frontend run build
+
+      # 2) Go 工具链：版本跟随 go.mod 的 go 指令，避免与本地构建不一致。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 3) 交叉编译（modernc sqlite 纯 Go，CGO=0，无需交叉编译器）并打包。
+      - name: 交叉编译 + 打包
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          build() {
+            local name=$1 goarch=$2 goarm=${3:-}
+            echo ">> building linux/$name"
+            GOARCH="$goarch" GOARM="$goarm" \
+              go build -trimpath -ldflags "-s -w" -o webvid .
+            tar -czf "dist/webvid-linux-${name}.tar.gz" webvid
+            rm -f webvid
+          }
+          build amd64 amd64
+          build arm64 arm64
+          build armv7 arm 7
+          ( cd dist && sha256sum *.tar.gz | tee checksums.txt )
+
+      # 4) 发布到 GitHub Release。
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/checksums.txt
