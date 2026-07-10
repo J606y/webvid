@@ -128,10 +128,7 @@ func (s *Service) FrameJPEG(ctx context.Context, u *user.User, logical, out stri
 		cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		a := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-ss", ss}
-		// 云盘输入经回环 /api/raw：带内部鉴权头令下载限速豁免（同 ffmpegArgs）
-		if strings.HasPrefix(in, "http") && s.internalToken != "" {
-			a = append(a, "-headers", "X-Internal-Auth: "+s.internalToken+"\r\n")
-		}
+		a = append(a, httpInputArgs(in, s.internalToken)...)
 		a = append(a, "-i", in, "-frames:v", "1",
 			"-vf", fmt.Sprintf("scale=%d:-2", width), "-q:v", "5", "-y", tmp)
 		if err := exec.CommandContext(cctx, ff, a...).Run(); err != nil {
@@ -502,11 +499,9 @@ func (sess *session) ffmpegArgs(from int) []string {
 	if off > 0 {
 		a = append(a, "-ss", fmt.Sprintf("%.3f", off))
 	}
-	// 云盘输入经本机 /api/raw 回环拉取：带内部鉴权头，令下载限速对内部转码拉流豁免
-	// （反代后来源 IP 恒为回环，不能再靠 IP 判定，否则真实用户下载会被误豁免）。
-	if strings.HasPrefix(sess.input, "http") && sess.svc.internalToken != "" {
-		a = append(a, "-headers", "X-Internal-Auth: "+sess.svc.internalToken+"\r\n")
-	}
+	// 云盘输入经本机 /api/raw 回环拉取：内部鉴权头（豁免下载限速+单流透传）
+	// 及断线续传旗标，见 httpInputArgs。
+	a = append(a, httpInputArgs(sess.input, sess.svc.internalToken)...)
 	a = append(a, "-i", sess.input)
 	if sess.dec.HasVideo {
 		a = append(a, "-map", "0:v:0")

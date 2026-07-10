@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"newlist/internal/auth"
@@ -25,10 +26,12 @@ import (
 	"newlist/internal/user"
 )
 
-// rangeTestDriver 测试专用驱动（仅注册于 _test 二进制）：单文件 big.bin，Link 返回配置的直链。
+// rangeTestDriver 测试专用驱动（仅注册于 _test 二进制）：单文件（file_name，默认 big.bin），
+// Link 返回配置的直链。
 type rangeTestDriver struct {
 	url  string
 	size int64
+	name string
 }
 
 func init() {
@@ -40,6 +43,10 @@ func init() {
 func (d *rangeTestDriver) Init(_ context.Context, cfg driver.Config) error {
 	d.url = cfg["link_url"]
 	d.size, _ = strconv.ParseInt(cfg["size"], 10, 64)
+	d.name = cfg["file_name"]
+	if d.name == "" {
+		d.name = "big.bin"
+	}
 	return nil
 }
 func (d *rangeTestDriver) Drop() error { return nil }
@@ -47,14 +54,14 @@ func (d *rangeTestDriver) List(_ context.Context, rel string) ([]model.FileInfo,
 	if rel != "" {
 		return nil, driver.ErrNotFound
 	}
-	return []model.FileInfo{{Name: "big.bin", Size: d.size}}, nil
+	return []model.FileInfo{{Name: d.name, Size: d.size}}, nil
 }
 func (d *rangeTestDriver) Stat(_ context.Context, rel string) (model.FileInfo, error) {
 	switch rel {
 	case "":
 		return model.FileInfo{Name: "", IsDir: true}, nil
-	case "big.bin":
-		return model.FileInfo{Name: "big.bin", Size: d.size}, nil
+	case d.name:
+		return model.FileInfo{Name: d.name, Size: d.size}, nil
 	}
 	return model.FileInfo{}, driver.ErrNotFound
 }
@@ -70,11 +77,19 @@ func proxyPattern(n int) []byte {
 	return b
 }
 
+// rawTestEnv 是 newRawTestServer 组装的全链路环境。
+type rawTestEnv struct {
+	api, token, upstreamURL string
+	internalTok             string        // media 内部回环鉴权头值（单流透传分支）
+	upstreamReqs            *atomic.Int64 // 上游收到的请求数
+}
+
 // newRawTestServer 组装真实全链路：sqlite + 两个 rangetest 存储（开/关代理）+ Router。
-// 返回 API base、登录 token、直链上游 URL。
-func newRawTestServer(t *testing.T, content []byte) (api, token, upstreamURL string) {
+func newRawTestServer(t *testing.T, content []byte) rawTestEnv {
 	t.Helper()
+	var reqs atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqs.Add(1)
 		var a, b int64
 		if _, err := fmt.Sscanf(r.Header.Get("Range"), "bytes=%d-%d", &a, &b); err != nil {
 			w.WriteHeader(http.StatusOK)
@@ -129,8 +144,9 @@ func newRawTestServer(t *testing.T, content []byte) (api, token, upstreamURL str
 	if err := f.Reload(context.Background()); err != nil {
 		t.Fatalf("fs.Reload: %v", err)
 	}
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", secret, nil)
 	srv := New(d, cf, users, f, thumb.New(f, t.TempDir()),
-		media.New(f, t.TempDir(), "http://127.0.0.1:0", secret, nil), index.New(d, f), nil, task.New(1), secret)
+		md, index.New(d, f), nil, task.New(1), secret)
 	ts := httptest.NewServer(srv.Router())
 	t.Cleanup(ts.Close)
 
@@ -149,7 +165,8 @@ func newRawTestServer(t *testing.T, content []byte) (api, token, upstreamURL str
 	if err := json.NewDecoder(resp.Body).Decode(&lr); err != nil || lr.Data.Token == "" {
 		t.Fatalf("登录响应异常: err=%v", err)
 	}
-	return ts.URL, lr.Data.Token, upstream.URL
+	return rawTestEnv{api: ts.URL, token: lr.Data.Token, upstreamURL: upstream.URL,
+		internalTok: md.InternalToken(), upstreamReqs: &reqs}
 }
 
 func rawReq(t *testing.T, method, url, token, rangeHdr string) (*http.Response, []byte) {
@@ -174,7 +191,8 @@ func rawReq(t *testing.T, method, url, token, rangeHdr string) (*http.Response, 
 // 全链路：登录 → raw 代理模式 200/206/HEAD；直链模式 302。
 func TestRawProxyFullChain(t *testing.T) {
 	content := proxyPattern(3<<20 + 999) // 3MB+，chunk 1MB → 多块并发
-	api, token, upstreamURL := newRawTestServer(t, content)
+	env := newRawTestServer(t, content)
+	api, token, upstreamURL := env.api, env.token, env.upstreamURL
 
 	// 代理模式：200 全量
 	resp, body := rawReq(t, http.MethodGet, api+"/api/raw/代理盘/big.bin", token, "")
@@ -217,5 +235,43 @@ func TestRawProxyFullChain(t *testing.T) {
 	r2.Body.Close()
 	if r2.StatusCode != 401 {
 		t.Fatalf("未登录应 401，got %d", r2.StatusCode)
+	}
+}
+
+// 内部读取方（ffmpeg/ffprobe，凭 X-Internal-Auth）走单连接透传：
+// 整个响应只对上游发 1 个请求；普通客户端仍走分块并发。
+// 分块模式整读大文件的"每块一请求"风暴会触发云盘请求频率限流（429/503），
+// 断流后播放器反复重试表现为"一直重连播放不出来"。
+func TestRawProxyInternalSingleStream(t *testing.T) {
+	content := proxyPattern(3<<20 + 999) // 3MB+，chunk 1MB
+	env := newRawTestServer(t, content)
+
+	// 内部请求：Range 整读 → 上游恰好 1 个请求
+	base := env.upstreamReqs.Load()
+	req, _ := http.NewRequest(http.MethodGet, env.api+"/api/raw/代理盘/big.bin", nil)
+	req.Header.Set("Authorization", "Bearer "+env.token)
+	req.Header.Set("X-Internal-Auth", env.internalTok)
+	req.Header.Set("Range", "bytes=100-")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 206 || !bytes.Equal(body, content[100:]) {
+		t.Fatalf("内部单流: status=%d len=%d", resp.StatusCode, len(body))
+	}
+	if n := env.upstreamReqs.Load() - base; n != 1 {
+		t.Fatalf("内部单流应只发 1 个上游请求，实际 %d", n)
+	}
+
+	// 对照：普通客户端整读 → 分块并发（3MB/1MB ≥ 3 个上游请求）
+	base = env.upstreamReqs.Load()
+	resp2, body2 := rawReq(t, http.MethodGet, env.api+"/api/raw/代理盘/big.bin", env.token, "bytes=0-")
+	if resp2.StatusCode != 206 || !bytes.Equal(body2, content) {
+		t.Fatalf("普通分块: status=%d len=%d", resp2.StatusCode, len(body2))
+	}
+	if n := env.upstreamReqs.Load() - base; n < 3 {
+		t.Fatalf("普通客户端应走分块并发，上游请求 %d < 3", n)
 	}
 }

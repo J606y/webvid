@@ -111,6 +111,8 @@ func setRawSecurity(c *gin.Context, name string) {
 }
 
 // rawProxy 代理模式：客户端 Range 透传、服务器↔云盘侧并发分块拉取。
+// 内部读取方（ffmpeg/ffprobe）改走单连接透传：顺序整读大文件时分块模式的
+// "每块一请求"会触发云盘请求频率限流，断流即播放器"一直重连"（详见 stream.ServeSingle）。
 func (s *Server) rawProxy(c *gin.Context, res *fs.LinkResult) {
 	setRawSecurity(c, res.Info.Name)
 	if c.Query("dl") == "1" {
@@ -118,6 +120,11 @@ func (s *Server) rawProxy(c *gin.Context, res *fs.LinkResult) {
 	}
 	if isImage(res.Info.Name) {
 		c.Header("Cache-Control", "private, max-age=86400")
+	}
+	if s.isInternal(c) {
+		stream.ServeSingle(c.Writer, c.Request, res.Info.Name, res.Info.Modified, res.Info.Size,
+			contentTypeFor(res.Info.Name), res.Provider())
+		return
 	}
 	stream.Serve(s.downloadWriter(c), c.Request, res.Info.Name, res.Info.Modified, res.Info.Size,
 		contentTypeFor(res.Info.Name), res.Provider(), res.Accel.Threads, res.Accel.ChunkBytes)

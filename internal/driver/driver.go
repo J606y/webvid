@@ -65,6 +65,13 @@ type LocalPather interface {
 	AbsPath(relPath string) (string, error)
 }
 
+// LinkRefresher 可选：直链确认已失效（拉流 401/403）时强制重取，绕过驱动内缓存。
+// 未实现则退化为再调 Link——但带缓存的驱动会在 TTL 内返回同一条死链，
+// 换链形同虚设，重连持续失败到缓存过期为止。
+type LinkRefresher interface {
+	RefreshLink(ctx context.Context, relPath string) (*Link, error)
+}
+
 // ConfigPersister 可选：驱动配置在运行期会变化（如 OAuth refresh_token 轮换），
 // fs 层在 Init 前注入保存回调，驱动在配置变化后调用以持久化。
 type ConfigPersister interface {

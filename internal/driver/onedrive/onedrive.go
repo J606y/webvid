@@ -209,6 +209,16 @@ func (d *OneDrive) List(ctx context.Context, relPath string) ([]model.FileInfo, 
 }
 
 func (d *OneDrive) Stat(ctx context.Context, relPath string) (model.FileInfo, error) {
+	// 直链缓存里已有该文件的 size/mtime（与 downloadUrl 同一响应取回）：直接复用。
+	// 代理/转码播放每次打开都会 Stat+Link，ffmpeg 探测+seek 连开多次，
+	// 叠加拉流本身的请求量容易撞 Graph 限流；缓存只含文件（目录无 downloadUrl）。
+	d.linkMu.Lock()
+	if cl, ok := d.linkCache[relPath]; ok && time.Now().Before(cl.exp) {
+		d.linkMu.Unlock()
+		return model.FileInfo{Name: path.Base(relPath), Size: cl.size, Modified: cl.mod}, nil
+	}
+	d.linkMu.Unlock()
+
 	var it item
 	if err := d.cli.req(ctx, http.MethodGet,
 		d.cli.itemURL(d.root, relPath, "?"+itemSelect), nil, &it); err != nil {
@@ -247,6 +257,16 @@ func (d *OneDrive) Link(ctx context.Context, relPath string) (*driver.Link, erro
 		exp: time.Now().Add(linkTTL)}
 	d.linkMu.Unlock()
 	return &driver.Link{URL: it.DownloadURL, Size: it.Size, Mod: mod}, nil
+}
+
+// RefreshLink 直链确认失效（拉流 401/403）时强制重取：先废弃缓存条目再取新链。
+// Link 的 TTL 缓存以"downloadUrl 有效期约 1h"为前提，但直链也可能被云端提前
+// 作废（文件被改写、令牌撤销等）——没有强制通道，重连在 TTL 内会一直拿到同一条死链。
+func (d *OneDrive) RefreshLink(ctx context.Context, relPath string) (*driver.Link, error) {
+	d.linkMu.Lock()
+	delete(d.linkCache, relPath)
+	d.linkMu.Unlock()
+	return d.Link(ctx, relPath)
 }
 
 type thumbResp struct {

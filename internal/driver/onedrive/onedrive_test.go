@@ -296,6 +296,88 @@ func TestLinkCacheAndInvalidate(t *testing.T) {
 	}
 }
 
+// RefreshLink 强制绕过缓存换新链（直链提前作废时，Link 在 TTL 内只会返回同一条死链）。
+func TestRefreshLinkBypassesCache(t *testing.T) {
+	var linkCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/common/oauth2/v2.0/token" {
+			fmt.Fprint(w, tokenJSON("at", "rt"))
+			return
+		}
+		n := linkCalls.Add(1)
+		fmt.Fprintf(w, `{"id":"1","size":7,"lastModifiedDateTime":"2026-07-06T10:00:00Z",
+			"@microsoft.graph.downloadUrl":"https://dl.example.com/v%d"}`, n)
+	}))
+	defer ts.Close()
+
+	d := newTestDriver(ts, "")
+	ctx := context.Background()
+	lk1, err := d.Link(ctx, "a.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Link(ctx, "a.mp4"); err != nil { // 缓存命中
+		t.Fatal(err)
+	}
+	if linkCalls.Load() != 1 {
+		t.Fatalf("TTL 内 Link 应命中缓存，API 被调 %d 次", linkCalls.Load())
+	}
+	lk2, err := d.RefreshLink(ctx, "a.mp4") // 强制换新
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkCalls.Load() != 2 || lk2.URL == lk1.URL {
+		t.Fatalf("RefreshLink 应绕过缓存取新链: calls=%d url=%q", linkCalls.Load(), lk2.URL)
+	}
+	lk3, err := d.Link(ctx, "a.mp4") // 新链回填缓存
+	if err != nil {
+		t.Fatal(err)
+	}
+	if linkCalls.Load() != 2 || lk3.URL != lk2.URL {
+		t.Fatalf("RefreshLink 后新链应入缓存: calls=%d", linkCalls.Load())
+	}
+}
+
+// Stat 复用直链缓存：Link 后 TTL 内 Stat 不再打 Graph（代理/转码每次打开都 Stat+Link，
+// ffmpeg 探测+seek 连开多次会放大 Graph 请求量）。
+func TestStatFromLinkCache(t *testing.T) {
+	var apiCalls atomic.Int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/common/oauth2/v2.0/token" {
+			fmt.Fprint(w, tokenJSON("at", "rt"))
+			return
+		}
+		apiCalls.Add(1)
+		fmt.Fprint(w, `{"id":"1","name":"a.mp4","size":42,"file":{},
+			"lastModifiedDateTime":"2026-07-06T10:00:00Z",
+			"@microsoft.graph.downloadUrl":"https://dl.example.com/x"}`)
+	}))
+	defer ts.Close()
+
+	d := newTestDriver(ts, "")
+	ctx := context.Background()
+	if _, err := d.Link(ctx, "dir/a.mp4"); err != nil {
+		t.Fatal(err)
+	}
+	fi, err := d.Stat(ctx, "dir/a.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if apiCalls.Load() != 1 {
+		t.Fatalf("缓存内 Stat 不应再打 API，实际 %d 次", apiCalls.Load())
+	}
+	mod, _ := time.Parse(time.RFC3339, "2026-07-06T10:00:00Z")
+	if fi.Name != "a.mp4" || fi.Size != 42 || fi.IsDir || !fi.Modified.Equal(mod) {
+		t.Fatalf("缓存 Stat 字段不符: %+v", fi)
+	}
+	if _, err := d.Stat(ctx, "other.mp4"); err != nil { // 未缓存路径仍走 API
+		t.Fatal(err)
+	}
+	if apiCalls.Load() != 2 {
+		t.Fatalf("未缓存路径 Stat 应走 API，实际 %d 次", apiCalls.Load())
+	}
+}
+
 func TestMakeDirLastExists(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/common/oauth2/v2.0/token" {

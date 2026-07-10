@@ -7,7 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -18,10 +21,25 @@ type LinkProvider func(ctx context.Context) (url string, header http.Header, err
 
 // 可调常量（编译期固定，够用即可，不进配置）。
 const (
-	chunkAttempts = 3               // 每块最多尝试次数
-	retryBackoff  = 100 * time.Millisecond // 重试间隔基数（×attempt）
+	chunkAttempts = 4               // 每块硬错误最多尝试次数
+	retryBackoff  = 200 * time.Millisecond // 硬错误重试间隔基数（×attempt）
 	chunkTimeout  = 2 * time.Minute // 单块请求超时（防一块卡死堵住整个窗口）
+
+	// 云盘按请求频率限流（OneDrive/SharePoint 429/503 + Retry-After 常达数十秒）。
+	// 限流等待不消耗尝试次数，只受累计预算约束——否则一个限流窗口就掐死整条流，
+	// 播放器重试又加剧限流，表现为"一直重连播放不出来"。
+	throttleBudget  = 2 * time.Minute  // 单块累计限流等待预算
+	throttleDefault = 2 * time.Second  // 无 Retry-After 头时的等待
+	throttleMax     = 30 * time.Second // 单次等待上限（防恶意/异常头长挂）
 )
+
+// retryAfter 解析 Retry-After 秒数，钳制到 [throttleDefault, throttleMax]。
+func retryAfter(h string) time.Duration {
+	if n, err := strconv.Atoi(strings.TrimSpace(h)); err == nil && n > 0 {
+		return min(time.Duration(n)*time.Second, throttleMax)
+	}
+	return throttleDefault
+}
 
 var errNoRange = errors.New("源不支持 Range 分块")
 
@@ -161,29 +179,37 @@ func (m *MultiReader) getLink(usedGen int, force bool) (string, http.Header, int
 	return m.linkURL, m.linkHdr, m.linkGen, nil
 }
 
-// fetchChunk 下载一个分块，内含重试与直链刷新。
+// pause ctx 感知的睡眠；返回 false 表示 ctx 已取消。
+func (m *MultiReader) pause(d time.Duration) bool {
+	select {
+	case <-m.ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
+	}
+}
+
+// fetchChunk 下载一个分块：硬错误带退避重试、直链过期换链、限流按 Retry-After 等待。
 func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
 	start, end := m.chunkRange(idx)
 	size := end - start + 1
 	var lastErr error
 	gen := 0
 	refresh := false
-	for attempt := 1; attempt <= chunkAttempts; attempt++ {
-		if attempt > 1 {
-			select {
-			case <-m.ctx.Done():
-				return nil, m.ctx.Err()
-			case <-time.After(retryBackoff * time.Duration(attempt-1)):
-			}
-		}
+	var throttled time.Duration
+	for attempt := 1; attempt <= chunkAttempts; {
 		url, hdr, g, err := m.getLink(gen, refresh)
 		if err != nil {
 			lastErr = fmt.Errorf("获取直链失败: %w", err)
 			refresh = false
+			attempt++
+			if attempt <= chunkAttempts && !m.pause(retryBackoff*time.Duration(attempt-1)) {
+				return nil, m.ctx.Err()
+			}
 			continue
 		}
 		gen, refresh = g, false
-		buf, retryRefresh, err := m.doRange(url, hdr, start, end, size, idx)
+		buf, retryRefresh, wait, err := m.doRange(url, hdr, start, end, size, idx)
 		if err == nil {
 			return buf, nil
 		}
@@ -195,17 +221,30 @@ func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
 		if errors.Is(err, errNoRange) {
 			return nil, err // 源不支持 Range，重试无意义
 		}
+		if wait > 0 && throttled+wait <= throttleBudget {
+			throttled += wait // 限流等待不消耗尝试次数，流照常存活（这段时间无新数据而已）
+			if !m.pause(wait) {
+				return nil, m.ctx.Err()
+			}
+			continue
+		}
+		attempt++
+		if attempt <= chunkAttempts && !m.pause(retryBackoff*time.Duration(attempt-1)) {
+			return nil, m.ctx.Err()
+		}
 	}
-	return nil, fmt.Errorf("分块 %d [%d-%d] 下载失败（已重试 %d 次）: %w", idx, start, end, chunkAttempts-1, lastErr)
+	err := fmt.Errorf("分块 %d [%d-%d] 下载失败（已重试）: %w", idx, start, end, lastErr)
+	log.Printf("[stream] %v", err)
+	return nil, err
 }
 
-// doRange 发一次 Range 请求读满分块；返回 (数据, 是否应刷新直链后重试, 错误)。
-func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int64, idx int) ([]byte, bool, error) {
+// doRange 发一次 Range 请求读满分块；返回 (数据, 是否应换链重试, 限流等待时长, 错误)。
+func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int64, idx int) ([]byte, bool, time.Duration, error) {
 	rctx, cancel := context.WithTimeout(m.ctx, chunkTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, false, err
+		return nil, false, 0, err
 	}
 	for k, vs := range hdr {
 		for _, v := range vs {
@@ -215,30 +254,33 @@ func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int6
 	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, false, err
+		return nil, false, 0, err
 	}
 	defer resp.Body.Close()
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
 		buf := make([]byte, size)
 		if _, err := io.ReadFull(resp.Body, buf); err != nil {
-			return nil, false, fmt.Errorf("分块读取中断: %w", err)
+			return nil, false, 0, fmt.Errorf("分块读取中断: %w", err)
 		}
-		return buf, false, nil
+		return buf, false, 0, nil
 	case http.StatusOK:
 		// 服务器不认 Range：仅当整个请求区间就是文件开头的唯一一块时可接受
 		if idx == 0 && m.chunks == 1 && m.offset == 0 {
 			buf := make([]byte, size)
 			if _, err := io.ReadFull(resp.Body, buf); err != nil {
-				return nil, false, fmt.Errorf("读取源失败: %w", err)
+				return nil, false, 0, fmt.Errorf("读取源失败: %w", err)
 			}
-			return buf, false, nil
+			return buf, false, 0, nil
 		}
-		return nil, false, errNoRange
+		return nil, false, 0, errNoRange
 	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
-		return nil, true, fmt.Errorf("直链疑似过期: HTTP %d", resp.StatusCode)
+		return nil, true, 0, fmt.Errorf("直链疑似过期: HTTP %d", resp.StatusCode)
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return nil, false, retryAfter(resp.Header.Get("Retry-After")),
+			fmt.Errorf("源限流: HTTP %d", resp.StatusCode)
 	default:
-		return nil, false, fmt.Errorf("拉取分块失败: HTTP %d", resp.StatusCode)
+		return nil, false, 0, fmt.Errorf("拉取分块失败: HTTP %d", resp.StatusCode)
 	}
 }
 

@@ -306,6 +306,40 @@ NL_ADMIN_PASSWORD=admin123 ./webvid.exe     # 或 go run .
   ORB/tempauth 波动被隔离在服务端（仅首次下载失败的 302 兜底还会直连一次）
 
 ## UI 迭代记录（用户反馈）
+- 2026-07-11 反馈#38「OneDrive 开代理模式后部分视频一直重连播放不出（另一部分正常）」：
+  真因三层，核心=代理分块加速（stream.MultiReader）对"顺序整读大文件"的访问画像是
+  **每 4MB 一个新 HTTP 请求**——mkv/ts 等需转码片 event-remux 全速拉源，4GB≈千次请求、
+  持续 5~15 req/s，OneDrive/SharePoint 按请求频率限流（429/503 + Retry-After 常达数十秒），
+  旧重试仅 3 次×100ms 退避，限流窗口必然掐死整条流→ffmpeg 把断流当 EOF、remux 出
+  "列表合法但截断"的片子或 probe 直接失败→hls.js/播放器反复重试又加剧限流=「一直重连」；
+  直连 mp4 浏览器按缓冲节奏慢读、请求稀疏不易触发=「一部分正常」（按格式二分的表象）。
+  次因①换链无强制通道：分块 401/403 后 Refresh 走 drv.Link 命中 10min 缓存拿回同一条死链，
+  重连在 TTL 内持续失败；②stream 包零日志，线上静默无从诊断。修复五件套：
+  ① internal/stream/accel.go：429/503 按 Retry-After 等待后重试（**不消耗尝试次数**，
+  单块累计预算 2min、单次封顶 30s、无头缺省 2s），硬错误 3→4 次退避 100→200ms 基数；
+  分块最终失败落 `[stream]` 日志（ctx 取消不算）；
+  ② stream.ServeSingle 单连接透传 + rawProxy 按 X-Internal-Auth 分流（isInternal 从
+  downloadWriter 抽出共用）：内部读取方（ffmpeg/ffprobe 转码/探测/抽帧）整个响应只向云盘
+  发 **1 个请求**（回归 302 直连时代的温和画像），打开期 429 等待/401 换链都在首字节前，
+  开始写响应后的断流交给读取方续传；浏览器/下载仍走多线程分块加速不受影响；
+  ③ ffmpeg/ffprobe http 输入恒挂 `-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 30
+  -reconnect_on_http_error 429,5xx`（media/probe.go httpInputArgs 三处共用；本机 ffmpeg 8.1
+  行为矩阵实测：不挂时半途断流被当 EOF 静默出短片、429 起播即死；挂上自动带
+  `Range: bytes=<断点>-` 续传、429 重试后完整读完；404 不在列，删除的文件仍快速失败不空转）；
+  ④ driver.LinkRefresher 可选接口 + OneDrive.RefreshLink（删缓存条目再 Link）——fs.LinkEx
+  的 Refresh 回调优先走它，换链真正拿到新直链；
+  ⑤ OneDrive.Stat 复用直链缓存（Link 同一响应本就带 size/mtime，name=path.Base）——代理/
+  转码每次打开 /raw 都 Stat+Link，原每开必打一轮 Graph，probe+seek 连开数次放大请求量，
+  现 TTL 内零 Graph 调用。
+  回归：stream（限流恢复/ServeSingle 单请求/换链/200 全量退化）+ server
+  （TestRawProxyInternalSingleStream：内部头=1 个上游请求、普通≥3）+ onedrive
+  （RefreshLink 绕缓存/Stat 免 Graph）新单测；**server e2e TestProxyLoopbackTranscodeE2E**
+  =刁难上游（首请求 429+每段只发 60% 即掐断）→ 真 ffmpeg 经代理回环 remux 出完整 ENDLIST
+  （EXTINF 合计≥5.5s），反向禁用修复必红（`分块 0 下载失败: unexpected EOF`+probe 失败）；
+  go test ./... 全绿 + hls-check 30/30 + detect-check 3/3 + progress-check 15/15 零控制台错误。
+  杂项：转码样片目录曾被清空，已按 hls-check 清单 ffmpeg 重新生成 8 个样片 + rebuild 入索引；
+  Chrome 顶层 exe 又 EACCES，检查脚本全部 sed 换 Edge。真实 OneDrive 复测待用户线上验证
+  （本地开发库无 OD 凭据）。
 - 2026-07-11 反馈#37「挂载 TG 后看不到收藏夹里的文件」：真因=listSaved 用
   messages.search + InputMessagesFilterDocument 拉列表——该 filter 只命中「以文件发送」
   的消息（TG 客户端「文件」页签同款语义），普通发送/转发的视频、音乐、GIF 底层虽同为

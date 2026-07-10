@@ -324,6 +324,39 @@ func TestSingleThread(t *testing.T) {
 	}
 }
 
+// 云盘限流（OneDrive 429 + Retry-After）：按指示等待后重试须成功——
+// 限流窗口不能掐死整条流，否则播放器重试风暴表现为"一直重连播放不出来"。
+func TestThrottleRetryAfter(t *testing.T) {
+	const chunk = 64 << 10
+	content := pattern(3 * chunk)
+	srv := &rangeSrv{content: content}
+	srv.hook = func(w http.ResponseWriter, r *http.Request, start, end int64, try int) bool {
+		if start <= chunk && try == 1 { // 前两块首次请求一律限流
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(http.StatusTooManyRequests)
+			return true
+		}
+		return false
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	begin := time.Now()
+	mr := NewMultiReader(context.Background(), fixedProvider(ts.URL), 0, int64(len(content)), 2, chunk)
+	got := readAll(t, mr)
+	if !bytes.Equal(got, content) {
+		t.Fatal("限流重试后内容不一致")
+	}
+	if time.Since(begin) < time.Second {
+		t.Fatal("未按 Retry-After 等待即重试")
+	}
+	srv.mu.Lock()
+	defer srv.mu.Unlock()
+	if srv.tries[0] < 2 || srv.tries[chunk] < 2 {
+		t.Fatalf("被限流的块应在等待后重试: tries=%v", srv.tries)
+	}
+}
+
 func TestZeroLength(t *testing.T) {
 	mr := NewMultiReader(context.Background(), fixedProvider("http://unused"), 0, 0, 4, 64<<10)
 	b, err := io.ReadAll(mr)

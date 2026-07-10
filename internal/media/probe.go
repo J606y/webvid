@@ -65,14 +65,29 @@ type Decision struct {
 	Duration  float64 // 秒；<=0 = 未知
 }
 
+// httpInputArgs http(s) 输入的公共旗标（探测/抽帧/转码共用），本地路径输入返回 nil：
+//   - X-Internal-Auth 头：标识本进程内部回环请求，服务器豁免下载限速、改走单流透传；
+//   - reconnect 系列：流中断/限流(429/5xx)时带 Range 自动续传——没有它 ffmpeg 会把
+//     半途断流当 EOF，remux 出"合法但截断"的片子；404 等不在列，删除的文件仍快速失败。
+func httpInputArgs(input, internalToken string) []string {
+	if !strings.HasPrefix(input, "http") {
+		return nil
+	}
+	a := []string{
+		"-reconnect", "1", "-reconnect_streamed", "1",
+		"-reconnect_delay_max", "30", "-reconnect_on_http_error", "429,5xx",
+	}
+	if internalToken != "" {
+		a = append(a, "-headers", "X-Internal-Auth: "+internalToken+"\r\n")
+	}
+	return a
+}
+
 func runProbe(ctx context.Context, ffprobe, input, internalToken string) (*probeOut, error) {
 	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
 	args := []string{"-hide_banner", "-v", "error"}
-	// 云盘输入经本机 /api/raw 回环：带内部鉴权头以豁免下载限速（同 ffmpeg 转码拉流）。
-	if strings.HasPrefix(input, "http") && internalToken != "" {
-		args = append(args, "-headers", "X-Internal-Auth: "+internalToken+"\r\n")
-	}
+	args = append(args, httpInputArgs(input, internalToken)...)
 	args = append(args, "-show_streams", "-show_format", "-of", "json", input)
 	cmd := exec.CommandContext(cctx, ffprobe, args...)
 	out, err := cmd.Output()

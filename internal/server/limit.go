@@ -17,13 +17,18 @@ type limitedResponseWriter struct {
 
 func (lw *limitedResponseWriter) Write(p []byte) (int, error) { return lw.w.Write(p) }
 
-// downloadWriter 返回套了全站下载限速的响应写入器。
-// 内部回环请求（本机 ffmpeg/ffprobe 拉 /api/raw 转码/探测）带 X-Internal-Auth 头，
-// 凭此头豁免限速——不再信来源 IP：反代后所有请求 RemoteAddr 均为回环，
-// 靠 IP 判定会让真实用户的下载全部被误豁免（限速形同虚设）。
+// isInternal 判定请求来自本进程内部读取方（ffmpeg/ffprobe 拉 /api/raw 转码/探测），
+// 凭 X-Internal-Auth 头——不信来源 IP：反代后所有请求 RemoteAddr 均为回环，
+// 靠 IP 判定会让真实用户的请求被误判内部。
+func (s *Server) isInternal(c *gin.Context) bool {
+	tok := s.media.InternalToken()
+	return tok != "" &&
+		subtle.ConstantTimeCompare([]byte(c.GetHeader("X-Internal-Auth")), []byte(tok)) == 1
+}
+
+// downloadWriter 返回套了全站下载限速的响应写入器；内部回环请求豁免限速。
 func (s *Server) downloadWriter(c *gin.Context) http.ResponseWriter {
-	if tok := s.media.InternalToken(); tok != "" &&
-		subtle.ConstantTimeCompare([]byte(c.GetHeader("X-Internal-Auth")), []byte(tok)) == 1 {
+	if s.isInternal(c) {
 		return c.Writer
 	}
 	// 恒包装（Write 内部按当前速率判断）：限速值热调整对在途长流也即时生效

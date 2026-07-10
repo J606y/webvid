@@ -365,6 +365,11 @@ func (f *FS) LinkEx(ctx context.Context, u *user.User, p string) (*LinkResult, e
 		Info:  fi,
 		Accel: m.accelOpts(),
 		Refresh: func(ctx context.Context) (*driver.Link, error) {
+			// 走到换链说明旧链已确认失效：能绕过驱动缓存就绕过，
+			// 否则 TTL 内会一直拿回同一条死链
+			if lr, ok := drv.(driver.LinkRefresher); ok {
+				return lr.RefreshLink(ctx, rel)
+			}
 			return drv.Link(ctx, rel)
 		},
 	}, nil
