@@ -49,8 +49,8 @@ await page.waitForTimeout(600)
 await page.screenshot({ path: `${OUT}/15-video-detail.png` })
 console.log('shot: 15-video-detail')
 
-// 2. 立即播放 → 播放页
-await page.click(`${dlg} button:has-text("立即播放")`)
+// 2. 立即播放 → 播放页（用稳定类 .vdc-play：有续播进度时文案变「继续观看」，同 mobile-check）
+await page.click(`${dlg} .vdc-play`)
 await page.waitForURL(/\/play\//, { timeout: 5000 })
 ok('立即播放跳转播放页', true)
 await page.goBack()

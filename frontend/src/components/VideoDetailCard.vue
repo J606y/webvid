@@ -1,12 +1,15 @@
 <template>
   <!-- 视频详情二级卡片（反馈#16）：大缩略图 + 详细信息 + 立即播放 -->
   <el-dialog v-model="visible" class="vdc" width="720px" append-to-body align-center
-    :show-close="false" destroy-on-close>
+    :show-close="false" destroy-on-close :before-close="animatedClose">
     <div v-if="video" class="vdc-body">
       <div class="vdc-art">
         <div class="vdc-art-fallback"><el-icon :size="46"><VideoCamera /></el-icon></div>
+        <!-- 低清底图：列表 480 缩略图已在浏览器缓存，转场起飞瞬间就有画面；1200 高清加载后盖上 -->
+        <img class="vdc-art-lo" :key="'lo:' + video.path" :src="thumbUrl(video.path, 480)"
+          alt="" @error="hideImg" />
         <img :key="video.path" :src="thumbUrl(video.path, 1200)" @load="onArtLoad" @error="hideImg" />
-        <button class="vdc-close" @click="visible = false">
+        <button class="vdc-close" @click="animatedClose()">
           <el-icon :size="16"><Close /></el-icon>
         </button>
         <div v-if="resumePct" class="vdc-prog"><span :style="{ width: resumePct + '%' }" /></div>
@@ -51,7 +54,7 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { useRouter, onBeforeRouteLeave } from 'vue-router'
 import { Close, FolderOpened, RefreshLeft, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
 import http from '../api/http'
@@ -164,7 +167,117 @@ const durationText = computed(() => {
   return s ? formatDuration(s) : ''
 })
 
-function open(v) {
+// ---- iOS 式 hero 转场：卡片从点击的封面处放大展开、关闭缩回原位 ----
+// 全程只动 transform 与 overlay opacity（纯合成器属性，iOS WebKit 安全，见 glass.css
+// 反馈#35 教训——严禁 filter 参与动画）；EP 自带的 modal-fade/dialog-fade 在 zoomIn 里
+// 用内联 animation:none 接管（overlay 是 v-show 持久节点，内联样式常驻，此后每次
+// 开合都由这里驱动）。动画期间 .vdc-zooming 临时停掉卡片磨砂（样式见下方全局块）。
+const ZOOM_EASE = 'cubic-bezier(0.32, 0.72, 0, 1)' // iOS 卡片/Sheet 手感曲线
+let origin = null    // { el, rect }：点击来源缩略图
+let cardRect = null  // 弹窗落定矩形（开场量取，供开场中途关闭时反推）
+let zoomTimer = 0    // 开场收尾定时器，关场开始前须取消（防半路清样式）
+let closing = false
+
+const reduced = () => window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false
+
+// 以「顶边中点」为锚计算转场变换：缩放比取宽度比，这样卡片顶部 16:9 封面区
+// 恰好与来源缩略图（.art 同为 16:9）重合，信息区在展开途中从封面下方生长出来
+function originTransform(from, to) {
+  const s = Math.max(from.width / to.width, 0.01)
+  const dx = from.left + from.width / 2 - (to.left + to.width / 2)
+  const dy = from.top - to.top
+  return `translate(${dx}px, ${dy}px) scale(${s})`
+}
+
+// 来源比卡片还大（Featured 整幅横幅）时按真实矩形起飞，起始态比落定态更大、
+// 四边探出屏幕，观感像从屏幕外飞入/飞出（反馈#41 二轮）。收缩成"贴在来源中心、
+// 92% 卡片大小"的虚拟矩形——变成从横幅中心浮出/缩回的 iOS 弹出手感；
+// 普通缩略图（恒小于卡片）不受影响，仍走严丝合缝的封面重合 morph
+function normalizedOrigin(from, to) {
+  if (from.width < to.width * 0.92) return from
+  const w = to.width * 0.92
+  const h = to.height * 0.92
+  return {
+    left: from.left + (from.width - w) / 2,
+    top: from.top + (from.height - h) / 2,
+    width: w,
+    height: h,
+  }
+}
+
+function zoomIn() {
+  const dlg = document.querySelector('.el-dialog.vdc')
+  const ov = dlg?.closest('.el-overlay')
+  const ovd = dlg?.closest('.el-overlay-dialog')
+  if (!dlg || !ov) return
+  ov.style.animation = 'none'
+  if (ovd) ovd.style.animation = 'none'
+  ov.style.transition = 'none'
+  ov.style.opacity = '0'
+  const from = origin?.rect
+  if (!from || reduced()) { // 无来源矩形 / 系统偏好减少动态：退化为整层快速淡入
+    void ov.offsetWidth
+    ov.style.transition = 'opacity 0.2s ease'
+    ov.style.opacity = ''
+    zoomTimer = setTimeout(() => { ov.style.transition = '' }, 240)
+    return
+  }
+  if (ovd) ovd.style.overflow = 'hidden' // 起飞姿态可能探出视口底部，别闪滚动条
+  cardRect = dlg.getBoundingClientRect()
+  dlg.classList.add('vdc-zooming')
+  dlg.style.transformOrigin = '50% 0'
+  dlg.style.transition = 'none'
+  dlg.style.transform = originTransform(normalizedOrigin(from, cardRect), cardRect)
+  void ov.offsetWidth // 起始态强制落地，随后的改动才走 transition
+  ov.style.transition = 'opacity 0.22s ease'
+  ov.style.opacity = ''
+  dlg.style.transition = `transform 0.42s ${ZOOM_EASE}`
+  dlg.style.transform = ''
+  zoomTimer = setTimeout(() => {
+    dlg.classList.remove('vdc-zooming')
+    dlg.style.transition = ''; dlg.style.transform = ''; dlg.style.transformOrigin = ''
+    ov.style.transition = ''
+    if (ovd) ovd.style.overflow = ''
+  }, 480)
+}
+
+// 关闭转场（el-dialog before-close：ESC/点遮罩，及卡片右上关闭钮共用）：
+// 卡片缩回来源缩略图处、遮罩磨砂稍滞后淡出，结束才真正关弹窗
+function animatedClose(done = () => { visible.value = false }) {
+  if (closing) return
+  const dlg = document.querySelector('.el-dialog.vdc')
+  const ov = dlg?.closest('.el-overlay')
+  const ovd = dlg?.closest('.el-overlay-dialog')
+  const to = origin?.el?.isConnected ? origin.el.getBoundingClientRect() : origin?.rect
+  if (!dlg || !ov || !to || reduced()) { done(); return }
+  // 开场动画进行中被关：布局矩形取开场量好的 cardRect（此刻 gBCR 含中途 transform 不可用）
+  const from = dlg.style.transform ? cardRect : dlg.getBoundingClientRect()
+  if (!from) { done(); return }
+  closing = true
+  clearTimeout(zoomTimer)
+  if (ovd) ovd.style.overflow = 'hidden'
+  dlg.classList.add('vdc-zooming')
+  dlg.style.transformOrigin = '50% 0'
+  dlg.style.transition = `transform 0.34s ${ZOOM_EASE}, background 0.2s ease`
+  dlg.style.transform = originTransform(normalizedOrigin(to, from), from)
+  ov.style.transition = 'opacity 0.24s ease 0.1s'
+  ov.style.opacity = '0'
+  setTimeout(() => {
+    ov.style.transition = '' // 先清 transition 再 done()：EP 的 leave 立即完成，节点马上卸载
+    done()
+    dlg.classList.remove('vdc-zooming')
+    dlg.style.transition = ''; dlg.style.transform = ''; dlg.style.transformOrigin = ''
+    if (ovd) ovd.style.overflow = ''
+    closing = false
+    // ov.opacity 留在 0（清掉会闪回不透明），下次 zoomIn 以 0 起步淡入
+  }, 360)
+}
+
+function open(v, originEl = null) {
+  clearTimeout(zoomTimer)
+  closing = false
+  cardRect = null
+  origin = originEl ? { el: originEl, rect: originEl.getBoundingClientRect() } : null
   video.value = v
   visible.value = true
   info.value = null
@@ -182,6 +295,7 @@ function open(v) {
   http.get('/media/progress', { params: { path: v.path } })
     .then((d) => { if (g === seq) progress.value = { position: d?.position || 0, duration: d?.duration || 0 } })
     .catch(() => {})
+  nextTick(zoomIn) // 弹窗 DOM 就绪后、首帧上屏前摆好起飞姿态（nextTick 在 paint 之前跑完）
 }
 defineExpose({ open })
 
@@ -226,6 +340,22 @@ function goDir() {
 }
 .el-dialog.vdc .el-dialog__header { display: none; }
 .el-dialog.vdc .el-dialog__body { padding: 0; color: var(--text-main, #e8eaf2); }
+
+/* iOS 式 hero 转场态：动画期间临时停掉卡片及内部控件的磨砂——
+   iOS WebKit 对 backdrop-filter 层做缩放动画时采样区域不随 transform 走，会错位闪烁。
+   底色换近实底顶替玻璃，落定移除类后 background 过渡回半透明、磨砂恢复，肉眼无跳变 */
+.el-dialog.vdc { transition: background 0.25s ease; }
+.el-dialog.vdc.vdc-zooming {
+  will-change: transform;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+  background: rgba(17, 19, 28, 0.97);
+}
+.el-dialog.vdc.vdc-zooming .vdc-close,
+.el-dialog.vdc.vdc-zooming .el-button {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
 </style>
 
 <style scoped>
@@ -238,6 +368,10 @@ function goDir() {
   position: relative; z-index: 1;
   width: 100%; height: 100%;
   object-fit: cover; display: block;
+}
+/* 低清底图垫在高清图下（z-index 0），高清加载完自然盖住 */
+.vdc-art img.vdc-art-lo {
+  position: absolute; inset: 0; z-index: 0;
 }
 .vdc-art-fallback {
   position: absolute; inset: 0;

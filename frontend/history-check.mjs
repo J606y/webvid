@@ -28,8 +28,9 @@ await page.fill('input[placeholder="密码"]', 'admin123')
 await page.click('button:has-text("登 录")')
 await page.waitForURL(`${BASE}/library/video`)
 
-// 预置播放历史：直接上报三个本地样片（幂等，重复上报只更新时间）
-const plays = ['/本地存储/电影/星际漫游.mp4', '/本地存储/电影/暗夜迷城.mp4', '/本地存储/电影/落日之城.mp4']
+// 预置播放历史：直接上报三个本地样片（幂等，重复上报只更新时间）。
+// 文件名须是 files/电影/ 现存样本——旧的暗夜迷城/落日之城已不在样本集，上报 404 污染控制台
+const plays = ['/本地存储/电影/星际漫游.mp4', '/本地存储/电影/彩条动画_720p.mp4', '/本地存储/电影/分形动画_720p.mp4']
 for (const p of plays) {
   const st = await page.evaluate(async (path) => {
     const r = await fetch('/api/media/played', {

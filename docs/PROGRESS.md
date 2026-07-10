@@ -306,6 +306,48 @@ NL_ADMIN_PASSWORD=admin123 ./webvid.exe     # 或 go run .
   ORB/tempauth 波动被隔离在服务端（仅首次下载失败的 302 兜底还会直连一次）
 
 ## UI 迭代记录（用户反馈）
+- 2026-07-11 反馈#41「视频库点视频弹出的二级页面加 iOS 那种从哪来回哪去的动画」
+  （#39=存储密钥明文回显 f625d6c、#40=文件页目录点击反馈 3bb8e8a，均另一会话）：
+  VideoDetailCard 加 hero 转场。LibraryVideo 四处 openDetail 传 $event，来源矩形取点击卡
+  的 16:9 封面框 .art（Featured 横幅取整幅）；开场在 open() 的 nextTick（首帧 paint 前）
+  用内联 animation:none 接管 EP 的 modal-fade/dialog-fade（overlay 是 v-show 持久节点，
+  内联样式常驻，此后每次开合全由 JS 驱动），FLIP：transform-origin=顶边中点、缩放取宽度
+  比 → 卡片顶部 16:9 封面区与来源缩略图严丝合缝重合、信息区从封面下方长出，transform
+  0.42s cubic-bezier(0.32,0.72,0,1)（iOS Sheet 曲线），遮罩（含 blur(8px) 磨砂）由 JS 驱动
+  opacity 0→1 淡入；关闭（ESC/点遮罩走 :before-close(done)，右上关闭钮共用 animatedClose）
+  反向缩回来源矩形 0.34s+遮罩滞后 0.1s 淡出，360ms 收尾先清 overlay 的内联 transition 再
+  done()，EP leave 立即完成、节点马上 detached（检查脚本等的就是 detached）。iOS 安全
+  （反馈#35 教训）：全程只动 transform+overlay opacity 纯合成器属性，动画期 .vdc-zooming
+  临时停掉卡片及内部控件 backdrop-filter（WebKit 对磨砂层做缩放动画时采样区域不随
+  transform 走会错位闪烁）换近实底 rgba(17,19,28,.97)，落定移除类后 background 0.25s 过渡
+  回玻璃；prefers-reduced-motion 退化为整层快速淡入。细节：封面加 480 低清底图
+  .vdc-art-lo 垫底（列表缩略图已在浏览器缓存，起飞瞬间就有画面，1200 高清加载后盖上）；
+  开场中途被关时布局矩形用开场量好的 cardRect 反推（此刻 gBCR 含中途 transform 不可用）；
+  el-overlay-dialog 动画期 overflow:hidden 防起飞姿态探出视口闪滚动条；play/goDir/路由
+  离开仍直接关、不缩回（导航场景缩回反而拖沓）。
+  顺修三件：① Play.vue 的 path 由 computed 冻结为进页时的 ref——离开时路由先变、组件后
+  卸载，onBeforeUnmount 末次进度与迟到的 loadedmetadata 补报会拿 "/" POST /media/played
+  404（控制台噪音+末次进度实际丢失）；② detail-check/scroll-check 的立即播放按钮定位改
+  稳定类 .vdc-play（有续播进度时文案变「继续观看」失配，mobile-check 同款前科）；
+  ③ 检查脚本环境陈旧修复：scroll-check 深滚目录原写死 /test/ 深层路径（07-10 起 /test 换
+  TG 收藏夹后 404 卡死整套）改 /本地存储/电影、深滚阈值 1500→200（效力在 ±50 位置对比不在
+  绝对深度），history-check 播放历史种子换现存样本（暗夜迷城/落日之城已不在样本集，
+  上报 404）。
+  回归：新增 frontend/zoom-check.mjs 13 项（开/关均入 vdc-zooming+磨砂暂停恢复+落定样式
+  清理+overlay 二次复用+点遮罩+reduced-motion）；detail-check 15 + mobile-check 37 +
+  progress-check 15 + detect-check 3 + scroll-check 15 + history-check 12 全绿且零控制台
+  错误；转场中间帧截图 _shots/zoom-t1-early/t2-mid/t3-settled.png 确认卡片确实从点击封面
+  处长出；webvid.exe 已重编嵌新前端。
+  二轮（用户反馈「随机推荐大图弹出像从屏幕外飞进来、关闭像飞出去」）：Featured 横幅比
+  卡片还宽（1400 视口下 ratio≈1.85），按宽度比算的起飞态比落定态更大、四边探出屏幕=
+  飞入/飞出观感。修=normalizedOrigin：来源宽 ≥ 卡片 92% 时收缩成「贴在来源中心、92%
+  卡片大小」的虚拟矩形，开/关共用——横幅变成从中心浮出/缩回中心淡出的 iOS 弹出手感，
+  普通缩略图（恒小于卡片）不受影响仍严丝合缝 morph；zoom-check 增 3 项（先起 rAF 采样
+  循环再点击，记录转场期最大缩放断言 ≤1，防回归）至 16 项全绿，横幅中间帧
+  _shots/zoom-hero-t1/t2/close.png 复核。**坑：验证时 5243 上是用户自己跑的旧二进制实例
+  （taskkill 被用户拒绝勿动），zoom-check 打过去横幅断言假阴性——先
+  powershell Get-Process StartTime 对比 exe LastWriteTime 确认新旧，再 NL_PORT=5299 起
+  隔离实例 + NL_BASE 指过去验证（16/16）；用户实例需重启才吃到新二进制。**
 - 2026-07-11 反馈#38「OneDrive 开代理模式后部分视频一直重连播放不出（另一部分正常）」：
   真因三层，核心=代理分块加速（stream.MultiReader）对"顺序整读大文件"的访问画像是
   **每 4MB 一个新 HTTP 请求**——mkv/ts 等需转码片 event-remux 全速拉源，4GB≈千次请求、

@@ -80,10 +80,13 @@ await page.waitForTimeout(400)
 const y2 = await scrollY()
 const names2 = await gridNames()
 const idx2 = await visibleCardIdx()
-ok('查看全部可深滚', y2 > 1500 && idx2 >= 0, `y=${y2} idx=${idx2}`)
+// 深度阈值只要求"确实滚开了"（>200）：位置保持的效力在下方 ±50 对比，
+// 与绝对深度无关；开发库样本少时（如 /test 换 TG 收藏夹后仅 30 余项）滚不到 1500
+ok('查看全部可深滚', y2 > 200 && idx2 >= 0, `y=${y2} idx=${idx2}`)
 await page.click(`.v-grid .v-card >> nth=${idx2}`)
 await page.waitForSelector('.el-dialog.vdc', { timeout: 5000 })
-await page.click('.el-dialog.vdc button:has-text("立即播放")')
+// 稳定类 .vdc-play：有续播进度时按钮文案变「继续观看」，has-text 会失配（同 mobile-check）
+await page.click('.el-dialog.vdc .vdc-play')
 await page.waitForURL(/\/play\//, { timeout: 5000 })
 await page.waitForTimeout(800)
 ok('播放页无残留详情弹窗', !(await page.locator('.el-dialog.vdc').isVisible().catch(() => false)))
@@ -122,8 +125,10 @@ ok('文件页 body 无 infuse-mode', !(await hasInfuse()))
 
 // ---- 5. 文件页：深滚→进播放页→返回，保持滚动位置且不重拉目录 ----
 console.log('5. 文件页 深滚→播放→返回')
-// 直达一个含大量视频、能滚动的目录（列表视图表格）
-const VDIR = '/files/test/视频1/25.10/徐雅eseoa/OF订阅/V'
+// 直达一个必然存在的视频目录（列表视图表格）。旧路径写死在 /test 深层目录，
+// 07-10 起 /test 换成 Telegram 收藏夹（扁平只读）后目录 404 卡死整套检查；
+// 改用本地样本目录——文件不够滚动时下方 y5 分支会优雅跳过滚动位断言
+const VDIR = '/files/本地存储/电影'
 await page.goto(BASE + VDIR.split('/').map((s, i) => i < 2 ? s : encodeURIComponent(s)).join('/'))
 await page.waitForSelector('.el-table__row', { timeout: 15000 })
 await page.waitForTimeout(400)

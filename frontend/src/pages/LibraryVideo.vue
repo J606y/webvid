@@ -6,7 +6,7 @@
       :interval="6000" :autoplay="heroActive" arrow="hover"
       @touchstart="swipe.onTouchstart" @touchend="swipe.onTouchend">
       <el-carousel-item v-for="v in hero" :key="v.path">
-        <div class="feat-item" @click="openDetail(v)">
+        <div class="feat-item" @click="openDetail(v, $event)">
           <img :src="thumbUrl(v.path, 1200)" class="feat-img" @error="hideImg" />
           <div class="feat-mask" />
           <div class="feat-info">
@@ -58,7 +58,7 @@
       <div class="shelf-head"><h2>最近添加</h2></div>
       <div class="shelf-row">
         <div v-for="v in recent" :key="v.path" class="v-card shelf-card"
-          @click="openDetail(v)">
+          @click="openDetail(v, $event)">
           <div class="art">
             <img :src="thumbUrl(v.path, 480)" loading="lazy" @error="hideImg" />
             <div class="thumb-fallback abs"><el-icon :size="30"><VideoCamera /></el-icon></div>
@@ -84,7 +84,7 @@
       </div>
       <div class="shelf-row">
         <div v-for="v in played" :key="v.path" class="v-card shelf-card"
-          @click="openDetail(v)">
+          @click="openDetail(v, $event)">
           <div class="art">
             <img :src="thumbUrl(v.path, 480)" loading="lazy" @error="hideImg" />
             <div class="thumb-fallback abs"><el-icon :size="30"><VideoCamera /></el-icon></div>
@@ -111,7 +111,7 @@
       </div>
       <div class="v-grid">
         <div v-for="v in grid" :key="v.path" class="v-card"
-          @click="openDetail(v)">
+          @click="openDetail(v, $event)">
           <div class="art">
             <img :src="thumbUrl(v.path, 480)" loading="lazy" @error="hideImg" />
             <div class="thumb-fallback abs"><el-icon :size="30"><VideoCamera /></el-icon></div>
@@ -174,7 +174,12 @@ async function loadStatic() {
 const { grid, loaded, loading, sort, sentinel, carousel, heroActive, all, historyView, isHome, dirName, featHeight, swipe } =
   useMediaLibrary({ kind: 'video', routePath: '/library/video', historyKey: 'played', dirDefault: '视频库', historyCap: 50, loadStatic })
 
-function openDetail(v) { detail.value?.open(v) }
+// 把点击来源的缩略图元素交给详情卡，做 iOS 式「从哪来回哪去」转场：
+// 视频卡取 16:9 封面框 .art（与卡片顶部封面区形状吻合），Featured 横幅取整块
+function openDetail(v, ev) {
+  const t = ev?.currentTarget
+  detail.value?.open(v, t?.querySelector?.('.art') || t || null)
+}
 
 // pct 续播进度百分比（0 = 无进度不画条）
 function pct(v) {

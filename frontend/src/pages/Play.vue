@@ -35,7 +35,10 @@ import { fetchVideoInfo } from '../utils/videoInfo'
 import { rawUrl, hlsUrl, fromParams } from '../utils/path'
 
 const route = useRoute()
-const path = computed(() => fromParams(route.params.path))
+// path 冻结在进入播放页时的值（不跟 route 变）：离开时路由先改、组件后卸载，
+// 若用 computed，onBeforeUnmount 的末次进度和迟到的 loadedmetadata 补报会拿
+// "/" 去上报 —— /media/played 404 噪音，且真正的末次进度丢失
+const path = ref(fromParams(route.params.path))
 const name = computed(() => path.value.split('/').filter(Boolean).pop() || '')
 
 // 与后端 handler_video.go directPlayExts 一致：原生容器不必等 /video/info
