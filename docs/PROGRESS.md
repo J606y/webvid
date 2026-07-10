@@ -306,6 +306,20 @@ NL_ADMIN_PASSWORD=admin123 ./webvid.exe     # 或 go run .
   ORB/tempauth 波动被隔离在服务端（仅首次下载失败的 302 兜底还会直连一次）
 
 ## UI 迭代记录（用户反馈）
+- 2026-07-11 反馈#37「挂载 TG 后看不到收藏夹里的文件」：真因=listSaved 用
+  messages.search + InputMessagesFilterDocument 拉列表——该 filter 只命中「以文件发送」
+  的消息（TG 客户端「文件」页签同款语义），普通发送/转发的视频、音乐、GIF 底层虽同为
+  Document 却不被命中；收藏夹以转发视频为主时列表接近全空（#36 当晚索引仅入库 4 项
+  即此故——那 4 个恰是「以文件发送」的）。修（telegram.go）：改 messages.getHistory
+  (InputPeerSelf) 全量翻页 + 客户端 docOf 挑文件，转发视频（常无文件名属性）走 entryName
+  的 mime 兜底命名 file_<日期>.mp4；顺带①分页偏移改 m.GetID() 对所有消息类推进（防整页
+  服务消息误判尾页截断）②docOf 跳过贴纸（DocumentAttributeSticker，非网盘意义的文件）。
+  照片（MessageMediaPhoto 非 Document）仍不支持——要挂照片需在 TG 里「以文件发送」。
+  单测 fakeSearch→fakeHistory + 新增转发视频/贴纸/照片/服务消息用例，go test ./... 全绿；
+  e2e：NL_PORT=5299 隔离实例用库内真实会话列 /test 返回 7 个视频（修前同收藏夹只见
+  4 个「以文件发送」项），验毕 taskkill //PID 收尾。注意 List 有 2min 缓存，刚转发的
+  视频最迟 2 分钟后可见。**✅ 用户实测确认能看到文件了（07-11）**，TG 联调剩播放/复制到
+  OneDrive 实测。
 - 2026-07-10 反馈#36「TG 发送验证码后收不到」：真因=Telegram 对第三方 api_id 基本不发短信——
   账号在别处登录过时验证码走 App 内服务消息（官方账号「Telegram」/777000 的对话），坐等短信
   自然「收不到」；且旧「重新发送」只是再来一次全新 sendCode，同通道重发一遍照样收不到。

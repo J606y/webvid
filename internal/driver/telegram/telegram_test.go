@@ -235,12 +235,12 @@ func TestSourceOtherErrorPassthrough(t *testing.T) {
 
 // ---- 列表分页 ----
 
-type fakeSearch struct {
+type fakeHistory struct {
 	pages [][]tg.MessageClass
 	reqs  []int // 每次请求的 OffsetID
 }
 
-func (f *fakeSearch) MessagesSearch(_ context.Context, req *tg.MessagesSearchRequest) (tg.MessagesMessagesClass, error) {
+func (f *fakeHistory) MessagesGetHistory(_ context.Context, req *tg.MessagesGetHistoryRequest) (tg.MessagesMessagesClass, error) {
 	f.reqs = append(f.reqs, req.OffsetID)
 	i := len(f.reqs) - 1
 	if i >= len(f.pages) {
@@ -249,10 +249,21 @@ func (f *fakeSearch) MessagesSearch(_ context.Context, req *tg.MessagesSearchReq
 	return &tg.MessagesMessagesSlice{Messages: f.pages[i]}, nil
 }
 
-func msgDoc(id int, name string) *tg.Message {
+func msgMedia(id int, doc *tg.Document) *tg.Message {
 	media := &tg.MessageMediaDocument{}
-	media.SetDocument(docWith(name, "video/mp4", 0)) // 置可选字段标记位
+	media.SetDocument(doc) // 置可选字段标记位
 	return &tg.Message{ID: id, Date: 1700000000, Media: media}
+}
+
+func msgDoc(id int, name string) *tg.Message {
+	return msgMedia(id, docWith(name, "video/mp4", 0))
+}
+
+// msgVideo 普通「以视频发送/转发」的消息：无文件名属性，仅 DocumentAttributeVideo。
+func msgVideo(id int, date int64) *tg.Message {
+	d := &tg.Document{MimeType: "video/mp4", Date: int(date), Size: 42,
+		Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeVideo{}}}
+	return msgMedia(id, d)
 }
 
 func TestListSaved(t *testing.T) {
@@ -261,7 +272,7 @@ func TestListSaved(t *testing.T) {
 	for i := 0; i < pageSize; i++ {
 		page1 = append(page1, msgDoc(1000-i, fmt.Sprintf("v%d.mp4", i)))
 	}
-	f := &fakeSearch{pages: [][]tg.MessageClass{page1, {msgDoc(3, "last.mp4")}}}
+	f := &fakeHistory{pages: [][]tg.MessageClass{page1, {msgDoc(3, "last.mp4")}}}
 	items, err := listSaved(context.Background(), f)
 	if err != nil {
 		t.Fatal(err)
@@ -278,13 +289,21 @@ func TestListSaved(t *testing.T) {
 }
 
 func TestListSavedSkipsNonDocument(t *testing.T) {
-	f := &fakeSearch{pages: [][]tg.MessageClass{{
+	sticker := &tg.Document{MimeType: "image/webp", Date: 1, Size: 1,
+		Attributes: []tg.DocumentAttributeClass{&tg.DocumentAttributeSticker{}}}
+	f := &fakeHistory{pages: [][]tg.MessageClass{{
 		msgDoc(10, "a.mp4"),
-		&tg.Message{ID: 9, Date: 1}, // 无媒体
-		&tg.MessageService{ID: 8},   // 服务消息
+		msgVideo(9, time.Date(2026, 7, 10, 0, 0, 0, 0, time.UTC).Unix()), // 「以视频发送」也必须列出（#37 回归）
+		&tg.Message{ID: 8, Date: 1},                                 // 无媒体（纯文本）
+		&tg.Message{ID: 7, Date: 1, Media: &tg.MessageMediaPhoto{}}, // 照片（非 Document）
+		msgMedia(6, sticker),                                        // 贴纸
+		&tg.MessageService{ID: 5},                                   // 服务消息
 	}}}
 	items, err := listSaved(context.Background(), f)
-	if err != nil || len(items) != 1 || items[0].Name != "10_a.mp4" {
+	if err != nil || len(items) != 2 {
 		t.Fatalf("got %v, %v", items, err)
+	}
+	if items[0].Name != "10_a.mp4" || items[1].Name != "9_file_20260710.mp4" {
+		t.Fatalf("条目 %q / %q", items[0].Name, items[1].Name)
 	}
 }

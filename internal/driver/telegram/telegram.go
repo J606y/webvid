@@ -206,21 +206,23 @@ func (d *Telegram) message(ctx context.Context, id int) (*tg.Message, *tg.Docume
 
 // ---- 收藏夹列表 ----
 
-// searcher List 依赖的最小 API 面（单测注入假实现）。
-type searcher interface {
-	MessagesSearch(ctx context.Context, request *tg.MessagesSearchRequest) (tg.MessagesMessagesClass, error)
+// history List 依赖的最小 API 面（单测注入假实现）。
+type history interface {
+	MessagesGetHistory(ctx context.Context, request *tg.MessagesGetHistoryRequest) (tg.MessagesMessagesClass, error)
 }
 
 const pageSize = 100
 
 // listSaved 分页拉全收藏夹的文件消息（服务端按新→旧返回）。
-func listSaved(ctx context.Context, api searcher) ([]model.FileInfo, error) {
+// 必须全量翻历史在客户端挑文件，不能用 messages.search 的 InputMessagesFilterDocument：
+// 该 filter 只命中「以文件发送」的消息（客户端"文件"页签），普通转发的视频/音乐/GIF
+// 虽底层同为 Document 却不被命中，收藏夹全是转发视频时列表会整个为空。
+func listSaved(ctx context.Context, api history) ([]model.FileInfo, error) {
 	var out []model.FileInfo
 	offsetID := 0
 	for {
-		r, err := api.MessagesSearch(ctx, &tg.MessagesSearchRequest{
+		r, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
 			Peer:     &tg.InputPeerSelf{},
-			Filter:   &tg.InputMessagesFilterDocument{},
 			OffsetID: offsetID,
 			Limit:    pageSize,
 		})
@@ -236,11 +238,11 @@ func listSaved(ctx context.Context, api searcher) ([]model.FileInfo, error) {
 		}
 		last := offsetID
 		for _, m := range msgs {
+			last = m.GetID() // 服务消息也推进偏移，防整页非文件时误判尾页
 			msg, ok := m.(*tg.Message)
 			if !ok {
 				continue
 			}
-			last = msg.ID
 			if doc := docOf(msg); doc != nil {
 				out = append(out, model.FileInfo{
 					Name: entryName(msg.ID, doc), Size: doc.Size,
@@ -280,6 +282,11 @@ func docOf(msg *tg.Message) *tg.Document {
 	doc, ok := dc.(*tg.Document)
 	if !ok {
 		return nil
+	}
+	for _, a := range doc.Attributes {
+		if _, ok := a.(*tg.DocumentAttributeSticker); ok {
+			return nil // 贴纸底层也是 Document，但不是网盘意义上的文件
+		}
 	}
 	return doc
 }
