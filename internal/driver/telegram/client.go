@@ -16,6 +16,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/dcs"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/transport"
 	"golang.org/x/net/proxy"
 
 	"newlist/internal/driver"
@@ -73,13 +74,20 @@ func newClient(cfg driver.Config, store *sessionStore) (*telegram.Client, error)
 		SessionStorage: store,
 		Middlewares:    []telegram.Middleware{floodwait.NewSimpleWaiter()},
 		DialTimeout:    10 * time.Second,
+		// 设备指纹伪装成 Telegram Desktop：gotd 默认 device_model=runtime.Version()
+		//（形如 "go1.26"）+ system="windows"，第三方 api_id 配脚本指纹是 Telegram
+		// 风控静默不投验证码的已知诱因（send_code 成功但官方对话永远等不来消息）。
+		Device: telegram.DeviceTDesktopWindows(),
 	}
 	if addr := strings.TrimSpace(cfg["socks5"]); addr != "" {
 		dial, err := socksDial(addr)
 		if err != nil {
 			return nil, err
 		}
-		opts.Resolver = dcs.Plain(dcs.PlainOptions{Dial: dial})
+		// 代理路径也用与 TDesktopResolver 一致的传输层（混淆 + abridged）
+		opts.Resolver = dcs.Plain(dcs.PlainOptions{Dial: dial, Protocol: transport.Abridged, Obfuscated: true})
+	} else {
+		opts.Resolver = telegram.TDesktopResolver()
 	}
 	return telegram.NewClient(apiID, apiHash, opts), nil
 }
@@ -107,6 +115,10 @@ func socksDial(addr string) (dcs.DialFunc, error) {
 
 // startupTimeout 后台连接就绪等待上限；须小于 fs.Reload 给 Init 的 30s 预算。
 const startupTimeout = 15 * time.Second
+
+// loginStartupTimeout 验证码登录（send_code）专用的握手等待上限。登录不走 fs.Reload
+// 的 30s 预算约束，给足 60s：某些出口 IP 到 Telegram DC 的 MTProto 握手较慢，15s 偏紧。
+const loginStartupTimeout = 60 * time.Second
 
 // connect 构建客户端并后台连接（bg.Connect 常驻，close 时停止）。
 func connect(cfg driver.Config, store *sessionStore) (*conn, error) {

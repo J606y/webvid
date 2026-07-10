@@ -22,32 +22,38 @@ body {
 
 a { color: inherit; text-decoration: none; }
 
-/* ---- 固定极光背景层 ---- */
+/* ---- 固定极光背景层 ----
+   ⚠️ 此处严禁使用 filter: blur()（反馈#35 iOS 弹窗卡死数秒的真凶，/debug/freeze 四轮
+   二分实锤）：任何 body 层的 fixed+overflow:auto 弹层（EP 弹窗结构）或带 backdrop-filter
+   的层出现时，iOS WebKit 会把被 filter 模糊的极光层踢出 GPU 合成路径、按 3 倍屏用 CPU
+   重新光栅化——blur(120px) × 4 个数十 vw 大圆 ≈ 主线程/合成器停摆 10~12 秒（真机实测：
+   藏掉极光后同一弹窗 <50ms；桌面/安卓 Blink 走 GPU 且缓存模糊结果故从不卡）。
+   柔光观感改由多段 radial-gradient 色阶直接画出（原本就是渐变圆 + 模糊，把色阶调软、
+   尺寸放大即视觉等效），光栅化成本忽略不计，玻璃磨砂（backdrop-filter）不受影响可继续用。 */
 .aurora { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
 .aurora span {
   position: absolute;
   border-radius: 50%;
-  filter: blur(120px);
   opacity: 0.5;
   animation: aurora-drift 30s ease-in-out infinite alternate;
 }
 .aurora span:nth-child(1) {
-  width: 62vw; height: 62vw; left: -18vw; top: -22vh;
-  background: radial-gradient(circle, rgba(70, 100, 255, 0.55), transparent 70%);
+  width: 76vw; height: 76vw; left: -25vw; top: -28vh;
+  background: radial-gradient(circle, rgba(70, 100, 255, 0.5) 0%, rgba(70, 100, 255, 0.25) 34%, rgba(70, 100, 255, 0.08) 56%, transparent 74%);
 }
 .aurora span:nth-child(2) {
-  width: 50vw; height: 50vw; right: -12vw; top: 8vh;
-  background: radial-gradient(circle, rgba(150, 70, 255, 0.42), transparent 70%);
+  width: 62vw; height: 62vw; right: -18vw; top: 5vh;
+  background: radial-gradient(circle, rgba(150, 70, 255, 0.38) 0%, rgba(150, 70, 255, 0.19) 34%, rgba(150, 70, 255, 0.06) 56%, transparent 74%);
   animation-delay: -8s;
 }
 .aurora span:nth-child(3) {
-  width: 56vw; height: 56vw; left: 18vw; bottom: -28vh;
-  background: radial-gradient(circle, rgba(0, 185, 190, 0.35), transparent 70%);
+  width: 68vw; height: 68vw; left: 14vw; bottom: -34vh;
+  background: radial-gradient(circle, rgba(0, 185, 190, 0.32) 0%, rgba(0, 185, 190, 0.16) 34%, rgba(0, 185, 190, 0.05) 56%, transparent 74%);
   animation-delay: -16s;
 }
 .aurora span:nth-child(4) {
-  width: 38vw; height: 38vw; right: 12vw; bottom: 2vh;
-  background: radial-gradient(circle, rgba(255, 95, 165, 0.3), transparent 70%);
+  width: 48vw; height: 48vw; right: 9vw; bottom: 0;
+  background: radial-gradient(circle, rgba(255, 95, 165, 0.27) 0%, rgba(255, 95, 165, 0.14) 34%, rgba(255, 95, 165, 0.045) 56%, transparent 74%);
   animation-delay: -24s;
 }
 @keyframes aurora-drift {

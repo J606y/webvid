@@ -35,16 +35,18 @@ func (s *Server) tgStorageCfg(c *gin.Context) (int64, driver.Config, bool) {
 }
 
 // POST /api/admin/telegram/:id/send_code —— 向配置的手机号发送登录验证码。
+// 返回验证码实际投递通道（App 内消息/短信/电话），重复调用会切换通道。
 func (s *Server) tgSendCode(c *gin.Context) {
 	id, cfg, ok := s.tgStorageCfg(c)
 	if !ok {
 		return
 	}
-	if err := telegram.Logins.SendCode(c.Request.Context(), id, cfg); err != nil {
+	info, err := telegram.Logins.SendCode(c.Request.Context(), id, cfg)
+	if err != nil {
 		Fail(c, 502, err.Error())
 		return
 	}
-	OK(c, nil)
+	OK(c, info)
 }
 
 // POST /api/admin/telegram/:id/sign_in {code, password?}

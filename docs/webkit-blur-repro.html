@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WebKit repro: multi-second main-thread stall when overlay opens over large blurred fixed layers</title>
+<style>
+  body { margin: 0; background: #0a0a12; color: #e9e9f2; font-family: -apple-system, system-ui, sans-serif; }
+  main { position: relative; z-index: 1; max-width: 640px; padding: 24px; }
+  h2 { font-size: 18px; }
+
+  /* Decorative background: 4 large fixed circles with filter: blur(120px),
+     transform-animated (slow drift). Common "aurora / glassmorphism" pattern. */
+  .aurora { position: fixed; inset: 0; z-index: -1; overflow: hidden; pointer-events: none; }
+  .aurora span {
+    position: absolute; border-radius: 50%;
+    filter: blur(120px); opacity: 0.5;
+    animation: drift 30s ease-in-out infinite alternate;
+  }
+  .aurora span:nth-child(1) { width: 62vw; height: 62vw; left: -18vw; top: -22vh;
+    background: radial-gradient(circle, rgba(70, 100, 255, 0.55), transparent 70%); }
+  .aurora span:nth-child(2) { width: 50vw; height: 50vw; right: -12vw; top: 8vh;
+    background: radial-gradient(circle, rgba(150, 70, 255, 0.42), transparent 70%); animation-delay: -8s; }
+  .aurora span:nth-child(3) { width: 56vw; height: 56vw; left: 18vw; bottom: -28vh;
+    background: radial-gradient(circle, rgba(0, 185, 190, 0.35), transparent 70%); animation-delay: -16s; }
+  .aurora span:nth-child(4) { width: 38vw; height: 38vw; right: 12vw; bottom: 2vh;
+    background: radial-gradient(circle, rgba(255, 95, 165, 0.3), transparent 70%); animation-delay: -24s; }
+  @keyframes drift { from { transform: translate(0, 0) scale(1); } to { transform: translate(6vw, -5vh) scale(1.18); } }
+  body.hide-bg .aurora { display: none; }
+
+  /* Compositor liveness indicator: transform keyframe animation keeps running on the
+     compositor while the main thread is blocked; if it freezes too, rendering stalled. */
+  .spinner { display: inline-block; vertical-align: middle; width: 26px; height: 26px;
+    border-radius: 6px; background: linear-gradient(135deg, #7aa2ff, #b07aff);
+    animation: rot 1.2s linear infinite; }
+  @keyframes rot { to { transform: rotate(360deg); } }
+
+  button { display: block; width: 100%; margin: 8px 0; padding: 12px 16px; font-size: 15px; }
+  #log { font: 13px/1.6 monospace; white-space: pre-wrap; background: rgba(255, 255, 255, 0.06);
+    padding: 12px; border-radius: 8px; min-height: 80px; }
+
+  /* Overlay mimicking a typical dialog-library structure (e.g. Element Plus el-dialog):
+     full-viewport fixed mask with overflow:auto, containing a nested fixed wrapper
+     that also has overflow:auto, appended as a direct child of <body>. */
+  .overlay { position: fixed; inset: 0; z-index: 100; overflow: auto; background: rgba(6, 6, 12, 0.5); }
+  .overlay .wrap { position: fixed; inset: 0; overflow: auto;
+    display: flex; align-items: center; justify-content: center; }
+  .panel { width: 320px; padding: 36px 20px; text-align: center;
+    background: rgba(24, 26, 44, 0.94); border: 1px solid rgba(255, 255, 255, 0.14); border-radius: 16px; }
+  /* Variant B: no overflow:auto anywhere, trigger is backdrop-filter on the mask instead */
+  .overlay.bf { overflow: visible; backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  .overlay.bf .wrap { overflow: visible; }
+</style>
+</head>
+<body>
+<div class="aurora"><span></span><span></span><span></span><span></span></div>
+<main>
+  <h2>Opening an overlay over large blurred fixed layers stalls the page for ~10 s (iOS only)</h2>
+  <p>Compositor indicator (keeps spinning if only the main thread is blocked): <span class="spinner"></span></p>
+  <button onclick="run('A: nested fixed + overflow:auto overlay')">A — Open overlay (nested fixed + overflow:auto, no backdrop-filter)</button>
+  <button onclick="run('B: backdrop-filter overlay', true)">B — Open overlay (backdrop-filter: blur(8px), no overflow:auto)</button>
+  <button onclick="toggleBg()">C — Toggle the blurred background layers (control)</button>
+  <div id="log">Tap A or B. For 4 s after the tap the page records the longest rAF
+frame gap ≈ how long the main thread was blocked. The overlay
+auto-closes after 3 s.
+
+Expected: overlay opens instantly (gap &lt; 100 ms) — as it does in
+Chrome / Edge / Firefox on desktop and Android.
+Actual on iOS: multi-second stall. Hide the background with C and
+the same overlays open instantly.
+</div>
+</main>
+<script>
+  var logEl = document.getElementById('log')
+  function log(s) { logEl.textContent += '\n' + s }
+  function toggleBg() {
+    document.body.classList.toggle('hide-bg')
+    log('blurred background layers: ' + (document.body.classList.contains('hide-bg') ? 'HIDDEN' : 'shown'))
+  }
+  var overlay = null
+  function run(label, backdrop) {
+    if (overlay) return
+    var last = performance.now(), worst = 0, stop = false
+    function tick(now) { var gap = now - last; last = now; if (gap > worst) worst = gap; if (!stop) requestAnimationFrame(tick) }
+    requestAnimationFrame(tick)
+    overlay = document.createElement('div')
+    overlay.className = 'overlay' + (backdrop ? ' bf' : '')
+    overlay.innerHTML = '<div class="wrap"><div class="panel">overlay open (auto-closes in 3 s)</div></div>'
+    document.body.appendChild(overlay)
+    setTimeout(function () { overlay.remove(); overlay = null }, 3000)
+    setTimeout(function () {
+      stop = true
+      log(label + (document.body.classList.contains('hide-bg') ? ' [bg hidden]' : ' [bg shown]') +
+        ' -> longest main-thread stall: ' + Math.round(worst) + ' ms')
+    }, 4000)
+  }
+</script>
+</body>
+</html>

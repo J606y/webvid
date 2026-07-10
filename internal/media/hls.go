@@ -110,6 +110,46 @@ func encodePath(p string) string {
 	return strings.Join(segs, "/")
 }
 
+// FrameJPEG 抽取视频一帧写入 out（缩放到宽 width 的 JPEG），供缩略图兜底：
+// 云盘视频驱动无自带缩略图时（如 OneDrive 对 mkv/ts 等不生成预览），thumb 经此
+// 走本地回环 /api/raw 抽帧（-ss 输入端 seek，只 Range 拉取起始附近，不整片下载）。
+func (s *Service) FrameJPEG(ctx context.Context, u *user.User, logical, out string, width int) error {
+	ff, _ := s.tools()
+	if ff == "" {
+		return ErrNoFFmpeg
+	}
+	in, err := s.input(u, logical)
+	if err != nil {
+		return err
+	}
+	tmp := out + ".vf.tmp.jpg"
+	defer os.Remove(tmp)
+	try := func(ss string) error {
+		cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+		defer cancel()
+		a := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-ss", ss}
+		// 云盘输入经回环 /api/raw：带内部鉴权头令下载限速豁免（同 ffmpegArgs）
+		if strings.HasPrefix(in, "http") && s.internalToken != "" {
+			a = append(a, "-headers", "X-Internal-Auth: "+s.internalToken+"\r\n")
+		}
+		a = append(a, "-i", in, "-frames:v", "1",
+			"-vf", fmt.Sprintf("scale=%d:-2", width), "-q:v", "5", "-y", tmp)
+		if err := exec.CommandContext(cctx, ff, a...).Run(); err != nil {
+			return err
+		}
+		if st, err := os.Stat(tmp); err != nil || st.Size() == 0 {
+			return fmt.Errorf("ffmpeg 未产出帧")
+		}
+		return nil
+	}
+	if err := try("3"); err != nil {
+		if err := try("0"); err != nil { // 短视频/seek 失败回退取首帧
+			return err
+		}
+	}
+	return os.Rename(tmp, out)
+}
+
 // Decide 探测文件并给出播放决策（结果按 路径+size+mtime 内存缓存）。
 func (s *Service) Decide(ctx context.Context, u *user.User, logical string, fi model.FileInfo) (Decision, error) {
 	_, ffprobe := s.tools()

@@ -18,7 +18,7 @@
       <!-- 任务设置（线程数 + 限速，独立于站点设置） -->
       <el-tab-pane label="任务设置" name="task">
         <el-form label-width="104px" style="max-width: 520px">
-          <el-divider content-position="left">并发线程</el-divider>
+          <el-divider content-position="left" class="task-sect">并发线程</el-divider>
           <el-form-item label="复制任务线程">
             <el-input-number v-model="site.copy_workers" :min="1" :max="32" />
             <div class="dim field-help">跨存储复制/移动同时执行的任务数，其余排队；保存后立即生效</div>
@@ -32,7 +32,7 @@
             <div class="dim field-help">网页端同时上传的文件数</div>
           </el-form-item>
 
-          <el-divider content-position="left">速度限制（KB/s，0 为不限速）</el-divider>
+          <el-divider content-position="left" class="task-sect">速度限制（KB/s，0 为不限速）</el-divider>
           <el-form-item label="复制限速">
             <el-input-number v-model="site.copy_speed_kb" :min="0" :step="512" />
             <div class="dim field-help">全部复制/移动任务共享的总速率</div>
@@ -134,6 +134,9 @@
             <el-form-item label="验证码">
               <el-input v-model="tgCode" :disabled="!tgCodeSent"
                 placeholder="查看 Telegram 客户端或短信" @keyup.enter="tgSignIn" />
+              <div v-if="tgSentTo" class="tg-hint">
+                {{ tgSentTo }}<span v-if="tgResend">；收不到？点「重新发送」将改用{{ tgResend }}<span v-if="tgTimeout">（约 {{ tgTimeout }} 秒后可重发）</span></span>
+              </div>
             </el-form-item>
             <el-form-item v-if="tgNeedPwd" label="两步密码">
               <el-input v-model="tgPwd" type="password" show-password
@@ -187,10 +190,14 @@
           append-to-body>
           <el-form label-width="110px">
             <el-form-item label="用户名" required>
-              <el-input v-model="userForm.username" />
+              <el-input v-model="userForm.username" autocomplete="off" name="new-user-name" />
             </el-form-item>
             <el-form-item :label="editingUser?.id ? '重置密码' : '密码'">
+              <!-- autocomplete=new-password：管理员是在「新建/重置某用户」的密码，告诉 iOS Safari
+                   别把它当登录框去扫描/填充已存密码——否则 Safari 的自动填充会卡住主线程好几秒
+                   （安卓无此问题）。这才是「添加用户卡、添加网盘不卡」的真因，与磨砂/渲染无关。 -->
               <el-input v-model="userForm.password" type="password" show-password
+                autocomplete="new-password" name="new-user-password"
                 :placeholder="editingUser?.id ? '留空则不修改' : '留空则自动生成'" />
             </el-form-item>
             <el-form-item label="角色">
@@ -367,11 +374,13 @@ async function deleteStorage(row) {
 }
 
 // ---- Telegram 验证码登录 ----
-// 有 telegram 存储时操作列多一个登录按钮，加宽避免 el-table 内部横溢出（#29 教训）
+// 有 telegram 存储时操作列多一个登录按钮，加宽避免 el-table 内部横溢出（#29 教训）。
+// 移动端 390px 屏表格可用仅 ~336：列合计 88+82+64+操作 须 ≤336，操作列只能给 96
+//（实测 4 个 link 图标钮各 18px + 2px 间距×3 + 单元格内边距 16 = 94，3 钮更松），
+// 原 hasTg 124 会把合计顶到 358 触发内部横向溢出（mobile-check「存储表格无内部横向溢出」）。
 const storageOpsWidth = computed(() => {
-  const hasTg = storages.value.some((s) => s.driver === 'telegram')
-  if (isMobile.value) return hasTg ? 124 : 100
-  return hasTg ? 200 : 170
+  if (isMobile.value) return 96
+  return storages.value.some((s) => s.driver === 'telegram') ? 200 : 170
 })
 const tgDlg = ref(false)
 const tgStorage = ref(null)
@@ -381,6 +390,9 @@ const tgNeedPwd = ref(false)
 const tgCodeSent = ref(false)
 const tgSending = ref(false)
 const tgSigning = ref(false)
+const tgSentTo = ref('') // 验证码实际发到哪（App 内消息/短信/电话），后端透传
+const tgResend = ref('')
+const tgTimeout = ref(0)
 
 function openTgLogin(row) {
   tgStorage.value = row
@@ -388,14 +400,22 @@ function openTgLogin(row) {
   tgPwd.value = ''
   tgNeedPwd.value = false
   tgCodeSent.value = false
+  tgSentTo.value = ''
+  tgResend.value = ''
+  tgTimeout.value = 0
   tgDlg.value = true
 }
 async function tgSendCode() {
   tgSending.value = true
   try {
-    await http.post(`/admin/telegram/${tgStorage.value.id}/send_code`)
+    // 首次=发码；再点「重新发送」后端走 resendCode 切换投递通道（App→短信→电话）。
+    // 后端给 MTProto 握手 60s 预算，请求超时须大于它，否则前端先断连带崩后端 ctx
+    const r = await http.post(`/admin/telegram/${tgStorage.value.id}/send_code`, null, { timeout: 90000 })
     tgCodeSent.value = true
-    ElMessage.success('验证码已发送，优先查看 Telegram 客户端消息')
+    tgSentTo.value = r?.sent_to || '验证码已发送，优先查看 Telegram 客户端消息'
+    tgResend.value = r?.resend || ''
+    tgTimeout.value = r?.timeout || 0
+    ElMessage.success(tgSentTo.value)
   } finally {
     tgSending.value = false
   }
@@ -531,7 +551,17 @@ onBeforeUnmount(() => {
 .version-tip { margin-top: auto; padding-top: 14px; text-align: center; font-size: 12px; }
 .pane-head { display: flex; justify-content: flex-end; margin-bottom: 10px; }
 .field-help { font-size: 12px; line-height: 1.5; margin-top: 3px; }
+/* 任务设置分节标题：EP el-divider 的文字底片默认取 --el-bg-color（暗色玻璃主题下是
+   深蓝黑块），看起来像给标题加了黑底。去掉底片与横线，只留一行左对齐小标题。 */
+:deep(.el-divider.task-sect) { border-top-color: transparent; margin: 22px 0 8px; }
+:deep(.el-divider.task-sect .el-divider__text) {
+  background: transparent;
+  padding-left: 0;
+  color: var(--el-text-color-primary);
+  font-weight: 600;
+}
 .tg-send { margin-left: 12px; }
+.tg-hint { width: 100%; font-size: 12px; color: var(--el-text-color-secondary); line-height: 1.6; margin-top: 4px; }
 .index-pane { display: flex; gap: 16px; flex-wrap: wrap; }
 .index-card {
   padding: 24px; min-width: 380px; flex: 1 1 380px; max-width: 460px;
@@ -552,5 +582,11 @@ onBeforeUnmount(() => {
   :deep(.el-table .cell) { padding: 0 8px; }
   /* 操作列图标按钮紧凑排布（默认相邻按钮间距 12px 过宽） */
   :deep(.el-table td .el-button + .el-button) { margin-left: 2px; }
+  /* 状态列长文案（如 telegram「未登录：请点击钥匙按钮登录」）不许撑出单元格：
+     tag 钉在列宽内、文字超出省略；完整文案桌面端可见 */
+  :deep(.el-table .el-tag) { max-width: 100%; }
+  :deep(.el-table .el-tag .el-tag__content) {
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
 }
 </style>

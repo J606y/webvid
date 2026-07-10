@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,10 @@ import (
 // 不能拿 mtime 进键），同路径换内容只能靠过期刷新兜底；刷新失败沿用旧文件。
 const remoteTTL = 30 * 24 * time.Hour
 
+// vframeWidth 远端视频兜底封面的生成宽度：一次生成、各请求尺寸共用（免每尺寸都网络抽帧）；
+// 640 足够卡片/网格显示，hero 大图轻微放大也可接受。
+const vframeWidth = 640
+
 type Service struct {
 	fs       *fs.FS
 	cacheDir string
@@ -44,6 +49,23 @@ type Service struct {
 
 	ffOnce sync.Once
 	ffPath string
+
+	// videoFrame：远端视频抽帧兜底（由 media.Service 提供，见 SetVideoFramer）。
+	// 云盘视频驱动无自带缩略图时，经此走回环 /api/raw 用 ffmpeg 抽一帧。nil = 不兜底。
+	videoFrame func(ctx context.Context, u *user.User, logical, out string, width int) error
+}
+
+// SetVideoFramer 注入远端视频抽帧函数（main 在 media 建好后接线，解耦免包依赖）。
+func (s *Service) SetVideoFramer(fn func(ctx context.Context, u *user.User, logical, out string, width int) error) {
+	s.videoFrame = fn
+}
+
+// textPreviewExts 是会被云盘（OneDrive）误当源码/文本、把文件字节渲染成文本生成乱码
+// 预览缩略图的视频扩展名。目前仅 .ts（与 TypeScript 撞扩展名）——这类跳过自带缩略图。
+var textPreviewExts = map[string]bool{"ts": true}
+
+func textPreviewExt(logical string) bool {
+	return textPreviewExts[strings.ToLower(strings.TrimPrefix(filepath.Ext(logical), "."))]
 }
 
 func New(f *fs.FS, dataDir string) *Service {
@@ -87,11 +109,21 @@ func (s *Service) Get(ctx context.Context, u *user.User, logical string, width i
 	if err != nil {
 		return "", "", err
 	}
-	if t, ok := drv.(driver.Thumber); ok {
+	isVideo := model.ExtType(logical) == "video"
+	_, isLocal := drv.(driver.LocalPather)
+	// .ts 等与源码撞扩展名的视频会被 OneDrive 误当文本、生成「把文件字节渲染成文本」的
+	// 乱码预览缩略图，必须跳过自带缩略图改用 ffmpeg 抽帧（见 textPreviewExt）。
+	if t, ok := drv.(driver.Thumber); ok && !(isVideo && textPreviewExt(logical)) {
 		if url, file := s.remote(ctx, t, rel, logical); url != "" || file != "" {
 			return url, file, nil
 		}
-		// 驱动无该文件缩略图 → 继续走本地生成分支（远端盘不满足 LocalPather → 404）
+	}
+	// 远端盘视频无可信自带缩略图（OneDrive 对 flv/部分 mp4/ts 不生成或生成乱码）：
+	// 用 ffmpeg 走回环 /api/raw 抽帧兜底。本地盘视频走下方本地生成分支（能读绝对路径）。
+	if isVideo && !isLocal {
+		if file := s.remoteVideoFrame(ctx, u, logical); file != "" {
+			return "", file, nil
+		}
 	}
 	lp, ok := drv.(driver.LocalPather)
 	if !ok {
@@ -212,6 +244,60 @@ func (s *Service) remote(ctx context.Context, t driver.Thumber, rel, logical str
 		return url, ""
 	}
 	return "", out
+}
+
+// remoteVideoFrame 远端视频兜底封面：驱动无自带缩略图时，用 videoFrame（media 抽帧，
+// 经回环 /api/raw）生成一帧落盘。缓存/TTL/并发与 remote() 同构：键只含逻辑路径，
+// 靠 remoteTTL 过期兜底刷新；生成失败沿用旧缓存（若有）。返回本地文件路径或 ""。
+func (s *Service) remoteVideoFrame(ctx context.Context, u *user.User, logical string) string {
+	if s.videoFrame == nil {
+		return ""
+	}
+	key := cacheKey(logical+"|vframe", time.Time{}, 0, 0)
+	out := filepath.Join(s.cacheDir, key+".jpg")
+	if st, err := os.Stat(out); err == nil && time.Since(st.ModTime()) < remoteTTL {
+		return out
+	}
+
+	// singleflight：同 key 只抽一次
+	s.mu.Lock()
+	if ch, busy := s.flight[key]; busy {
+		s.mu.Unlock()
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ""
+		}
+		if _, err := os.Stat(out); err == nil {
+			return out
+		}
+		return ""
+	}
+	ch := make(chan struct{})
+	s.flight[key] = ch
+	s.mu.Unlock()
+	defer func() {
+		s.mu.Lock()
+		delete(s.flight, key)
+		s.mu.Unlock()
+		close(ch)
+	}()
+
+	// 抽帧走 ffmpeg（CPU）+ 网络拉流，占 sem 生成闸
+	select {
+	case s.sem <- struct{}{}:
+		defer func() { <-s.sem }()
+	case <-ctx.Done():
+		return ""
+	}
+	if err := s.videoFrame(ctx, u, logical, out, vframeWidth); err != nil {
+		log.Printf("[thumb] 远端视频抽帧失败 %s: %v", logical, err)
+		if _, e := os.Stat(out); e == nil {
+			return out // 刷新失败沿用旧缓存
+		}
+		return ""
+	}
+	return out
 }
 
 func download(ctx context.Context, url, out string) error {

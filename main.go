@@ -122,6 +122,8 @@ func main() {
 	}
 	th := thumb.New(f, dataDir)
 	md := media.New(f, dataDir, "http://127.0.0.1:"+port, secret, d)
+	// 云盘视频驱动无自带缩略图时，缩略图服务经此用 ffmpeg 抽帧兜底（走回环 /api/raw）
+	th.SetVideoFramer(md.FrameJPEG)
 	idx := index.New(d, f)
 	// 索引就绪后后台预载：下载/生成封面 + 探测视频源信息写入 media_info。
 	// 存储变更（含新挂载/勾选展示开关）→ Reload 重建索引 → 完成即触发本轮预载。

@@ -306,6 +306,115 @@ NL_ADMIN_PASSWORD=admin123 ./webvid.exe     # 或 go run .
   ORB/tempauth 波动被隔离在服务端（仅首次下载失败的 302 兜底还会直连一次）
 
 ## UI 迭代记录（用户反馈）
+- 2026-07-10 反馈#36「TG 发送验证码后收不到」：真因=Telegram 对第三方 api_id 基本不发短信——
+  账号在别处登录过时验证码走 App 内服务消息（官方账号「Telegram」/777000 的对话），坐等短信
+  自然「收不到」；且旧「重新发送」只是再来一次全新 sendCode，同通道重发一遍照样收不到。
+  修复（internal/driver/telegram/login.go）：
+  ① SendCode 返回 CodeSent{sent_to,resend,timeout}——把 AuthSentCode.Type 译成人话（App 内
+  消息/短信/语音电话/未接来电/邮箱/Fragment/FirebaseSMS）随 /send_code 响应透出，Admin.vue
+  弹窗验证码框下常驻 .tg-hint 显示「码发到哪了 + 收不到点重发改用 XX」；
+  ② 已有未过期登录会话时「重新发送」改走 auth.resendCode（同连接同 phone_code_hash）切换
+  投递通道 App→短信→电话，成功更新 codeHash 并续期，失败（无备选通道/码失效）拆旧会话落回
+  全新 sendCode；
+  ③ SentCodeTypeSetUpEmailRequired（TG 强制先在官方客户端设登录邮箱的账号）直接报错说明，
+  不再让用户干等一个永远不会来的码；
+  ④ send_code 前端请求单独放宽超时 90s——后端 MTProto 握手预算 60s 与 axios 全局超时 60s
+  同值，慢握手时前端会先断连、gin 的 Request.Context 跟着取消把发码带崩。
+  冒烟：隔离实例（NL_PORT=5299+临时 NL_DATA_DIR）+假 api_id 存储打 /send_code，1.5s 拿到
+  Telegram 真实 RPC 错 API_ID_INVALID 透传为 502 JSON（连接/发码/错误链路全通）；真实切通道
+  待用户真机验证（sendCode 有频控，FLOOD_WAIT 别连点）。
+  **坑：清理冒烟进程用了 `taskkill //IM webvid.exe`，按映像名把用户正跑着的 5243 实例一并
+  杀了——杀进程一律 `taskkill //PID <pid> //F`**；已用新二进制重新拉起 5243。
+  **二轮（同日晚）：用户确认查的就是官方对话（777000）但没消息**。日志实锤 19:32/19:38 两次
+  发码均成功且 `type=*tg.AuthSentCodeTypeApp, next=<nil>`——无备选通道（第三方 api_id 常态），
+  短信/电话切换根本不可用；type=App 同时证明该 +852 号确有活跃官方会话（Telegram 仅在有
+  会话时才选 App 通道）、号码格式正确、未挂代理直连可达 DC。**真凶指向 gotd 默认设备指纹**：
+  Options.Device 缺省时 initConnection 报 device_model=runtime.Version()（形如 "go1.26"）+
+  system="windows"+langpack 空——第三方 api_id 配脚本指纹是 Telegram 风控「send_code 成功但
+  静默不投递」的已知诱因。修（client.go newClient）：挂 **telegram.DeviceTDesktopWindows()**
+  （gotd 内置 tdesktop 伪装：Desktop/Windows 10/6.9.1 x64/langpack tdesktop/时区参数）；直连
+  Resolver=telegram.TDesktopResolver()（混淆+abridged 传输层同样不可分辨），socks5 路径
+  PlainOptions 补 Protocol:transport.Abridged+Obfuscated:true 对齐。另 loginTTL 5→10min
+  （App 通道投递偶迟数分钟，迟到的码仍能提交），App 通道且无备选时提示语补排查方向
+  （多账号勿看错 / 该号需仍登录在某设备 / 频繁请求被静默、隔几小时再试）。
+  **若换指纹后仍不投递的二分法**：web.telegram.org 官方登录同号——官方码能到 777000 而
+  本应用不到=第三方 api_id 被风控（等几小时冷却再试）；官方也不到=账号/设备侧问题
+  （核对多账号、设备列表里该号是否在线）。今天已发过多次码，重试前先歇一会儿防 FLOOD。
+  **✅ 真凶实锤（用户实测确认修复）**：换 tdesktop 指纹后同一 App 通道 19:51:13 发码
+  33 秒内收到码→登录成功→挂载重载→索引完成 20 条（TG 收藏 4 项入库）。此前 "go1.26"
+  指纹下同通道两次均被静默丢弃——**gotd 接 Telegram 用户账号必须设 Device 伪装**，
+  否则发码成功也收不到，此坑记死。Telegram 驱动真实联调登录环节打通。
+- 2026-07-10 反馈#35「iOS 弹窗卡顿」**真因实锤（深夜，/debug/freeze 四轮真机二分）：极光背景的
+  `filter: blur(120px)`**。机制：body 层出现 fixed+overflow:auto 弹层（EP 弹窗结构，#18 无类名
+  复刻结构也卡）或带 backdrop-filter 的层（#19）→ iOS WebKit 把被 filter 模糊的极光 4 个大圆
+  踢出 GPU 合成路径、按 3 倍屏用 CPU 重新光栅化 → 主线程/合成器停摆 10~12 秒。证据链：
+  #15 复刻 EP 类名的纯 div 卡 12049ms（EP JS 洗清）、#16 不 teleport 主线程 37ms 但画面仍僵
+  （合成器侧同一工作量）、#17 API 捕获模式抓不到任何 >100ms JS 调用（阻塞在样式/栅格化阶段）、
+  **#20/#21 藏掉极光后同样弹窗（含全套磨砂）立即流畅**。安卓 Blink 在 GPU 算模糊且缓存结果，
+  865 弱芯也不卡；iOS 全部浏览器同为 WebKit 所以都卡。**修复：极光禁用 filter，改多段
+  radial-gradient 色阶直接画柔光圆斑（尺寸放大 ~25% 补偿模糊扩散），backdrop-filter 玻璃磨砂
+  全保留不受影响**（glass.css .aurora 区块有「严禁 filter」注释）。
+  **✅ 用户 iPhone 真机复测确认修复（「还真是这个问题现在已经不卡了」）。收尾已完成**：删
+  FreezeTest.vue+临时路由、main.js 调试块整段还原（?debug/?console/?no-* 全撤）、glass.css
+  dbg 规则删除、eruda 依赖卸载；最终改动面=glass.css 极光重写(+16/-10)+Admin.vue（autocomplete
+  语义保留+存储表收窄）+Files.vue（导航竞态，与本反馈无关）；重编三平台二进制
+  （webvid.exe / webvid-linux-amd64 / arm64，-trimpath -s -w 同 release 流水线）；回归
+  mobile-check 37/37 + detail-check 15/15 全绿（**坑：Chrome 自动更新弄丢顶层 chrome.exe
+  致 EACCES，sed 把检查脚本 executablePath 换成 Edge msedge.exe 即可跑**）。诊断过程记录：
+  **⚠️ 状态更新（同日晚些）：用户 iPhone 真机复测「还是卡死几秒」→ 下述两个"治疗"全部无效已还原**
+  （glass.css 的 iOS @supports 块与极光暂停、VideoDetailCard 的 decoding=async+取色延迟）。
+  用户明确：磨砂/渲染方向此前已用 ?no-blur 实测排除（顶栏/底栏 .glass 也在开关覆盖内，排除可信）；
+  `autocomplete="new-password"` 保留在树上但**未解决**编辑用户卡顿。两个卡顿的真因至今未定。
+  **改走隔离诊断路线：新增临时页 `/debug/freeze`（FreezeTest.vue + router 临时路由，定位后整页删）**——
+  把"打开一个弹窗"拆成 9 个独立变量逐项自动测量（点击后 3.6s 内最长 RAF 帧间隔/累计阻塞/首帧延迟）：
+  #0 空白基线、#1 纯 div 遮罩（无 EP）、#2 空 el-dialog、#3 空 el-dialog lock-scroll=false、
+  #4 +文本框、#5 +密码框(new-password,同编辑用户现状)、#6 +伪密码框(type=text+-webkit-text-security:disc,
+  绕钥匙串的候选方案)、#7 +真实 1200 大图、#8 真实 VideoDetailCard；页顶常驻合成器指示方块
+  （CSS transform 动画走合成器：卡顿时方块仍转=主线程卡[JS/自动填充/布局]，方块也停=渲染管线卡）+
+  「复制全部结果」输出全部数字+UA+standalone。**等用户 iPhone 报数后按矩阵定位**：
+  #2 大→EP 弹窗机制；#2 大#3 小→body 滚动锁整页重排；#5 大#4 小→密码框钥匙串扫描（#6 小则伪装方案可行）；
+  #7 大→图片解码；#8 独大→详情卡特有逻辑；全都小但真实页面卡→与底下页面内容相关（库页海报墙）。
+  chromium 冒烟：9 行全部出数（6-36ms 量级）、报告生成、零控制台错误，_shots/freeze-test-page.png。
+  本条目下方原「真因分析/修复」段**保留作过程记录**，结论不成立勿再照抄：
+  - ① 后台「编辑用户」卡 = **iOS Safari 密码自动填充扫描**：弹窗内 type=password 无 autocomplete
+    提示 → iOS 当登录框去扫钥匙串/备填充建议，主线程被按住数秒。真机 A/B 证据：添加用户卡、
+    添加网盘不卡，两窗同套玻璃样式 → 与磨砂/渲染无关。修：密码框 `autocomplete="new-password"`
+    + name，用户名 `autocomplete="off"`（Admin.vue，上次会话已验并落地，本次保留）。
+  - ② 视频详情卡卡 = **iOS WebKit 磨砂栅化风暴**：打开弹窗一次性栅化遮罩 blur(8px)（采样整页，
+    视频库页几十张海报+轮播最重）+ 弹窗 blur(28px) + 内部按钮/标签各自磨砂，入场缩放期逐帧重算；
+    且极光 blur(120px) 漂移动画令磨砂结果无法缓存 → 弹窗停留期间持续重栅化。修（本次重写）：
+    - glass.css 末尾 **`@supports (-webkit-touch-callout: none)` iOS 专属块**（该属性 iOS/iPadOS
+      WebKit 独有，iOS 上全部浏览器同内核都命中；**不能按屏宽一刀切——安卓同宽不卡，砍它的磨砂
+      纯属误伤，上一版 ≤768px 方案因此被用户要求还原重做**）：模态层级（.el-overlay/dialog/drawer/
+      message-box/loading-mask/popper/message/button/tag/carousel__arrow/.vdc-close）
+      backdrop-filter:none!important，--el-bg-color 0.94 / --el-bg-color-overlay 0.96 实底顶上、
+      --el-mask-color 0.72 加深补偿、.vdc 实底 rgba(20,20,30,.95)；页面级玻璃（顶栏/面板）不动。
+    - **极光漂移在任何模态打开时暂停**：`body.el-popup-parent--hidden .aurora span
+      { animation-play-state: paused }`（EP 锁滚动时挂的类）；背景被遮罩压暗、暂停肉眼不可辨，
+      桌面 Safari 的磨砂弹窗也顺带受益。
+    - VideoDetailCard.vue：封面 img 加 `decoding="async"`；莫奈取色挪 requestIdleCallback
+      （软件 canvas 的 drawImage/getImageData 强制同步解码 1200px 封面，原在 load 事件里做正撞
+      入场动画帧预算；旧 Safari 无 rIC 退化 setTimeout 120ms）。onArtLoad 拆成投递 + extractTint。
+  - 顺修 mobile-check 唯一红「存储表格无内部横向溢出」：telegram 存储行让移动端存储表溢出——
+    ①有 🔑 钮时 ops 列 124 令列合计 358 > 可用 336（实测 4 个 link 图标钮各 18px + 2px 间距×3 +
+    单元格内边距 16 = 94，`storageOpsWidth` 移动端一律 96）；②「未登录：请点击钥匙按钮登录」长
+    状态 tag 实宽 172 撑出 64px 列 → Admin.vue 移动端 :deep 给 `.el-table .el-tag` max-width:100%
+    + `__content` min-width:0+ellipsis（完整文案桌面端看）。
+  - **诊断器保留**（用户真机复测用，确认修好后下个会话删）：`?debug` 卡顿计（pointerdown 清零、
+    RAF 帧间隔取最大≈本次点击卡了多久）+ `?no-blur/?no-shadow/?no-anim/?no-radius` 二分开关
+    （main.js + glass.css；本次补了缺失的 no-radius 规则，原来是空操作会误导二分）。
+  - 回归：mobile-check **37/37** + detail-check **15/15**（含「封面莫奈取色染上玻璃」证明延迟取色
+    不破断言）零控制台 JS 错误（detail-check 一个 thumb 资源 404 已知良性）；npm run build +
+    go build 重嵌 webvid.exe 与 webvid-linux-amd64/arm64（`-trimpath -ldflags "-s -w"` 同 release
+    流水线）。**部署注意：上次会话的 linux 二进制(02:46)比 glass.css 终稿(02:58)旧，用户若测的是它
+    等于没测到修复——本次三产物均为终稿后编译。**
+  - 环境坑（本次踩）：①开发库 admin 密码被上次 reset-password e2e 改掉 →
+    `./webvid.exe reset-password admin123` 恢复；②开发库是 07-09 重建的精简库，files/ 无照片、
+    无「电影」目录 → 补 files/电影/（5 样片副本）+ files/照片/（6 张 _shots 截图副本）+
+    POST /api/admin/index/rebuild，photos/detail 检查环境已恢复；③/test telegram 存储「未登录」
+    初始化失败属预期（等用户手机验证码联调）。
+  - **待用户 iPhone 真机复测**：部署新二进制后测两处弹窗。若仍卡：带 `?debug` 读卡顿计毫秒数，
+    再逐个叠 `&no-shadow`/`&no-anim` 二分；若「编辑用户」独卡 → 备选方案=密码框改点按后再渲染。
 - 2026-07-09 反馈#34「传输任务监控 + 只清已成功、单条删除」：#32 的传输任务抽屉本已完整
   （TasksDrawer.vue：1.5s 轮询 /api/tasks，逐条显示状态标签/进度条/已传·总·速度·当前文件、
   失败显错误、running/pending 可取消、error/canceled 可重试，工具栏🚚按钮带活动数角标）。

@@ -222,18 +222,30 @@ const sorted = computed(() => {
   return arr
 })
 
+// navigating：文件夹导航在途标志。点击文件夹后到新列表加载完成前，表格里仍是旧目录，
+// 此时再次点击（响应慢时的手快/双击）会以已经前进的 current 为基准拼出更深的重复路径
+// （/A/B/B），后端 driver.ErrNotFound 弹「对象不存在」。加载完成前拦住一切点击即可。
+let navigating = false
+// loadSeq：加载序号。面包屑/后退等也会触发 load，多个请求在途时按序号丢弃过期（乱序返回）响应，
+// 避免旧目录内容盖掉新目录。
+let loadSeq = 0
+
 async function load() {
+  const seq = ++loadSeq
   loaded.value = false
   selection.value = []
+  const path = current.value
   try {
-    const d = await http.get('/fs/list', { params: { path: current.value } })
+    const d = await http.get('/fs/list', { params: { path } })
+    if (seq !== loadSeq) return // 有更新的加载在途，丢弃过期结果
     items.value = d.items || []
     caps.value = { write: !!d.write, upload: !!d.upload }
   } catch {
+    if (seq !== loadSeq) return
     items.value = []
     caps.value = { write: false, upload: false }
   } finally {
-    loaded.value = true
+    if (seq === loadSeq) { loaded.value = true; navigating = false }
   }
 }
 
@@ -246,8 +258,14 @@ function hasThumb(row) {
 }
 
 function dispatch(row) {
+  if (navigating) return // 上一次文件夹导航尚未加载完成，忽略点击，避免基于旧列表拼出错误深层路径
   const p = fullPath(row)
-  if (row.is_dir) return router.push(filesRoute(p))
+  if (row.is_dir) {
+    navigating = true
+    // 导航若被中止（如重复导航到当前路径）不会触发 load 复位，这里兜底复位
+    router.push(filesRoute(p)).then((failure) => { if (failure) navigating = false })
+    return
+  }
   switch (extType(row.name)) {
     case 'image': {
       const imgs = sorted.value.filter((x) => !x.is_dir && extType(x.name) === 'image')
