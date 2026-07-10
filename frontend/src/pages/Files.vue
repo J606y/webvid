@@ -77,8 +77,11 @@
               @click.stop="download(row)" />
           </template>
         </el-table-column>
+        <template #empty>
+          <span v-if="!loaded" class="dim loading-tip"><el-icon class="is-loading"><Loading /></el-icon>加载中…</span>
+          <span v-else class="dim">空目录</span>
+        </template>
       </el-table>
-      <div v-if="!items.length && loaded" class="dim empty-tip">空目录</div>
     </div>
 
     <!-- 网格视图 -->
@@ -95,7 +98,8 @@
         </div>
         <div class="g-name" :title="row.name">{{ row.name }}</div>
       </div>
-      <div v-if="!items.length && loaded" class="dim empty-tip">空目录</div>
+      <div v-if="!loaded" class="dim empty-tip loading-tip"><el-icon class="is-loading"><Loading /></el-icon>加载中…</div>
+      <div v-else-if="!items.length" class="dim empty-tip">空目录</div>
     </div>
 
     <!-- 对话框与抽屉 -->
@@ -128,7 +132,7 @@ import 'element-plus/es/components/message-box/style/css'
 import { iconMap as icons } from '../utils/icons'
 import {
   Refresh, Expand, Grid, SortUp, SortDown, Delete, Rank, CopyDocument,
-  FolderAdd, Upload, UploadFilled, HomeFilled, EditPen, Download, Van, Link,
+  FolderAdd, Upload, UploadFilled, HomeFilled, EditPen, Download, Van, Link, Loading,
 } from '@element-plus/icons-vue'
 import http from '../api/http'
 import { join, filesRoute, playRoute, fromParams, rawUrl, thumbUrl } from '../utils/path'
@@ -230,20 +234,43 @@ let navigating = false
 // 避免旧目录内容盖掉新目录。
 let loadSeq = 0
 
+// dirCache：目录列表会话级缓存。进过的目录先渲染缓存秒开（回退/重进无白等），
+// 再后台拉最新数据校正（stale-while-revalidate）；上限 50 条，超出淘汰最久未用。
+const dirCache = new Map()
+function cachePut(path, entry) {
+  dirCache.delete(path)
+  dirCache.set(path, entry)
+  if (dirCache.size > 50) dirCache.delete(dirCache.keys().next().value)
+}
+
 async function load() {
   const seq = ++loadSeq
-  loaded.value = false
   selection.value = []
   const path = current.value
+  const cached = dirCache.get(path)
+  if (cached) {
+    // 缓存先上屏：画面立即切到目标目录。内容已与 current 一致，点击往深走路径拼接不会错，
+    // 直接解除 navigating 允许连续点击。
+    items.value = cached.items
+    caps.value = cached.caps
+    loaded.value = true
+    navigating = false
+  } else {
+    // 无缓存：立刻清掉旧目录内容、亮加载态。否则请求返回前画面停在旧目录，像点了没反应。
+    loaded.value = false
+    items.value = []
+  }
   try {
     const d = await http.get('/fs/list', { params: { path } })
     if (seq !== loadSeq) return // 有更新的加载在途，丢弃过期结果
     items.value = d.items || []
     caps.value = { write: !!d.write, upload: !!d.upload }
+    cachePut(path, { items: items.value, caps: caps.value })
   } catch {
     if (seq !== loadSeq) return
     items.value = []
     caps.value = { write: false, upload: false }
+    dirCache.delete(path) // 失败剔除，避免错误内容反复复活
   } finally {
     if (seq === loadSeq) { loaded.value = true; navigating = false }
   }
@@ -365,6 +392,8 @@ onBeforeRouteLeave(() => { tasksVisible.value = false })
 .folder { color: #ffd479; }
 :deep(.row-click) { cursor: pointer; }
 .empty-tip { text-align: center; padding: 40px 0; }
+.loading-tip { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+.empty-tip.loading-tip { display: flex; }
 
 /* .g-card/.g-thumb/.abs/.g-name 网格卡片样式已上提到全局 glass.css（与 Search.vue 共用） */
 
