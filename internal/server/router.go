@@ -66,6 +66,7 @@ func (s *Server) Router() *gin.Engine {
 	admin.DELETE("/users/:id", s.userDelete)
 	admin.GET("/drivers", s.driverList)
 	admin.GET("/storages", s.storageList)
+	admin.GET("/storages/:id", s.storageGet)
 	admin.POST("/storages", s.storageCreate)
 	admin.PUT("/storages/:id", s.storageUpdate)
 	admin.DELETE("/storages/:id", s.storageDelete)

@@ -333,15 +333,25 @@ function onDriverChange() {
   for (const f of currentFields.value) if (f.default) cfg[f.name] = f.default
   storageForm.value.config = cfg
 }
-function openStorage(row) {
+async function openStorage(row) {
   editingStorage.value = row || null
   storageForm.value = row
     ? { mount_path: row.mount_path, driver: row.driver, config: { ...row.config }, ord: row.ord, enabled: row.enabled }
     : emptyStorage()
   if (!row) onDriverChange()
-  else for (const f of currentFields.value) {
-    // 旧存储的 config 可能缺后来新增的字段，按默认值补齐（否则 bool 开关会显示为关）
-    if (storageForm.value.config[f.name] === undefined && f.default) storageForm.value.config[f.name] = f.default
+  else {
+    try {
+      // 列表接口的 secret 字段脱敏为 ***，编辑时取单条明文回显，点「眼睛」可见原文；
+      // 取失败则保持 ***（保存时后端会保留旧值）
+      const full = await http.get(`/admin/storages/${row.id}`)
+      if (full?.config) storageForm.value.config = { ...full.config }
+    } catch (e) {
+      console.error(e)
+    }
+    for (const f of currentFields.value) {
+      // 旧存储的 config 可能缺后来新增的字段，按默认值补齐（否则 bool 开关会显示为关）
+      if (storageForm.value.config[f.name] === undefined && f.default) storageForm.value.config[f.name] = f.default
+    }
   }
   storageDlg.value = true
 }

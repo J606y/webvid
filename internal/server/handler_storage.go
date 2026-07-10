@@ -92,6 +92,27 @@ func (s *Server) storageList(c *gin.Context) {
 	OK(c, list)
 }
 
+// GET /api/admin/storages/:id —— 单条明文回显（编辑弹窗用）：secret 字段不脱敏，
+// 让「显示密码」眼睛能看到原文；列表接口仍保持 ***。
+func (s *Server) storageGet(c *gin.Context) {
+	id, ok := paramID(c)
+	if !ok {
+		return
+	}
+	list, err := s.loadStorages()
+	if err != nil {
+		Fail500(c, err)
+		return
+	}
+	for _, d := range list {
+		if d.ID == id {
+			OK(c, d)
+			return
+		}
+	}
+	Fail(c, 404, "存储不存在")
+}
+
 // afterStorageChange 增删改存储后：重载挂载树 + 重建索引。
 func (s *Server) afterStorageChange(c *gin.Context) {
 	if err := s.fs.Reload(c.Request.Context()); err != nil {
