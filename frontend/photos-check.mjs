@@ -3,7 +3,7 @@
 import { chromium } from 'playwright-core'
 
 const BASE = 'http://localhost:5243'
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true })
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } })

@@ -1,7 +1,7 @@
 // 播放页时延测量：导航→ArtPlayer 挂载→视频元数据就绪
 import { chromium } from 'playwright-core'
 const BASE = 'http://localhost:5243'
-const browser = await chromium.launch({ executablePath: 'C:/Program Files/Google/Chrome/Application/chrome.exe', headless: true })
+const browser = await chromium.launch({ executablePath: 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe', headless: true })
 const page = await browser.newPage({ viewport: { width: 1400, height: 900 } })
 await page.goto(`${BASE}/login`)
 await page.fill('input[placeholder="用户名"]', 'admin')

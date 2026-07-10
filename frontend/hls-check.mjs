@@ -4,7 +4,7 @@ import { chromium } from 'playwright-core'
 import { execSync } from 'node:child_process'
 
 const BASE = 'http://localhost:5243'
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 const OUT = '../_shots'
 const DIR = '/本地存储/电影/转码样片'
 

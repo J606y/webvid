@@ -6,7 +6,7 @@ import { execSync } from 'node:child_process'
 import http from 'node:http'
 
 const BASE = 'http://localhost:5243'
-const CHROME = 'C:/Program Files/Google/Chrome/Application/chrome.exe'
+const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 const OUT = '../_shots'
 execSync(`mkdir -p ${OUT}`, { shell: 'bash' })
 
