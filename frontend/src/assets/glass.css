@@ -187,6 +187,19 @@ html.dark .el-loading-mask {
   z-index: 1;
 }
 
+/* 后台管理弹窗 iOS 式 hero 转场（modal-class="admin-hero …"，逻辑见 utils/heroDialog.js）：
+   从触发按钮处放大展开、关闭缩回原位，全程 JS 驱动 transform + overlay opacity。
+   转场缩放幅度大，弹窗自身绝不能挂 backdrop-filter——iOS WebKit 对磨砂层做缩放动画时
+   采样区域不随 transform 走会错位/闪变（反馈#48）。故这里压掉全局 .el-dialog 的深磨砂，
+   玻璃观感恒由遮罩的整页 blur(8px)（.el-overlay）垫底 + 自身半透明底提供，动画期与落定
+   同一配方、零切换；被 filter 的遮罩层静止不缩放，iOS 安全（#35 只针对 filter 参与动画）。
+   仅作用于后台弹窗，其它 el-dialog（文件页离线/移动/命名框、详情卡 .vdc）不受影响。 */
+.admin-hero .el-dialog {
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
+}
+.admin-hero .el-dialog.admin-hero-zooming { will-change: transform; }
+
 /* 抽屉：改为浮空玻璃面板（与顶栏一致的悬浮感） */
 .el-overlay .el-drawer.rtl, .el-overlay .el-drawer.ltr {
   top: 12px; bottom: 12px; height: auto;
