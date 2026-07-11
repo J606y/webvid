@@ -208,6 +208,8 @@ html.dark .el-popper {
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
 }
 html.dark .el-popper.is-dark { background: rgba(28, 30, 48, 0.65); }
+/* 用户菜单等 el-dropdown 弹层更透一档（反馈#50），毛玻璃感更明显；模糊保底可读性 */
+html.dark .el-dropdown__popper.el-popper { background: rgba(26, 28, 46, 0.38); }
 html.dark .el-popper__arrow { display: none; }
 html.dark .el-select-dropdown, html.dark .el-dropdown-menu { background: transparent; }
 

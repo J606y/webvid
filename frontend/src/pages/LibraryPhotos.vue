@@ -6,7 +6,7 @@
       :interval="6000" :autoplay="heroActive" arrow="hover"
       @touchstart="swipe.onTouchstart" @touchend="swipe.onTouchend">
       <el-carousel-item v-for="(p, i) in hero" :key="p.path">
-        <div class="feat-item" @click="openList(hero, i, 1200)">
+        <div class="feat-item" @click="openList(hero, i, 1200, '.feat .el-carousel__item .feat-img')">
           <img :src="thumbUrl(p.path, 1200)" class="feat-img" @error="hideImg" />
           <div class="feat-mask" />
           <div class="feat-info">
@@ -65,7 +65,7 @@
       </div>
       <div class="shelf-row">
         <div v-for="(p, i) in viewed" :key="p.path" class="p-card shelf-card"
-          @click="openList(viewed, i, 480)">
+          @click="openList(viewed, i, 480, '.shelf-row .p-card .art img')">
           <div class="art">
             <img :src="thumbUrl(p.path, 480)" loading="lazy" @error="hideImg" />
             <div class="thumb-fallback abs"><el-icon :size="30"><Picture /></el-icon></div>
@@ -135,9 +135,12 @@ async function loadStatic() {
 const { grid, loaded, loading, sort, sentinel, carousel, heroActive, all, historyView, isHome, dirName, featHeight, swipe } =
   useMediaLibrary({ kind: 'image', routePath: '/library/photos', historyKey: 'viewed', dirDefault: '照片墙', historyCap: 50, loadStatic })
 
-// msize 传该列表正在展示的缩略图尺寸，灯箱占位图可直接命中浏览器缓存
-function openList(list, i, msize = 320) {
-  openLightbox(list.map((x) => x.path), i, msize)
+// msize 传该列表正在展示的缩略图尺寸，灯箱占位图可直接命中浏览器缓存。
+// sel 为该列表缩略图元素的选择器（querySelectorAll 文档序与 v-for 同序），
+// 喂给灯箱做 iOS 同款 hero 转场（反馈#49）：从点击的缩略图放大、关闭缩回当前张处
+function openList(list, i, msize = 320, sel = '.photo-grid .cell img') {
+  openLightbox(list.map((x) => x.path), i, msize,
+    (idx) => document.querySelectorAll(sel)[idx])
 }
 </script>
 

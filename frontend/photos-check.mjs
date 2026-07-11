@@ -2,7 +2,7 @@
 // 反馈#20：「最近添加」货架改「最近查看」——点开照片记查看历史，重进主页应出现该货架
 import { chromium } from 'playwright-core'
 
-const BASE = 'http://localhost:5243'
+const BASE = process.env.NL_BASE || 'http://localhost:5243'
 const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true })
@@ -63,9 +63,9 @@ await page.waitForTimeout(800)
 ok('返回后回主页(横幅重现)', await page.locator('.feat').count() === 1)
 
 // 目录视图
-await page.goto(`${BASE}/library/photos?dir=${encodeURIComponent('/本地存储/图片/风景')}`)
+await page.goto(`${BASE}/library/photos?dir=${encodeURIComponent('/本地存储/照片')}`)
 await page.waitForTimeout(1000)
-ok('目录大标题=风景', (await page.locator('.lib-title').textContent()).trim() === '风景')
+ok('目录大标题=照片', (await page.locator('.lib-title').textContent()).trim() === '照片')
 ok('目录视图无横幅', await page.locator('.feat').count() === 0)
 const dirN = await page.locator('.photo-grid .cell').count()
 ok(`目录网格有内容 (${dirN})`, dirN > 0)

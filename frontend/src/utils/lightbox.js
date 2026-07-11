@@ -32,12 +32,13 @@ function probe(src, ms = 250) {
   })
 }
 
-export async function openLightbox(paths, index = 0, msize = 320) {
+export async function openLightbox(paths, index = 0, msize = 320, getEl = null) {
   const items = paths.map((p) => ({
     src: rawUrl(p),
     msrc: thumbUrl(p, msize),
     width: 1920,
     height: 1080,
+    thumbCropped: true, // 列表缩略图均为 cover 裁切，zoom 转场按裁切对齐画框
     measured: false,
   }))
   const dim = await probe(items[index].msrc)
@@ -53,7 +54,18 @@ export async function openLightbox(paths, index = 0, msize = 320) {
     bgOpacity: 0.9,
     zoom: true,
     wheelToZoom: true,
+    // iOS 同款 hero 转场（反馈#49，与视频详情卡同手感）：调用方给出「第 i 张图对应的
+    // 缩略图元素」时走 zoom——开场从点击的缩略图放大出来、关场缩回当前张的缩略图处
+    //（翻页后回新位置）；不给（文件管理）保持原 fade
+    showHideAnimationType: getEl ? 'zoom' : 'fade',
   })
+  if (getEl) {
+    pswp.addFilter('thumbEl', (thumbEl, data, i) => {
+      const el = getEl(i)
+      // 元素不在或被隐藏（缩略图加载失败 hideImg）→ 交回默认，该张退化为 fade
+      return el && el.offsetWidth ? el : thumbEl
+    })
+  }
   // 原图（含预加载的相邻图）加载完成 → 用真实尺寸替换占位尺寸
   pswp.on('loadComplete', ({ slide, content, isError }) => {
     const el = content.element

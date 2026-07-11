@@ -4,7 +4,7 @@
 import { chromium } from 'playwright-core'
 import { execSync } from 'node:child_process'
 
-const BASE = 'http://localhost:5243'
+const BASE = process.env.NL_BASE || 'http://localhost:5243'
 const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 const OUT = '../_shots'
 execSync(`mkdir -p ${OUT}`, { shell: 'bash' })
@@ -38,9 +38,9 @@ await page.waitForURL(`${BASE}/library/video`)
 
 // 预置查看历史：直接上报若干本地图片（幂等，重复上报只更新时间）
 const views = [
-  '/本地存储/图片/风景/晨雾山谷.png', '/本地存储/图片/风景/极光之夜.png',
-  '/本地存储/图片/风景/沙漠斜阳.jpg', '/本地存储/图片/风景/湖畔黄昏.jpg',
-  '/本地存储/图片/风景/翠谷清泉.jpg',
+  '/本地存储/照片/样张1.png', '/本地存储/照片/样张2.png',
+  '/本地存储/照片/样张3.png', '/本地存储/照片/样张4.png',
+  '/本地存储/照片/样张5.png',
 ]
 for (const p of views) {
   const st = await page.evaluate(async (path) => {

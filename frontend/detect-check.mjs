@@ -6,7 +6,7 @@
 // 用法: node detect-check.mjs （需服务在跑，库里要有非直连视频如 .mkv/.ts）
 import { chromium } from 'playwright-core'
 
-const BASE = 'http://localhost:5243'
+const BASE = process.env.NL_BASE || 'http://localhost:5243'
 const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true })

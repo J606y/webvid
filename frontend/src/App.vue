@@ -6,7 +6,8 @@
       <el-icon :size="20"><Platform /></el-icon>
       <span>{{ app.siteTitle }}</span>
     </router-link>
-    <nav class="nav">
+    <nav ref="navRef" class="nav">
+      <span class="nav-pill" :style="navPill" />
       <router-link v-for="n in navs" :key="n.to" :to="n.to"
         class="nav-item" :class="{ active: isActive(n) }">{{ n.label }}</router-link>
     </nav>
@@ -30,7 +31,8 @@
   </header>
 
   <!-- 移动端底部 Tab 栏（≤768px 显示，替代顶栏导航） -->
-  <nav v-if="showNav" class="tabbar glass" :class="{ 'immersive-hide': immersive }">
+  <nav v-if="showNav" ref="tabRef" class="tabbar glass" :class="{ 'immersive-hide': immersive }">
+    <span class="tab-pill" :style="tabPill" />
     <router-link v-for="n in navs" :key="n.to" :to="n.to"
       class="tab-item" :class="{ active: isActive(n) }">
       <el-icon :size="21"><component :is="n.icon" /></el-icon>
@@ -47,7 +49,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Platform, User, ArrowDown, Setting, SwitchButton,
@@ -76,12 +78,44 @@ function isActive(n) {
   return route.path === n.to || route.path.startsWith(n.to + '/')
 }
 
+// ---- dock 指示丸（反馈#47）：一枚胶囊背景在选中项之间滑动 ----
+// 桌面顶栏 .nav 与移动底部 .tabbar 共用一套逻辑：量选中项 offsetLeft/offsetWidth，
+// translateX 滑过去（width 过渡兼容桌面端不等宽项）；只动小元素的 transform/width，
+// 无 filter 参与（iOS 安全，#35 教训）。无选中项（后台/播放页）淡出隐藏。
+const navRef = ref(null)
+const tabRef = ref(null)
+const navPill = ref({ opacity: 0 })
+const tabPill = ref({ opacity: 0 })
+
+function movePill(container, style) {
+  const el = container?.querySelector('.active')
+  if (!el || !el.offsetWidth) { style.value = { ...style.value, opacity: 0 }; return }
+  // 从隐藏态出现（刷新进页/后台·播放页回来）直接就位淡入；项间切换才滑动
+  const appearing = style.value.opacity !== 1
+  style.value = {
+    opacity: 1,
+    width: `${el.offsetWidth}px`,
+    transform: `translateX(${el.offsetLeft}px)`,
+    transition: appearing ? 'opacity 0.15s ease' : '',
+  }
+}
+function syncPills() {
+  movePill(navRef.value, navPill)
+  movePill(tabRef.value, tabPill)
+}
+watch(() => route.path, () => nextTick(syncPills))
+
 function onUserCmd(cmd) {
   if (cmd === 'logout') auth.logout()
   else if (cmd === 'admin') router.push('/@admin')
 }
 
-onMounted(() => app.fetchPublic())
+onMounted(() => {
+  app.fetchPublic()
+  syncPills()
+  window.addEventListener('resize', syncPills)
+})
+onUnmounted(() => window.removeEventListener('resize', syncPills))
 </script>
 
 <style scoped>
@@ -102,8 +136,18 @@ onMounted(() => app.fetchPublic())
   display: flex; align-items: center; gap: 8px;
   font-weight: 700; font-size: 17px; letter-spacing: 0.5px;
 }
-.nav { display: flex; gap: 4px; }
+.nav { display: flex; gap: 4px; position: relative; }
+/* dock 指示丸：选中背景不再画在项上，由这枚胶囊在项间滑动（transform+width 过渡） */
+.nav-pill {
+  position: absolute; top: 0; bottom: 0; left: 0;
+  border-radius: 10px;
+  background: rgba(122, 162, 255, 0.22);
+  transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1),
+    width 0.35s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.15s ease;
+  pointer-events: none;
+}
 .nav-item {
+  position: relative; z-index: 1;
   padding: 7px 14px;
   border-radius: 10px;
   font-size: 14px;
@@ -111,7 +155,7 @@ onMounted(() => app.fetchPublic())
   transition: all 0.2s;
 }
 .nav-item:hover { color: var(--text-main); background: rgba(255, 255, 255, 0.07); }
-.nav-item.active { color: #fff; background: rgba(122, 162, 255, 0.22); }
+.nav-item.active { color: #fff; }
 .spacer { flex: 1; }
 .user-chip {
   display: flex; align-items: center; gap: 6px;
@@ -151,7 +195,18 @@ onMounted(() => app.fetchPublic())
     padding: 5px;
     border-radius: 19px;
   }
+  /* dock 指示丸（与桌面 .nav-pill 同机制）：top/bottom 对齐 .tabbar 的 5px 内边距，
+     translateX 的 offsetLeft 本身含内边距，故 left:0 起算 */
+  .tab-pill {
+    position: absolute; top: 5px; bottom: 5px; left: 0;
+    border-radius: 14px;
+    background: rgba(122, 162, 255, 0.22);
+    transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1),
+      width 0.35s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.15s ease;
+    pointer-events: none;
+  }
   .tab-item {
+    position: relative; z-index: 1;
     flex: 1;
     display: flex; flex-direction: column;
     align-items: center; justify-content: center; gap: 2px;
@@ -161,6 +216,6 @@ onMounted(() => app.fetchPublic())
     transition: all 0.2s;
     -webkit-tap-highlight-color: transparent;
   }
-  .tab-item.active { color: #fff; background: rgba(122, 162, 255, 0.22); }
+  .tab-item.active { color: #fff; }
 }
 </style>

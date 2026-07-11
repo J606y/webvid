@@ -2,7 +2,7 @@
 // 「从头播放」重置。用法: node progress-check.mjs（需服务在跑）
 import { chromium } from 'playwright-core'
 
-const BASE = 'http://localhost:5243'
+const BASE = process.env.NL_BASE || 'http://localhost:5243'
 const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 const MP4 = '/本地存储/电影/星际漫游.mp4'   // direct 播放，seek/续播稳定
 const TS = '/本地存储/电影/转码样片/转播录像.ts' // HLS remux 续播

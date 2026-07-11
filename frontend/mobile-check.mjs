@@ -5,7 +5,7 @@
 import { chromium } from 'playwright-core'
 import { execSync } from 'node:child_process'
 
-const BASE = 'http://localhost:5243'
+const BASE = process.env.NL_BASE || 'http://localhost:5243'
 const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 const OUT = '../_shots'
 execSync(`mkdir -p ${OUT}`, { shell: 'bash' })
@@ -110,7 +110,8 @@ ok('详情卡片收进屏幕', await page.evaluate(() => {
   const r = document.querySelector('.el-dialog.vdc').getBoundingClientRect()
   return r.width <= window.innerWidth - 20 && r.left >= 0
 }))
-ok('详情操作按钮可见', await page.locator('.vdc-ops button:has-text("立即播放")').isVisible())
+// 主播放按钮用稳定类 .vdc-play：首页网格随机抽样，抽到有续播进度的视频文案变「继续观看」
+ok('详情操作按钮可见', await page.locator('.vdc-ops .vdc-play').isVisible())
 await page.waitForTimeout(400)
 await shot('m02-video-detail')
 await page.keyboard.press('Escape')

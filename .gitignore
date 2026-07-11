@@ -4,6 +4,7 @@
 /files2/
 /docker-test/
 /_shots/
+/frontend/_shots/
 
 # 编译产物（构建时再生成）
 *.exe

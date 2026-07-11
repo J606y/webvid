@@ -4,7 +4,7 @@
 // 用法: node scroll-check.mjs （需服务在跑）
 import { chromium } from 'playwright-core'
 
-const BASE = 'http://localhost:5243'
+const BASE = process.env.NL_BASE || 'http://localhost:5243'
 const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true })

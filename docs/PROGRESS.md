@@ -368,6 +368,106 @@ NL_ADMIN_PASSWORD=admin123 ./webvid.exe     # 或 go run .
   （taskkill 被用户拒绝勿动），zoom-check 打过去横幅断言假阴性——先
   powershell Get-Process StartTime 对比 exe LastWriteTime 确认新旧，再 NL_PORT=5299 起
   隔离实例 + NL_BASE 指过去验证（16/16）；用户实例需重启才吃到新二进制。**
+- 2026-07-11 反馈#44「随机推荐的二级弹窗动画改成：打开时大窗口向前缩小到二级弹窗，关闭时
+  由小窗口向后放大到大窗口」（#43=另一会话的远端抽帧 401/telegram 噪音修复，编号撞车后本条
+  让号改 #44）：**推翻 #41 二轮的 92% 虚拟矩形中心浮出方案**（当时用户嫌真实
+  矩形起飞"像从屏幕外飞入"，现在明确点名要大小窗互变）——删 normalizedOrigin，Featured 横幅
+  恢复按真实矩形 morph：开场起始态=横幅矩形（缩放≈1.85 的"大窗口"）向前缩小落定成卡片，
+  关场由卡片向后放大回横幅。为免重蹈"凭空砸出巨大卡片"的飞入观感，超大来源（from.width >
+  cardRect.width，只有横幅命中）配快速 opacity 淡入（0.22s，与 0.42s 缩小并行=从横幅里凝聚
+  出来）/淡出（0.26s 延 0.08s，放大同时消融回横幅）；opacity 纯合成器属性 iOS 安全（#35 教训
+  只针对 filter），普通缩略图（恒小于卡片）不带淡入淡出、仍走严丝合缝封面重合 morph。内联
+  opacity 在 zoomTimer/closeTimer/cancelClose 三处收尾全清（横幅关场淡出中途被 cancelClose
+  截断须复原不透明）。回归：zoom-check 第 4 节重写（采样循环记录转场期 maxScale+minOpacity：
+  开/关均断言缩放 >1.1 且不透明度 <0.9，方向与旧断言"≤1 不从屏幕外飞入"正好相反）22→25 项
+  全绿；顺修 mobile-check「详情操作按钮可见」has-text("立即播放")→稳定类 .vdc-play（首页
+  网格 sort=random，抽到有续播进度的视频文案变「继续观看」假红，同 #29/#41 前科）；
+  detail 15 + mobile 37 + scroll 15 + history 12 + progress 15 全绿零控制台错误，转场中间帧
+  frontend/_shots/zoom44-open-t1/t2、zoom44-close-t1/t2 目检确认大窗口缩小落定/放大消融回
+  横幅；webvid.exe 已重编嵌新前端。
+  **二轮（速度）**：用户要求整体调慢——开场 0.42s→0.6s、关场 0.34s→0.48s，遮罩/淡入淡出
+  同比拉长（开 0.3s、关淡出 0.36s 延 0.1s、遮罩 0.32s 延 0.14s），收尾定时器 480→660、
+  360→500ms。**三轮（桌面端贴四边）**：等比大窗口高度=卡片高×宽度比、远高过横幅上下探出
+  屏幕，用户仍觉"像飞出来"→新增 coverTransform（非等比 scale(sx,sy)，起始态精确贴合横幅
+  四边、从大图向内收缩落定，途中纵横比渐复原叠加淡入几乎无感）；**仅桌面端（>768px）启用，
+  移动端横幅与卡片几乎同宽（scale≈1.06 本无飞入感）保持等比第一版手感（用户确认）**；
+  关场后经反馈"没回原位"也改为对称的贴四边放大回横幅（桌面）+ **回位锚点改轮播容器**
+  （.el-carousel——弹窗开着的工夫轮播 6s 自动切走原 item，被 translate 挪出画面，按其实时
+  矩形回位会飞向屏幕外；容器=横幅在页面的固定位置，item 恒填满容器）。回归 zoom-check
+  第 4 节采样加 minScaleY/贴四边断言、横幅点击一律 .el-carousel__item.is-active（轮播自转
+  后点非激活 item 会被 .page 拦截，探针实测踩过）。
+- 2026-07-11 反馈#45「所有动画关闭回原位后都闪一下（先只报移动端后确认全平台）」：
+  closeTimer 收尾先 done() 再同步清 dlg 内联 transform/opacity——done() 后节点由 Vue **异步**
+  卸载（destroy-on-close 下次打开是全新节点），若在移除前抢先复原样式，卸载前被绘制的那一帧
+  = 全尺寸、全不透明、居中的卡片闪现（缩略图关场无淡出对比更强，桌面也可见）。修=收尾
+  **不再复原 dlg 内联样式**（节点即将销毁本就无需清理；overlay 的 pointerEvents/ovd overflow
+  等持久节点样式照旧清）；cancelClose 路径（关场中途重开）仍复原样式不受影响。逐帧采样探针
+  验证：桌面/移动缩略图与横幅关场淡出/缩小后均无回弹帧。
+- 2026-07-11 反馈#46「二级弹窗莫奈取色要弹窗打开约 1s 后才见效」：取色一直挂在 1200 高清图
+  onload（服务端出图+下载≈1s）；修=480 低清底图 .vdc-art-lo 的 @load 也挂 onArtLoad（24×24
+  缩样取色对源分辨率不敏感，480 列表页已缓存基本秒着色），高清到货后再精修一次（同图主色
+  几乎一致，肉眼无跳变）。
+- 2026-07-11 反馈#47「移动端+桌面端 dock 栏点击切换加动画」：桌面顶栏 .nav 与移动底部
+  .tabbar 加 iOS 式滑动指示丸——一枚胶囊背景（.nav-pill/.tab-pill，absolute+translateX+width
+  过渡 0.35s iOS 曲线）在选中项之间滑动，选中项自身 background 移交指示丸（项加 z-index:1
+  垫层）；App.vue movePill 量 active 项 offsetLeft/offsetWidth（tabbar 的 offsetLeft 已含 5px
+  内边距故 pill left:0 起算），watch route.path+resize 同步；**从隐藏态出现（刷新进页/后台/
+  播放页回来）直接就位淡入不滑动**（style.opacity!==1 判 appearing，transition 只留 opacity），
+  无选中项（后台/播放页）淡出。只动 transform/width 小元素，无 filter（iOS 安全）。
+- 2026-07-11 反馈#48「弹窗玻璃磨砂 0.5~1s 后才变液态玻璃→下方玻璃区闪一下→背景渐渐变深」
+  **三轮定稿：详情卡自身永不挂 backdrop-filter**。背景：#41 起 iOS 安全要求转场期停卡片磨砂
+  （WebKit 对 backdrop-filter 层缩放动画采样区域不随 transform 走会错位），而"动画期配方"与
+  "落定配方"之间**无论怎么切换用户都看得见**：一轮近实底→玻璃（0.66s 后+0.25s 过渡=磨砂迟到）；
+  二轮改遮罩 blur(8px) 垫底+玻璃底色、落定瞬间恢复深磨砂 saturate(1.7)=闪一下；三轮把深磨砂
+  搬 ::after 层 opacity 0.3s 淡入（滤镜先在 opacity:0 静默启用）=平滑但"背景渐渐变深"仍被看出。
+  定稿（用户点名"保持刚打开的透明效果"）：压掉 glass.css 全局 .el-dialog 深磨砂，观感恒由
+  **遮罩整页 blur(8px)+卡片 var(--glass-bg) 半透明白**提供，动画期与落定后完全同一配方；
+  卡内按钮/关闭钮的小磨砂也永久关闭（背后是平滑渐变，模糊与否无差，原先落定恢复=又一处
+  半秒变一下）。验证=开卡逐帧采样 195 帧，卡片+按钮 filter/背景配方签名全程唯一；落定前后
+  信息区截图肉眼一致。zoom-check 磨砂断言改 noOwnFilter（任何阶段卡片含 ::after 不得有 blur）
+  +新增「遮罩整页磨砂在场」，25→26 项。**坑：::after 方案曾因基础 transition 在"进转场"方向
+  也生效（磨砂 0.3s 才关完）触发 iOS 风险，须 .vdc-zooming::after 加 transition:none 瞬时关——
+  该方案已整体废弃，仅留此教训**。
+- 2026-07-11 反馈#49「打开图片也要 iOS 同款从哪来回哪去动画」：照片墙三入口（Featured 横幅/
+  最近查看货架/照片网格）接 PhotoSwipe 原生 zoom 转场——utils/lightbox.js openLightbox 加第 4
+  参 getEl(i)（第 i 张图对应的缩略图元素），有则 showHideAnimationType:'zoom'+addFilter('thumbEl')
+  （无则保持 fade，文件管理页沿用）；items 全部标 thumbCropped:true（列表缩略图均为 cover
+  裁切，转场按裁切对齐画框不变形）；元素不在/被 hideImg 隐藏（offsetWidth=0）交回默认退化
+  fade。LibraryPhotos openList 加 sel 参（querySelectorAll 文档序与 v-for 同序）：横幅
+  '.feat .el-carousel__item .feat-img'、货架 '.shelf-row .p-card .art img'、网格默认
+  '.photo-grid .cell img'。**关场缩回"当前张"缩略图处（灯箱翻页后回新位置），iOS 相册同款**。
+  顺修检查脚本环境陈旧两处：photos-check 目录样本 /本地存储/图片/风景（已不存在）→
+  /本地存储/照片、photos-history-check 种子照片换现存样张 1~5（原种子 404 刷控制台）；
+  photos-check 19/19 + photos-history-check 11/11 零错误。
+- 2026-07-11 反馈#50「点击用户的弹窗改透明一点」：glass.css 给 el-dropdown 弹层
+  （html.dark .el-dropdown__popper.el-popper）单独降底色 rgba(26,28,46,0.6)→0.38，
+  blur(24px) 磨砂保留保证可读性；其他 popper（选择器/气泡）不动。
+- 2026-07-11 检查脚本基建：全部 9 个 e2e 脚本（zoom/detail/mobile/scroll/history/progress/
+  detect/photos/photos-history）统一支持 NL_BASE 环境变量指隔离实例（此前 detail/mobile/
+  scroll/history/progress/detect 写死 5243，跑检查会误打用户生产实例+污染播放历史）。
+  #44~#50 完成后全量回归：zoom 26 + detail 15 + mobile 37 + scroll 15 + history 12 +
+  progress 15 + detect 3 + photos 19 + photos-history 11 全绿零控制台错误（NL_PORT=5299
+  隔离实例）。
+- 2026-07-11 反馈#42「随机推荐点开二级弹窗关闭后约半秒无法上下滑动页面（弹出后立刻关闭
+  必现）」：#41 hero 关场的连带账——animatedClose 要等 360ms 缩回动画完才调 done()，EP 的
+  body 滚动锁（el-popup-parent--hidden，overflow:hidden 传播到视口）done() 后其 useLockscreen
+  cleanup 还再延 200ms 才摘，期间全屏 .el-overlay 又一直拦触摸/滚轮 ≈ 560ms 页面完全失聪。
+  修：关场一开始就 ①手动摘掉 body 的锁类（**body 上 EP 加的滚动条宽度补偿 inline width 不
+  能动**——留给 EP 稍后的幂等 cleanup 恢复，摘类瞬间滚动条回归、宽度补偿还在=零跳版；EP
+  cleanup removeClass 幂等无副作用）②overlay pointer-events:none 输入穿透（v-show 持久节点，
+  收尾/取消时必须清回，否则漏到下次打开），缩回动画降级为纯收尾演出、输入立即还给页面。
+  连锁防护：遮罩放行后关场途中能直接点到下面的卡 → open() 里 closing 时先 cancelClose()：
+  清 closeTimer（否则 360ms 后迟到的 done() 会把新开的卡关掉）、复原转场内联样式
+  （transition:'none' 防 transform 复位走 0.34s 缩放）、**把锁类补回**（visible 全程未翻
+  false，EP 不会自己再加）。顺修一处 #41 死分支：「开场中途被关」判断原写
+  `dlg.style.transform ? cardRect : gBCR`，但 zoomIn 同步就把内联 transform 清空靠
+  transition 补间 → 补间期该值恒为空串，中途关闭实际拿的是含中途缩放的 gBCR 当布局矩形、
+  缩回目标算错（用户复现步骤恰好踩中）；改判 `classList.contains('vdc-zooming')`（补间期
+  布局盒没变恒等于 cardRect）。回归：zoom-check.mjs 13→22 项（关场期锁已解/遮罩穿透/页面
+  立即可滚——scrollBy 在锁未解时是空操作天然可判、关场途中重开新卡存活+锁类恢复、开场补间
+  中途 ESC 正常缩回；ESC 后单次 evaluate 一把采完防 360ms 窗口内多次往返 flake）+
+  detail 15 + scroll 15 + history 12 + progress 15 + mobile 37 全绿零控制台错误；
+  webvid.exe 已重编嵌新前端。
 - 2026-07-11 反馈#38「OneDrive 开代理模式后部分视频一直重连播放不出（另一部分正常）」：
   真因三层，核心=代理分块加速（stream.MultiReader）对"顺序整读大文件"的访问画像是
   **每 4MB 一个新 HTTP 请求**——mkv/ts 等需转码片 event-remux 全速拉源，4GB≈千次请求、
