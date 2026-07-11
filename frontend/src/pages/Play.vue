@@ -107,8 +107,13 @@ async function mount(url, isHls) {
     container: artRef.value,
     url,
     title: name.value,
-    theme: '#7aa2ff',
+    theme: '#ff0000', // YouTube 红：已播进度条 / 拖拽圆点 / 音量 / 选中项统一取此色
     volume: 0.7,
+    // 关掉 ArtPlayer 的 backdrop：它默认给弹窗加 .art-backdrop 类、附带一条
+    // `.art-video-player.art-backdrop .art-volume-inner{background:rgba(0,0,0,.75)}`（0,3,0 高优先级），
+    // 会把弹窗背景钉死成黑、盖过 --art-widget-background。关掉后弹窗背景回落到该变量（可控成白），
+    // 磨砂由下方 CSS 自己加。
+    backdrop: false,
     setting: true,
     playbackRate: true,
     aspectRatio: true,
@@ -118,6 +123,11 @@ async function mount(url, isHls) {
     hotkey: true,
     autoSize: false,
     autoplay: true,
+    // 中间大播放态图标换成纯三角（去掉 ArtPlayer 自带的实心圆），
+    // 下方 .art-state 用液态玻璃圆承托 —— 圆由玻璃画、三角只是白色glyph。
+    icons: {
+      state: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M8 5v14l11-7z"></path></svg>',
+    },
   }
   if (isHls) {
     const { default: Hls } = await import('hls.js') // 独立 chunk，仅转码播放时加载
@@ -191,6 +201,93 @@ onBeforeUnmount(() => {
   -webkit-backdrop-filter: blur(8px);
 }
 .player { aspect-ratio: 16/9; overflow: hidden; }
+
+/* ---- YouTube 风格播放器（红色细进度条 + 液态玻璃控件）---- */
+/* 参考 YouTube 2025「液态玻璃」新版：底部控件不再是扁平白图标，而是每颗按钮各自
+   坐在一枚半透明磨砂玻璃胶囊上（backdrop-filter 实时模糊背后画面 + 顶部高光描边）。
+   进度条保持 YouTube 招牌：红色细条、悬停变粗、拖拽红点、全宽贴边。
+   磨砂一律用 backdrop-filter（本项目 iOS 上验证安全的方案，backdrop 全保留不受影响），
+   绝不用 filter:blur（会在 iOS 触发极光式重光栅化卡死，见项目历史）。 */
+.player :deep(.art-video-player) {
+  --art-progress-height: 5px;                     /* 悬停态条高；静止态取其半（~2.5px），细如 YouTube */
+  --art-progress-color: rgba(255, 255, 255, .22); /* 未播放轨道 */
+  --art-loaded-color: rgba(255, 255, 255, .45);   /* 已缓冲段 */
+  --art-hover-color: rgba(255, 255, 255, .5);     /* 鼠标前方的预览高亮 */
+  --art-indicator-size: 13px;                     /* 拖拽圆点（红色，悬停浮现） */
+  --art-control-icon-size: 22px;                  /* 图标收到 YouTube 尺度，好落进玻璃胶囊 */
+  --art-control-icon-scale: 1;
+  --art-bottom-gap: 14px;
+  --art-widget-background: rgba(255, 255, 255, .06);  /* 弹出层底色：与下方控件胶囊同透明度（关了 backdrop 后此变量才真正生效） */
+}
+/* 进度条全宽贴边（YouTube 招牌）：抵消底栏左右内边距，红条从边到边；
+   底栏 overflow:hidden，圆点在 0% 处半探出左缘会被裁掉，恰是 YouTube 的观感。 */
+.player :deep(.art-bottom .art-progress) {
+  margin-left: calc(var(--art-padding) * -1);
+  margin-right: calc(var(--art-padding) * -1);
+}
+/* 左右分组：清掉 ArtPlayer 的负边距（原本让图标视觉贴边），胶囊之间留呼吸间距 */
+.player :deep(.art-controls-left),
+.player :deep(.art-controls-right) {
+  margin: 0;
+  gap: 8px;
+  align-items: center;
+}
+.player :deep(.art-controls) { padding-bottom: 8px; }
+/* 每颗控件 = 一枚液态玻璃胶囊：近乎透明的底 + 弱磨砂（透背后画面）+ 顶部高光描边 + 轻投影。
+   要点：blur 压到 7px 才透（16px 会糊成厚磨砂），底色降到 .06、靠 saturate/brightness 提折射感
+   与更亮的高光内描边把玻璃「形状」勾出来 —— 这才是液态玻璃而非磨砂玻璃。 */
+.player :deep(.art-controls .art-control) {
+  opacity: 1;                     /* 玻璃底恒显，不再靠透明度淡入淡出 */
+  min-width: 42px;
+  min-height: 38px;
+  padding: 0 4px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .2);
+  -webkit-backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), inset 0 -1px 2px rgba(0, 0, 0, .12), 0 2px 10px rgba(0, 0, 0, .22);
+  transition: background var(--art-transition-duration) ease;
+}
+.player :deep(.art-controls .art-control:hover) { background: rgba(255, 255, 255, .18); }
+/* 时间胶囊：左右多留白、数字等宽不抖，贴近 YouTube「1:26 / 4:02」 */
+.player :deep(.art-control-time) {
+  padding: 0 12px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+/* 二级弹窗（设置 / 音量竖条 / 画质选择 / 右键菜单）同款通透液态玻璃：
+   弱模糊透背后画面 + 高光内描边成形，跟胶囊一个配方，不再是 Image#3 那种厚暗磨砂。 */
+.player :deep(.art-settings),
+.player :deep(.art-selector-list),
+.player :deep(.art-contextmenus),
+.player :deep(.art-volume-inner) {
+  color: #fff;                                    /* 白字，和按钮白图标一致 */
+  -webkit-backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), 0 8px 28px rgba(0, 0, 0, .3);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .7);       /* 白字在亮画面上靠深色投影保可读（图标本有描边） */
+}
+/* 中间大播放态图标：液态玻璃圆 + 纯三角（图标已在 mount() 换成无实心圆的三角）。
+   仅暂停/点按时浮现，玻璃圆透背后画面 + 高光描边，三角白色带投影保对比。 */
+.player :deep(.art-state) {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .14);
+  border: 1px solid rgba(255, 255, 255, .3);
+  -webkit-backdrop-filter: blur(10px) saturate(1.8) brightness(1.1);
+  backdrop-filter: blur(10px) saturate(1.8) brightness(1.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 6px 22px rgba(0, 0, 0, .3);
+}
+.player :deep(.art-state .art-icon) {
+  width: 42%;
+  height: 42%;
+  margin-left: 4%; /* 三角视觉重心偏左，右移一点看着才居中 */
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .5));
+}
 .unsupported, .detecting {
   padding: 70px 24px; text-align: center;
   display: flex; flex-direction: column; align-items: center; gap: 12px;
