@@ -68,12 +68,33 @@ const during = await page.evaluate(async () => {
   const pe = ov ? getComputedStyle(ov).pointerEvents : ''
   window.scrollBy(0, 300) // 锁未解时 body overflow:hidden 传播到视口，这句是空操作
   await new Promise(requestAnimationFrame)
-  return { zooming, lock, pe, scrolled: window.scrollY }
+  const scrolled = window.scrollY
+  // 关场 chrome 淡出（vdc-closing）：只有封面能与缩略图重合，信息区/关闭钮/进度条比缩略图高、
+  // 无处安放，若随卡片缩到位仍半透明可见会与网格错位叠字再啪地消失（"没收完、闪一下、突然收完"）。
+  // 等 0.16s 淡出过渡推进后采：信息区应大幅透明、封面自身不透明度留存（只封面熔入缩略图）
+  await new Promise((r) => setTimeout(r, 130))
+  const el2 = document.querySelector('.el-dialog.vdc')
+  const info = el2?.querySelector('.vdc-info')
+  const art = el2?.querySelector('.vdc-art img:not(.vdc-art-lo)')
+  const artBox = el2?.querySelector('.vdc-art')
+  return {
+    zooming, lock, pe, scrolled,
+    closing: !!el2?.classList.contains('vdc-closing'),
+    infoOp: info ? parseFloat(getComputedStyle(info).opacity) : 1,
+    artOp: art ? parseFloat(getComputedStyle(art).opacity) : 0,
+    // 封面补的圆角（12/scale，被 transform 缩放后落定渲染成缩略图的 12px），overflow 须 hidden 才裁到
+    artRadius: artBox ? parseFloat(getComputedStyle(artBox).borderTopLeftRadius) : 0,
+    artClip: artBox ? getComputedStyle(artBox).overflow : '',
+  }
 })
 ok('关场重新进入转场态', during.zooming)
 ok('关场期滚动锁已提前解除', during.lock === false)
 ok('关场期遮罩输入穿透', during.pe === 'none')
 ok('关场动画期页面立即可滚动', during.scrolled > 0)
+ok('关场进入 vdc-closing 淡出态', during.closing === true)
+ok('关场信息区 chrome 已淡出（<0.5）', during.infoOp < 0.5)
+ok('关场封面自身不透明度留存（只封面熔入缩略图）', during.artOp > 0.9)
+ok('关场封面补上圆角（下方两角不再是方切）', during.artRadius > 0 && during.artClip === 'hidden')
 await page.waitForSelector(dlg, { state: 'detached', timeout: 5000 })
 ok('关场结束卡片卸载', true)
 await page.evaluate(() => window.scrollTo(0, 0))

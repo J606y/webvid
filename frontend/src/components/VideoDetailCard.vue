@@ -284,16 +284,33 @@ function animatedClose(done = () => { visible.value = false }) {
   ov.style.pointerEvents = 'none'
   if (ovd) ovd.style.overflow = 'hidden'
   const big = to.width > from.width // 缩回目标比卡片大=Featured 横幅：向后放大 + 淡出消融
-  dlg.classList.add('vdc-zooming')
+  // vdc-closing：关场一开始就快速淡掉卡片 chrome（信息区 / 关闭钮 / 续播进度条 / 卡底玻璃 +
+  // 阴影），只留顶部 16:9 封面独自缩回熔入缩略图。普通缩略图缩回时，只有封面能与缩略图重合，
+  // 其余 chrome 比缩略图高、无处安放——若随卡片一路缩到位仍半透明可见，会与网格内容错位叠字、
+  // 最后又随卸载啪地消失，观感就是"没收完、闪一下、突然收完"（详见下方全局样式块）
+  dlg.classList.add('vdc-zooming', 'vdc-closing')
   dlg.style.transformOrigin = '50% 0'
-  dlg.style.transition = `transform 0.48s ${ZOOM_EASE}, background 0.2s ease` +
-    (big ? ', opacity 0.36s ease 0.1s' : '')
+  // 内联 transition 会盖过类里的，卡底玻璃/边框/阴影的淡出过渡须一并列在这里（否则瞬切）
+  dlg.style.transition = `transform 0.48s ${ZOOM_EASE}, background 0.16s ease, ` +
+    `border-color 0.16s ease, box-shadow 0.16s ease` + (big ? ', opacity 0.36s ease 0.1s' : '')
   // 桌面端横幅与开场对称：贴四边放大回横幅矩形；移动端保持等比（第一版手感，用户确认）
   dlg.style.transform = big && window.innerWidth > 768
     ? coverTransform(to, from)
     : originTransform(to, from)
   if (big) dlg.style.opacity = '0'
-  ov.style.transition = 'opacity 0.32s ease 0.14s'
+  else {
+    // 关场淡掉 chrome 后只余顶部封面，其下边缘本是卡片中部的直切（下方两角是方的），与四角
+    // 皆圆的目标缩略图（.art 圆角 12px）对不上——观感"关闭时没有圆角"。给封面补圆角：封面是被
+    // dlg transform 缩放的子节点，全尺寸设 12/scale，缩到位时正好渲染成 12px 与缩略图严丝合缝
+    const scale = Math.max(to.width / from.width, 0.01)
+    dlg.style.setProperty('--vdc-art-r', `${(12 / scale).toFixed(1)}px`)
+  }
+  // 遮罩（暗底 + 磨砂）保持到封面快落位时才退：封面要从屏幕中心一路平移 + 缩小到源缩略图，
+  // 若遮罩早早淡出，这张大封面就会半透明地"飞越"已露出的网格、与最终缩略图错位一下再消失
+  // （用户反馈的收尾问题）。延后起退让封面在暗底上缩小、快到缩略图时网格才露出、封面顺势熔入，
+  // 与开场（封面从缩略图在暗底上长大）对称。页面可用性已由 pointer-events:none + 提前解滚动锁
+  // 保证，与遮罩视觉停留无关（反馈#42）。封面是遮罩子节点，其有效不透明度随遮罩同步淡出
+  ov.style.transition = 'opacity 0.18s ease 0.28s'
   ov.style.opacity = '0'
   closeTimer = setTimeout(() => {
     ov.style.transition = '' // 先清 transition 再 done()：EP 的 leave 立即完成，节点马上卸载
@@ -319,11 +336,12 @@ function cancelClose() {
   const ov = dlg?.closest('.el-overlay')
   const ovd = dlg?.closest('.el-overlay-dialog')
   if (dlg) {
-    dlg.classList.remove('vdc-zooming')
+    dlg.classList.remove('vdc-zooming', 'vdc-closing') // 复位 chrome 淡出（中途重开卡片要完整可见）
     dlg.style.transition = 'none' // 别让 transform 复位走 0.34s 缩放（随后 zoomIn 会重设）
     dlg.style.transform = ''
     dlg.style.transformOrigin = ''
     dlg.style.opacity = '' // 横幅关场淡出中途被截，得复原不透明
+    dlg.style.removeProperty('--vdc-art-r')
   }
   if (ov) ov.style.pointerEvents = ''
   if (ovd) ovd.style.overflow = ''
@@ -410,6 +428,30 @@ function goDir() {
   -webkit-backdrop-filter: none !important;
 }
 .el-dialog.vdc.vdc-zooming { will-change: transform; }
+/* 关场（vdc-closing）：卡片缩回缩略图时，只有顶部 16:9 封面能与缩略图严丝合缝重合，其余
+   chrome（信息区 / 关闭钮 / 续播进度条 / 卡底玻璃 + 阴影）比缩略图高、无处安放。若这些跟着
+   卡片一路缩到位仍半透明可见，会与网格内容错位叠字、最后又随卸载啪地消失——观感就是"没收完、
+   闪一下、突然收完"。关场一开始就快速淡掉它们（0.16s），只留封面独自缩回熔入缩略图（同图无缝）。
+   横幅（big）整卡淡出消融，不进入缩略图，本区块对它无副作用。cancelClose 移除本类即恢复 */
+.el-dialog.vdc.vdc-closing {
+  background: transparent !important;
+  border-color: transparent;
+  box-shadow: none;
+}
+/* 顶部玻璃高光线一并隐去（内联 transition 够不着伪元素，这里自带过渡） */
+.el-dialog.vdc.vdc-closing::before { opacity: 0; transition: opacity 0.16s ease; }
+.el-dialog.vdc.vdc-closing .vdc-info,
+.el-dialog.vdc.vdc-closing .vdc-close,
+.el-dialog.vdc.vdc-closing .vdc-prog {
+  opacity: 0;
+  transition: opacity 0.16s ease;
+}
+/* 只余的封面补上四角圆角（否则下边是卡片中部直切、下方两角方，与圆角缩略图对不上）。
+   半径由 JS 按 12/scale 反算注入 --vdc-art-r，被 dlg transform 缩放后落定恰好渲染成 12px */
+.el-dialog.vdc.vdc-closing .vdc-art {
+  border-radius: var(--vdc-art-r, 18px);
+  overflow: hidden;
+}
 /* 卡内控件的小磨砂同样永久关闭（原只在转场期关、落定恢复=又一处"过半秒变一下"）：
    它们背后是卡片平滑渐变底，模糊与否肉眼无差，关掉换零切换 */
 .el-dialog.vdc .vdc-close,
