@@ -275,3 +275,45 @@ func TestRawProxyInternalSingleStream(t *testing.T) {
 		t.Fatalf("普通客户端应走分块并发，上游请求 %d < 3", n)
 	}
 }
+
+// 直链挂载（proxy=false）原先对所有请求一律 302 到云盘直链；但直链可能提前作废
+// （OneDrive tempauth 失效回 401），而 ffmpeg 的 -reconnect_on_http_error 只认
+// 429/5xx，跟着 302 出去一遇 401 抽帧/转码即整体失败（exit 0xCECFCB08 =
+// AVERROR_HTTP_UNAUTHORIZED）。现在带 X-Internal-Auth 的内部读取方（ffmpeg/
+// ffprobe）改走 rawProxy → stream.ServeSingle 单流透传，首字节前可换链重试；
+// 外部普通请求行为不变，仍然 302。
+func TestRawDirectLinkInternalProxied(t *testing.T) {
+	content := proxyPattern(64 << 10)
+	env := newRawTestServer(t, content)
+
+	// 内部读取方：带 X-Internal-Auth，即使是直链挂载也不应 302，而是单流透传 206。
+	base := env.upstreamReqs.Load()
+	req, _ := http.NewRequest(http.MethodGet, env.api+"/api/raw/直链盘/big.bin", nil)
+	req.Header.Set("Authorization", "Bearer "+env.token)
+	req.Header.Set("X-Internal-Auth", env.internalTok)
+	req.Header.Set("Range", "bytes=100-")
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse // 禁止跟随重定向，否则 302 被跟随后 body 也能对上，区分不出新旧行为
+	}}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 206 {
+		t.Fatalf("内部读取方访问直链挂载应单流透传 206，实际 status=%d", resp.StatusCode)
+	}
+	if !bytes.Equal(body, content[100:]) {
+		t.Fatalf("内部单流透传 body 不一致: len=%d want=%d", len(body), len(content)-100)
+	}
+	if n := env.upstreamReqs.Load() - base; n != 1 {
+		t.Fatalf("内部单流透传应只发 1 个上游请求，实际 %d", n)
+	}
+
+	// 对照：外部普通请求（无 X-Internal-Auth）行为不变，仍 302 到上游直链。
+	resp2, _ := rawReq(t, http.MethodGet, env.api+"/api/raw/直链盘/big.bin", env.token, "bytes=100-")
+	if resp2.StatusCode != 302 || resp2.Header.Get("Location") != env.upstreamURL {
+		t.Fatalf("外部请求应仍 302 到上游: status=%d loc=%q", resp2.StatusCode, resp2.Header.Get("Location"))
+	}
+}

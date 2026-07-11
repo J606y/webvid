@@ -22,7 +22,14 @@ func Fail(c *gin.Context, status int, msg string) {
 
 // Fail500 内部错误：详情落服务端日志，对外只回通用文案，
 // 不向客户端泄露内部路径 / SQL / 驱动细节。
+// 请求方已挂断（ctx 取消）导致的失败不算服务端故障——ffmpeg/ffprobe 探测/抽帧
+// 会频繁开关连接，在途请求被掐连带取消驱动 RPC（如 telegram rpcDoRequest:
+// context canceled）——不记日志，回 499（客户端已关闭请求）即止。
 func Fail500(c *gin.Context, err error) {
+	if c.Request.Context().Err() != nil {
+		Fail(c, 499, "客户端已断开")
+		return
+	}
 	log.Printf("[500] %s %s: %v", c.Request.Method, c.Request.URL.Path, err)
 	Fail(c, 500, "服务器内部错误")
 }

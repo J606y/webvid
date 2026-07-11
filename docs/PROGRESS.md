@@ -306,6 +306,26 @@ NL_ADMIN_PASSWORD=admin123 ./webvid.exe     # 或 go run .
   ORB/tempauth 波动被隔离在服务端（仅首次下载失败的 302 兜底还会直连一次）
 
 ## UI 迭代记录（用户反馈）
+- 2026-07-11 反馈#43「远端视频抽帧失败 exit status 0xcecfcb08 + telegram 读取消息失败
+  rpcDoRequest: context canceled 是什么问题」：诊断+修复两件。
+  ① 0xCECFCB08 按 32 位补码 = FFmpeg AVERROR_HTTP_UNAUTHORIZED（FFERRTAG(0xF8,'4','0','1')，
+  新版 ffmpeg 直接把负错误码当进程退出码）= 抽帧途中收到 HTTP 401。本机侧已排除（回环
+  token 现签 JWT、fsError 只产 400/404/409/500/501），唯一 401 通道 = 未开代理模式的云盘
+  挂载 /api/raw 302 到直链、OneDrive tempauth 直链提前作废回 401；而 ffmpeg 的
+  -reconnect_on_http_error 只认 429/5xx，401 一发即死（重试同一条死链也无用）。
+  修 = rawHandler 对内部读取方（X-Internal-Auth，ffmpeg/ffprobe 探测/抽帧/转码）一律
+  不 302、进 rawProxy→stream.ServeSingle 单流透传：openUpstream 首字节前对 401/403/404/410
+  经 RefreshLink 绕直链缓存换链重试（#38 现成设施），彻底失败回 502（5xx，ffmpeg 会退避
+  重连、每次重连都拿新鲜链）；外部请求行为不变（非代理挂载仍 302）。
+  ② telegram 那条 = 伴随噪音非 TG 故障：ffmpeg/ffprobe 对 http 输入频繁开-关连接（初始
+  探测/跳尾部 moov/-ss seek 各开一条、旧连接直接掐断），每个 /api/raw 命中 TG 挂载都触发
+  一次 message() RPC（刷新 file_reference），被掐连接的在途 RPC 报 context canceled，经
+  fsError→Fail500 落 [500] 日志。修 = Fail500 检测请求 ctx 已取消（客户端已挂断，响应
+  无人可见）时不记日志、回 499（nginx 风格 client closed request）。
+  回归：raw_proxy_test.go 新增 TestRawDirectLinkInternalProxied（内部头+直链盘 → 206 单流
+  且上游恰 1 请求 + 无内部头仍 302 到上游；坑：断言客户端必须禁跟随重定向，否则 302 被
+  跟随后 body 也对得上、区分不出新旧行为）；go test ./... 11 包全绿；webvid.exe 已重编
+  （用户运行中实例需重启才吃到）。改动已单独提交推送、未发版（并行会话 #42 WIP 未混入）。
 - 2026-07-11 反馈#41「视频库点视频弹出的二级页面加 iOS 那种从哪来回哪去的动画」
   （#39=存储密钥明文回显 f625d6c、#40=文件页目录点击反馈 3bb8e8a，均另一会话）：
   VideoDetailCard 加 hero 转场。LibraryVideo 四处 openDetail 传 $event，来源矩形取点击卡

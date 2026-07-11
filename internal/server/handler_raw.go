@@ -56,7 +56,8 @@ func contentTypeFor(name string) string {
 
 // GET|HEAD /api/raw/*path?dl=1
 // 本地文件走 http.ServeContent（自动处理 Range/206/If-Modified-Since/HEAD）；
-// 云盘直链：默认 302，挂载开了代理模式则服务器中转（多线程 Range 加速，见 internal/stream）。
+// 云盘直链：默认 302，挂载开了代理模式则服务器中转（多线程 Range 加速，见 internal/stream）；
+// 内部读取方（ffmpeg/ffprobe）一律中转不 302，见下。
 func (s *Server) rawHandler(c *gin.Context) {
 	res, err := s.fs.LinkEx(c.Request.Context(), getUser(c), c.Param("path"))
 	if err != nil {
@@ -65,7 +66,11 @@ func (s *Server) rawHandler(c *gin.Context) {
 	}
 	lk, fi := res.Link, res.Info
 	if lk.URL != "" {
-		if !res.Accel.Proxy {
+		// 内部读取方不 302：直链可能提前作废（OneDrive tempauth 失效回 401），
+		// 而 ffmpeg 的 -reconnect_on_http_error 只认 429/5xx，跟着 302 出去一遇
+		// 401 抽帧/转码即整体失败（exit 0xCECFCB08 = AVERROR_HTTP_UNAUTHORIZED）；
+		// 单流透传在首字节前对 401/403/404/410 经 RefreshLink 换链重试。
+		if !res.Accel.Proxy && !s.isInternal(c) {
 			// 云盘直链每次都变，灯箱前后翻页会反复请求同一图；短缓存 302 本身
 			if isImage(fi.Name) {
 				c.Header("Cache-Control", "private, max-age=600")
