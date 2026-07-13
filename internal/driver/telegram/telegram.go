@@ -1,5 +1,7 @@
 // Package telegram 把本人 Telegram 收藏夹（Saved Messages）挂载为只读存储：
-// 每条含文件的消息 = 一个文件，命名 <消息ID>_<文件名>，平铺无目录。
+// 每条含文件的消息 = 一个文件，命名 <消息ID>_<文件名>。
+// 转发进收藏夹的消息按来源对话分文件夹（<对话名>/<消息ID>_<文件名>），
+// 非转发的直接上传文件留在根目录。
 // 典型用法：TG 里把视频转发到收藏夹 → 文件页复制到网盘存储 = 离线下载。
 package telegram
 
@@ -8,6 +10,8 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,8 +51,8 @@ type Telegram struct {
 	now      func() time.Time
 
 	mu     sync.Mutex
-	list   []model.FileInfo
-	listAt time.Time
+	tree   *savedTree
+	treeAt time.Time
 }
 
 func (d *Telegram) SetPersist(fn func(driver.Config) error) { d.persist = fn }
@@ -95,30 +99,52 @@ func (d *Telegram) Drop() error {
 }
 
 func (d *Telegram) List(ctx context.Context, relPath string) ([]model.FileInfo, error) {
-	if relPath != "" {
+	t, err := d.snapshot(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if relPath == "" {
+		return append([]model.FileInfo(nil), t.root...), nil
+	}
+	files, ok := t.sub[relPath]
+	if !ok {
 		return nil, driver.ErrNotFound
 	}
+	return append([]model.FileInfo(nil), files...), nil
+}
+
+// snapshot 返回收藏夹目录树（缓存有效直接返，过期时重建）。
+// 树一旦建成即只读，可安全共享指针；返回给调用方的切片各自再拷贝。
+func (d *Telegram) snapshot(ctx context.Context) (*savedTree, error) {
 	d.mu.Lock()
-	if d.list != nil && d.now().Sub(d.listAt) < d.cacheTTL {
-		out := append([]model.FileInfo(nil), d.list...)
+	if d.tree != nil && d.now().Sub(d.treeAt) < d.cacheTTL {
+		t := d.tree
 		d.mu.Unlock()
-		return out, nil
+		return t, nil
 	}
 	d.mu.Unlock()
 
-	items, err := listSaved(ctx, d.conn.client.API())
+	t, err := listSaved(ctx, d.conn.client.API())
 	if err != nil {
 		return nil, err
 	}
 	d.mu.Lock()
-	d.list, d.listAt = items, d.now()
+	d.tree, d.treeAt = t, d.now()
 	d.mu.Unlock()
-	return append([]model.FileInfo(nil), items...), nil
+	return t, nil
 }
 
 func (d *Telegram) Stat(ctx context.Context, relPath string) (model.FileInfo, error) {
 	if relPath == "" {
 		return model.FileInfo{Name: "/", IsDir: true, Modified: d.now()}, nil
+	}
+	// 已知的对话文件夹（单层名，无 "/"）→ 目录。
+	if !strings.Contains(relPath, "/") {
+		if t, err := d.snapshot(ctx); err == nil {
+			if _, ok := t.sub[relPath]; ok {
+				return model.FileInfo{Name: relPath, IsDir: true, Modified: d.now()}, nil
+			}
+		}
 	}
 	id, err := parseMsgID(relPath)
 	if err != nil {
@@ -204,7 +230,7 @@ func (d *Telegram) message(ctx context.Context, id int) (*tg.Message, *tg.Docume
 	return nil, nil, driver.ErrNotFound
 }
 
-// ---- 收藏夹列表 ----
+// ---- 收藏夹列表（按来源对话分组）----
 
 // history List 依赖的最小 API 面（单测注入假实现）。
 type history interface {
@@ -213,12 +239,30 @@ type history interface {
 
 const pageSize = 100
 
-// listSaved 分页拉全收藏夹的文件消息（服务端按新→旧返回）。
+// savedTree 是收藏夹的两层目录快照（构建后只读）。
+type savedTree struct {
+	root []model.FileInfo            // List("") 返回：各对话文件夹（目录在前）+ 根散文件
+	sub  map[string][]model.FileInfo // 文件夹名 -> 该对话下的文件
+}
+
+// folderRef 一条文件消息归属的对话：key 为稳定去重键（""=根），name 为显示名。
+type folderRef struct {
+	key  string
+	name string
+}
+
+type fileEntry struct {
+	ref  folderRef
+	info model.FileInfo
+}
+
+// listSaved 分页拉全收藏夹的文件消息（服务端按新→旧返回），按来源对话分组成树。
 // 必须全量翻历史在客户端挑文件，不能用 messages.search 的 InputMessagesFilterDocument：
 // 该 filter 只命中「以文件发送」的消息（客户端"文件"页签），普通转发的视频/音乐/GIF
 // 虽底层同为 Document 却不被命中，收藏夹全是转发视频时列表会整个为空。
-func listSaved(ctx context.Context, api history) ([]model.FileInfo, error) {
-	var out []model.FileInfo
+func listSaved(ctx context.Context, api history) (*savedTree, error) {
+	nt := nameTable{}
+	var entries []fileEntry
 	offsetID := 0
 	for {
 		r, err := api.MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
@@ -229,12 +273,13 @@ func listSaved(ctx context.Context, api history) ([]model.FileInfo, error) {
 		if err != nil {
 			return nil, fmt.Errorf("telegram: 拉取收藏列表失败: %w", err)
 		}
-		msgs, err := messagesOf(r)
+		msgs, users, chats, err := pageOf(r)
 		if err != nil {
 			return nil, err
 		}
+		nt.add(users, chats) // 本页实体先入表，供本页消息的转发头解析对话名
 		if len(msgs) == 0 {
-			return out, nil
+			break
 		}
 		last := offsetID
 		for _, m := range msgs {
@@ -243,31 +288,189 @@ func listSaved(ctx context.Context, api history) ([]model.FileInfo, error) {
 			if !ok {
 				continue
 			}
-			if doc := docOf(msg); doc != nil {
-				out = append(out, model.FileInfo{
+			doc := docOf(msg)
+			if doc == nil {
+				continue
+			}
+			entries = append(entries, fileEntry{
+				ref: fwdFolder(msg, nt),
+				info: model.FileInfo{
 					Name: entryName(msg.ID, doc), Size: doc.Size,
 					Modified: time.Unix(int64(msg.Date), 0),
-				})
-			}
+				},
+			})
 		}
 		if len(msgs) < pageSize || last == offsetID || (offsetID != 0 && last > offsetID) {
-			return out, nil // 尾页 / 偏移未推进（防御死循环）
+			break // 尾页 / 偏移未推进（防御死循环）
 		}
 		offsetID = last
+	}
+	return buildTree(entries), nil
+}
+
+// buildTree 把文件条目按对话分组成两层树；同名不同对话追加序号消歧（不合并）。
+func buildTree(entries []fileEntry) *savedTree {
+	t := &savedTree{sub: map[string][]model.FileInfo{}}
+	folderName := map[string]string{} // 去重键 -> 分配的唯一文件夹名
+	usedBy := map[string]string{}     // 文件夹名 -> 占用它的去重键
+	var order []string                // 文件夹名首次出现顺序
+
+	assign := func(ref folderRef) string {
+		if name, ok := folderName[ref.key]; ok {
+			return name
+		}
+		base := sanitizeName(ref.name)
+		if base == "" {
+			base = "对话"
+		}
+		name := base
+		for n := 2; ; n++ { // 撞名不同对话：base、base_2、base_3… 直到未被占用
+			owner, taken := usedBy[name]
+			if !taken || owner == ref.key {
+				break
+			}
+			name = base + "_" + strconv.Itoa(n)
+		}
+		folderName[ref.key] = name
+		usedBy[name] = ref.key
+		order = append(order, name)
+		return name
+	}
+
+	for _, e := range entries {
+		if e.ref.key == "" {
+			t.root = append(t.root, e.info) // 非转发 → 根散文件
+			continue
+		}
+		name := assign(e.ref)
+		t.sub[name] = append(t.sub[name], e.info)
+	}
+
+	// 目录条目排在 root 前部；目录修改时间取该对话下最新文件时间。
+	dirs := make([]model.FileInfo, 0, len(order))
+	for _, name := range order {
+		var mod time.Time
+		for _, f := range t.sub[name] {
+			if f.Modified.After(mod) {
+				mod = f.Modified
+			}
+		}
+		dirs = append(dirs, model.FileInfo{Name: name, IsDir: true, Modified: mod})
+	}
+	sort.Slice(dirs, func(i, j int) bool { return dirs[i].Name < dirs[j].Name })
+	t.root = append(dirs, t.root...)
+	return t
+}
+
+// nameTable 累积 peerKey -> 显示名（实体来自各页响应的 Users/Chats）。
+type nameTable map[string]string
+
+func (nt nameTable) add(users []tg.UserClass, chats []tg.ChatClass) {
+	for _, u := range users {
+		if uu, ok := u.(*tg.User); ok {
+			if disp := userDisplay(uu); disp != "" {
+				nt["u"+strconv.FormatInt(uu.ID, 10)] = disp
+			}
+		}
+	}
+	for _, c := range chats {
+		switch cc := c.(type) {
+		case *tg.Chat:
+			if cc.Title != "" {
+				nt["c"+strconv.FormatInt(cc.ID, 10)] = cc.Title
+			}
+		case *tg.Channel:
+			if cc.Title != "" {
+				nt["ch"+strconv.FormatInt(cc.ID, 10)] = cc.Title
+			}
+		}
+	}
+}
+
+// fwdFolder 从转发头解析来源对话；无转发信息返回零值 folderRef（归根目录）。
+// 依次尝试：SavedFromPeer/FromID 的已解析真实名 → FromName 字符串 → 按 peer id 造通用名。
+func fwdFolder(msg *tg.Message, nt nameTable) folderRef {
+	fwd, ok := msg.GetFwdFrom()
+	if !ok {
+		return folderRef{}
+	}
+	var peers []tg.PeerClass
+	if p, ok := fwd.GetSavedFromPeer(); ok { // 消息原本所在的对话（最贴合「对话」）
+		peers = append(peers, p)
+	}
+	if p, ok := fwd.GetFromID(); ok { // 退回原始发送者
+		peers = append(peers, p)
+	}
+	for _, p := range peers {
+		if k := peerKey(p); k != "" {
+			if n := nt[k]; n != "" {
+				return folderRef{key: k, name: n}
+			}
+		}
+	}
+	if s := strings.TrimSpace(fwd.FromName); s != "" { // 隐藏转发只给字符串名
+		return folderRef{key: "name:" + s, name: s}
+	}
+	for _, p := range peers { // 有 peer 但无实体名：稳定通用名，避免不同对话混入根目录
+		if k := peerKey(p); k != "" {
+			return folderRef{key: k, name: genericPeerName(p)}
+		}
+	}
+	return folderRef{}
+}
+
+// peerKey 给 peer 一个带类型前缀的稳定键（跨类型 id 可能撞号，前缀区分）。
+func peerKey(p tg.PeerClass) string {
+	switch pp := p.(type) {
+	case *tg.PeerUser:
+		return "u" + strconv.FormatInt(pp.UserID, 10)
+	case *tg.PeerChat:
+		return "c" + strconv.FormatInt(pp.ChatID, 10)
+	case *tg.PeerChannel:
+		return "ch" + strconv.FormatInt(pp.ChannelID, 10)
+	}
+	return ""
+}
+
+// genericPeerName 实体名缺失时按 peer id 造稳定通用名。
+func genericPeerName(p tg.PeerClass) string {
+	switch pp := p.(type) {
+	case *tg.PeerUser:
+		return "用户" + strconv.FormatInt(pp.UserID, 10)
+	case *tg.PeerChat:
+		return "群组" + strconv.FormatInt(pp.ChatID, 10)
+	case *tg.PeerChannel:
+		return "频道" + strconv.FormatInt(pp.ChannelID, 10)
+	}
+	return ""
+}
+
+// userDisplay 用户显示名：姓名 → 用户名 → 空（交由 genericPeerName 兜底）。
+func userDisplay(u *tg.User) string {
+	name := strings.TrimSpace(strings.TrimSpace(u.FirstName) + " " + strings.TrimSpace(u.LastName))
+	if name != "" {
+		return name
+	}
+	return strings.TrimSpace(u.Username)
+}
+
+// pageOf 从消息响应取出消息与实体（三种响应类型都带 Users/Chats）。
+func pageOf(r tg.MessagesMessagesClass) ([]tg.MessageClass, []tg.UserClass, []tg.ChatClass, error) {
+	switch v := r.(type) {
+	case *tg.MessagesMessages:
+		return v.Messages, v.Users, v.Chats, nil
+	case *tg.MessagesMessagesSlice:
+		return v.Messages, v.Users, v.Chats, nil
+	case *tg.MessagesChannelMessages:
+		return v.Messages, v.Users, v.Chats, nil
+	default:
+		return nil, nil, nil, fmt.Errorf("telegram: 未预期的消息响应 %T", r)
 	}
 }
 
 func messagesOf(r tg.MessagesMessagesClass) ([]tg.MessageClass, error) {
-	switch v := r.(type) {
-	case *tg.MessagesMessages:
-		return v.Messages, nil
-	case *tg.MessagesMessagesSlice:
-		return v.Messages, nil
-	case *tg.MessagesChannelMessages:
-		return v.Messages, nil
-	default:
-		return nil, fmt.Errorf("telegram: 未预期的消息响应 %T", r)
-	}
+	msgs, _, _, err := pageOf(r)
+	return msgs, err
 }
 
 func docOf(msg *tg.Message) *tg.Document {
@@ -309,12 +512,10 @@ func entryName(msgID int, doc *tg.Document) string {
 	return strconv.Itoa(msgID) + "_" + name
 }
 
-// parseMsgID 从 "<msgID>_<name>" 反解析消息 ID。
+// parseMsgID 从 "<对话>/<msgID>_<name>"（或根下 "<msgID>_<name>"）反解析消息 ID。
+// 文件解析只认末段的 msgID，与所在文件夹无关——取块不依赖文件夹名。
 func parseMsgID(rel string) (int, error) {
-	if strings.Contains(rel, "/") {
-		return 0, driver.ErrNotFound // 平铺存储无子目录
-	}
-	idStr, _, ok := strings.Cut(rel, "_")
+	idStr, _, ok := strings.Cut(path.Base(rel), "_")
 	if !ok {
 		return 0, driver.ErrNotFound
 	}

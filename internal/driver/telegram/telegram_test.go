@@ -47,7 +47,11 @@ func TestParseMsgID(t *testing.T) {
 	if id, err := parseMsgID("123_movie.mp4"); err != nil || id != 123 {
 		t.Fatalf("got (%d,%v), want (123,nil)", id, err)
 	}
-	for _, bad := range []string{"", "abc", "abc_x.mp4", "-3_x", "0_x", "12", "a/12_x.mp4"} {
+	// 单层对话文件夹前缀也能反解析出末段 msgID（文件解析不依赖文件夹）
+	if id, err := parseMsgID("电影频道/123_movie.mp4"); err != nil || id != 123 {
+		t.Fatalf("folder got (%d,%v), want (123,nil)", id, err)
+	}
+	for _, bad := range []string{"", "abc", "abc_x.mp4", "-3_x", "0_x", "12"} {
 		if _, err := parseMsgID(bad); !errors.Is(err, driver.ErrNotFound) {
 			t.Errorf("parseMsgID(%q) err = %v, want ErrNotFound", bad, err)
 		}
@@ -237,7 +241,9 @@ func TestSourceOtherErrorPassthrough(t *testing.T) {
 
 type fakeHistory struct {
 	pages [][]tg.MessageClass
-	reqs  []int // 每次请求的 OffsetID
+	users [][]tg.UserClass // 与 pages 平行，可为 nil（响应里的 Users 实体）
+	chats [][]tg.ChatClass // 与 pages 平行，可为 nil（响应里的 Chats 实体）
+	reqs  []int            // 每次请求的 OffsetID
 }
 
 func (f *fakeHistory) MessagesGetHistory(_ context.Context, req *tg.MessagesGetHistoryRequest) (tg.MessagesMessagesClass, error) {
@@ -246,7 +252,30 @@ func (f *fakeHistory) MessagesGetHistory(_ context.Context, req *tg.MessagesGetH
 	if i >= len(f.pages) {
 		return &tg.MessagesMessagesSlice{}, nil
 	}
-	return &tg.MessagesMessagesSlice{Messages: f.pages[i]}, nil
+	s := &tg.MessagesMessagesSlice{Messages: f.pages[i]}
+	if i < len(f.users) {
+		s.Users = f.users[i]
+	}
+	if i < len(f.chats) {
+		s.Chats = f.chats[i]
+	}
+	return s, nil
+}
+
+// msgFwd 造一条从指定 peer 转发进收藏夹的文件消息（带 SavedFromPeer）。
+func msgFwd(id int, name string, peer tg.PeerClass) *tg.Message {
+	m := msgDoc(id, name)
+	var fwd tg.MessageFwdHeader
+	fwd.SetSavedFromPeer(peer)
+	m.SetFwdFrom(fwd)
+	return m
+}
+
+// msgFwdName 造一条隐藏转发（只给 FromName 字符串、无 peer）的文件消息。
+func msgFwdName(id int, name, fromName string) *tg.Message {
+	m := msgDoc(id, name)
+	m.SetFwdFrom(tg.MessageFwdHeader{FromName: fromName})
+	return m
 }
 
 func msgMedia(id int, doc *tg.Document) *tg.Message {
@@ -273,12 +302,16 @@ func TestListSaved(t *testing.T) {
 		page1 = append(page1, msgDoc(1000-i, fmt.Sprintf("v%d.mp4", i)))
 	}
 	f := &fakeHistory{pages: [][]tg.MessageClass{page1, {msgDoc(3, "last.mp4")}}}
-	items, err := listSaved(context.Background(), f)
+	tr, err := listSaved(context.Background(), f)
 	if err != nil {
 		t.Fatal(err)
 	}
+	items := tr.root // 无转发头 → 全部平铺在根，无对话文件夹
 	if len(items) != pageSize+1 {
 		t.Fatalf("条数 %d, want %d", len(items), pageSize+1)
+	}
+	if len(tr.sub) != 0 {
+		t.Fatalf("不应产生对话文件夹，sub=%v", tr.sub)
 	}
 	if items[0].Name != "1000_v0.mp4" || items[len(items)-1].Name != "3_last.mp4" {
 		t.Fatalf("首尾 %q / %q", items[0].Name, items[len(items)-1].Name)
@@ -299,11 +332,113 @@ func TestListSavedSkipsNonDocument(t *testing.T) {
 		msgMedia(6, sticker),                                        // 贴纸
 		&tg.MessageService{ID: 5},                                   // 服务消息
 	}}}
-	items, err := listSaved(context.Background(), f)
-	if err != nil || len(items) != 2 {
-		t.Fatalf("got %v, %v", items, err)
+	tr, err := listSaved(context.Background(), f)
+	if err != nil || len(tr.root) != 2 {
+		t.Fatalf("got %v, %v", tr.root, err)
 	}
-	if items[0].Name != "10_a.mp4" || items[1].Name != "9_file_20260710.mp4" {
-		t.Fatalf("条目 %q / %q", items[0].Name, items[1].Name)
+	if tr.root[0].Name != "10_a.mp4" || tr.root[1].Name != "9_file_20260710.mp4" {
+		t.Fatalf("条目 %q / %q", tr.root[0].Name, tr.root[1].Name)
+	}
+}
+
+// ---- 按来源对话分组 ----
+
+func TestListSavedGroupsByChat(t *testing.T) {
+	chA := &tg.PeerChannel{ChannelID: 555}
+	usrB := &tg.PeerUser{UserID: 111}
+	page := []tg.MessageClass{
+		msgFwd(30, "a.mp4", chA),
+		msgFwd(29, "b.mp4", chA),
+		msgFwd(28, "c.mp4", usrB),
+		msgDoc(27, "loose.mp4"), // 非转发 → 根散文件
+	}
+	f := &fakeHistory{
+		pages: [][]tg.MessageClass{page},
+		chats: [][]tg.ChatClass{{&tg.Channel{ID: 555, Title: "电影频道"}}},
+		users: [][]tg.UserClass{{&tg.User{ID: 111, FirstName: "小明"}}},
+	}
+	tr, err := listSaved(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.sub) != 2 {
+		t.Fatalf("文件夹数 %d, want 2: %v", len(tr.sub), tr.sub)
+	}
+	if got := len(tr.sub["电影频道"]); got != 2 {
+		t.Fatalf("电影频道 文件 %d, want 2", got)
+	}
+	if got := len(tr.sub["小明"]); got != 1 {
+		t.Fatalf("小明 文件 %d, want 1", got)
+	}
+	var dirs, files int
+	for _, it := range tr.root {
+		if it.IsDir {
+			dirs++
+		} else {
+			files++
+		}
+	}
+	if dirs != 2 || files != 1 {
+		t.Fatalf("root dirs=%d files=%d, want 2/1", dirs, files)
+	}
+	// 目录排在散文件前，散文件在末尾
+	if tr.root[len(tr.root)-1].Name != "27_loose.mp4" {
+		t.Fatalf("根散文件应在末尾，got %q", tr.root[len(tr.root)-1].Name)
+	}
+}
+
+func TestListSavedFromName(t *testing.T) {
+	f := &fakeHistory{pages: [][]tg.MessageClass{{
+		msgFwdName(10, "x.mp4", "神秘转发者"),
+	}}}
+	tr, err := listSaved(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.sub["神秘转发者"]) != 1 {
+		t.Fatalf("隐藏转发应按 FromName 建文件夹，sub=%v", tr.sub)
+	}
+}
+
+// 有 peer 但响应无对应实体：落按 id 造的通用名文件夹，不混入根目录。
+func TestListSavedUnknownPeerGeneric(t *testing.T) {
+	f := &fakeHistory{pages: [][]tg.MessageClass{{
+		msgFwd(9, "y.mp4", &tg.PeerChannel{ChannelID: 777}),
+	}}} // 无 chats 实体
+	tr, err := listSaved(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.sub["频道777"]) != 1 {
+		t.Fatalf("未解析 peer 应落通用名文件夹，sub=%v", tr.sub)
+	}
+	if len(tr.root) != 1 || !tr.root[0].IsDir {
+		t.Fatalf("root 应只有 1 个目录，got %v", tr.root)
+	}
+}
+
+// 同名不同对话：分成两个文件夹消歧，不合并。
+func TestListSavedNameCollision(t *testing.T) {
+	f := &fakeHistory{
+		pages: [][]tg.MessageClass{{
+			msgFwd(5, "a.mp4", &tg.PeerChannel{ChannelID: 1}),
+			msgFwd(4, "b.mp4", &tg.PeerChannel{ChannelID: 2}),
+		}},
+		chats: [][]tg.ChatClass{{
+			&tg.Channel{ID: 1, Title: "频道"},
+			&tg.Channel{ID: 2, Title: "频道"},
+		}},
+	}
+	tr, err := listSaved(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tr.sub) != 2 {
+		t.Fatalf("撞名应分成两个文件夹，got %d: %v", len(tr.sub), tr.sub)
+	}
+	for name, files := range tr.sub {
+		if len(files) != 1 {
+			t.Fatalf("文件夹 %q 有 %d 文件，应为 1（未合并）", name, len(files))
+		}
 	}
 }
