@@ -125,8 +125,10 @@ async function mount(url, isHls) {
     autoplay: true,
     // 中间大播放态图标换成纯三角（去掉 ArtPlayer 自带的实心圆），
     // 下方 .art-state 用液态玻璃圆承托 —— 圆由玻璃画、三角只是白色glyph。
+    // svg 必须带显式 width/height 属性（ArtPlayer 自带图标全都带）：只有 viewBox 的
+    // svg 在 iOS WebKit 的百分比尺寸链里会解析成 0 高，iPhone 上三角直接消失只剩玻璃圆。
     icons: {
-      state: '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M8 5v14l11-7z"></path></svg>',
+      state: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>',
     },
   }
   if (isHls) {
@@ -233,6 +235,11 @@ onBeforeUnmount(() => {
   align-items: center;
 }
 .player :deep(.art-controls) { padding-bottom: 8px; }
+/* ArtPlayer 检测到手机 UA（.art-mobile）会给两个控件组加负边距让图标贴边——玻璃胶囊
+   贴边很难看；上面的 margin:0 与它平级打平、而 ArtPlayer 样式是运行时注入排在产物 CSS
+   之后会赢，这里按更高特异性压回。 */
+.player :deep(.art-video-player.art-mobile .art-controls-left) { margin-left: 0; }
+.player :deep(.art-video-player.art-mobile .art-controls-right) { margin-right: 0; }
 /* 每颗控件 = 一枚液态玻璃胶囊：近乎透明的底 + 弱磨砂（透背后画面）+ 顶部高光描边 + 轻投影。
    要点：blur 压到 7px 才透（16px 会糊成厚磨砂），底色降到 .06、靠 saturate/brightness 提折射感
    与更亮的高光内描边把玻璃「形状」勾出来 —— 这才是液态玻璃而非磨砂玻璃。 */
@@ -283,10 +290,11 @@ onBeforeUnmount(() => {
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 6px 22px rgba(0, 0, 0, .3);
 }
 .player :deep(.art-state .art-icon) {
-  width: 42%;
-  height: 42%;
-  margin-left: 4%; /* 三角视觉重心偏左，右移一点看着才居中 */
-  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, .5));
+  width: 32px;  /* 定像素并与 svg 的 width/height 属性一致：原 42% 的百分比链在 iOS WebKit
+                   会把内层 svg 解析成 0 高（只剩玻璃圆没三角）；原 filter:drop-shadow 也是
+                   iOS 光栅化雷区（同极光教训）一并去掉，对比度交给玻璃圆的底色+描边 */
+  height: 32px;
+  margin-left: 3px; /* 三角视觉重心偏左，右移一点看着才居中 */
 }
 .unsupported, .detecting {
   padding: 70px 24px; text-align: center;
@@ -314,6 +322,23 @@ onBeforeUnmount(() => {
     width: 100%;
     margin: auto 0; /* 头部之下剩余空间垂直居中 */
   }
+  /* 底栏控件收一号：390px 屏减页边距后控件行只有 ~350px，桌面尺度（胶囊 42 + gap 8 +
+     时间胶囊两侧 12px）七颗排不下会挤成一团。胶囊 36/34、图标 20、gap 5、时间字号 12，
+     整行 ~320px 落进一行还留呼吸空间；控件行高回 44 给触控留高度（.art-mobile 压成 38 太矮）。 */
+  .player :deep(.art-video-player) {
+    --art-control-icon-size: 20px;
+    --art-padding: 8px;
+    --art-control-height: 44px;
+  }
+  .player :deep(.art-controls-left),
+  .player :deep(.art-controls-right) { gap: 5px; }
+  .player :deep(.art-controls .art-control) {
+    min-width: 36px;
+    min-height: 34px;
+    border-radius: 12px;
+    padding: 0 2px;
+  }
+  .player :deep(.art-control-time) { padding: 0 7px; font-size: 12px; }
   .unsupported, .detecting { margin: auto 0; } /* 兜底/探测占位同样居中，不再吊在顶部 */
 }
 </style>

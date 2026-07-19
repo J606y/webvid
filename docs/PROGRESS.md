@@ -306,6 +306,27 @@ NL_ADMIN_PASSWORD=admin123 ./webvid.exe     # 或 go run .
   ORB/tempauth 波动被隔离在服务端（仅首次下载失败的 302 兜底还会直连一次）
 
 ## UI 迭代记录（用户反馈）
+- 2026-07-19 反馈#51「播放器 iOS 暂停三角消失 + 手机底栏控件
+  选项排列太挤」（均 Play.vue，改 YouTube 液态玻璃后的遗留）：
+  ① 真因 = f3be8b5 把 state 图标换成纯三角时 svg 只写了 viewBox 没带 width/height 属性
+  （ArtPlayer 自带图标全都带），iOS WebKit 对无宽高属性的 svg 在 flex+百分比尺寸链
+  （.art-icon 42% → svg 100%）里解析成 0 高——玻璃圆是 CSS 画的所以还在、三角 glyph
+  消失；桌面 Blink 解析正常故只 iPhone 复现。修 = svg 串补显式 width/height="32"、
+  .art-state .art-icon 由 42%/4% 百分比改定像素 32px/3px，顺手摘掉其上的
+  filter:drop-shadow（iOS 光栅化雷区，同 #35 极光教训；对比度交给玻璃圆底色+描边）。
+  ② 两笔账：a) 桌面尺度的胶囊（min-width 42 + gap 8 + 时间胶囊两侧 12px 内边距）在
+  390px 屏减页边距后 ~350px 的控件行里七颗排不下（合计 ~390px）；b) ArtPlayer 检测到
+  手机 UA 加 .art-mobile 给左右控件组负边距让图标贴边——我们的 margin:0 与它平级
+  （(0,3,0) 打平），而 ArtPlayer 样式是运行时注入排在产物 CSS 之后会赢，所以真机上
+  负边距其实一直生效、玻璃胶囊贴边。修 = ≤768px 媒体查询整体收一号（胶囊 36/34、
+  圆角 12、图标 20px、gap 5、--art-padding 8、时间字号 12px，整行 ~320px 落进一行留
+  呼吸空间；--art-control-height 回 44 别用 .art-mobile 压的 38 太矮）+ 基础样式区
+  用更高特异性 .art-video-player.art-mobile .art-controls-left/right 把负边距压回 0。
+  回归：新增 frontend/player-check.mjs 12 项（iPhone UA 触发 .art-mobile 断言 svg 渲染
+  尺寸非零/带宽高属性/无 filter/七颗控件不越界/负边距归零 + 桌面尺度不回归，NL_BASE
+  可指隔离实例）+ mobile-check 37 + detect-check 3 + progress-check 15 + zoom-check 30
+  全绿零控制台错误；npm run build + go build 重嵌完成，_shots/player-fix-{mobile,desktop}.png
+  复核。①的最终确认需用户 iPhone 真机复测（本机无 iOS WebKit，修法为消除机制）。
 - 2026-07-11 反馈#43「远端视频抽帧失败 exit status 0xcecfcb08 + telegram 读取消息失败
   rpcDoRequest: context canceled 是什么问题」：诊断+修复两件。
   ① 0xCECFCB08 按 32 位补码 = FFmpeg AVERROR_HTTP_UNAUTHORIZED（FFERRTAG(0xF8,'4','0','1')，
