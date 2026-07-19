@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- WebVid 应用图标母版（全出血方版，供 maskable/apple-touch 栅格化；改我后跑
+       node icon-lab/render-icons.mjs 再 npm run build + go build 重嵌）。
+       设计：首字母 W = 两条 V 形圆头彩带交叠（左 V 蓝→紫、右 V 青→粉，取 glass.css
+       .aurora 极光四色），交叠处 mix-blend-mode:screen 提亮成半透明「玻璃彩带」——
+       对应产品的液态玻璃语言；暗底 #0a0a12 + 顶部淡蓝紫雾光。中间两顶点(y208)低于
+       外侧(y172)保 W 字形层级；字形整体落在 maskable 圆形安全区(r≈205)内。
+       淘汰方案与对比板见 w-a.svg / w-b.svg / compare.html。 -->
+  <defs>
+    <linearGradient id="v1" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#4664ff"/>
+      <stop offset="1" stop-color="#9646ff"/>
+    </linearGradient>
+    <linearGradient id="v2" x1="0" y1="1" x2="1" y2="0">
+      <stop offset="0" stop-color="#00b9be"/>
+      <stop offset="1" stop-color="#ff5fa5"/>
+    </linearGradient>
+    <radialGradient id="haze" cx="50%" cy="46%" r="60%">
+      <stop offset="0" stop-color="#7aa2ff" stop-opacity=".16"/>
+      <stop offset="1" stop-color="#7aa2ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" fill="#0a0a12"/>
+  <rect width="512" height="512" fill="url(#haze)"/>
+  <g stroke-linecap="round" stroke-linejoin="round" fill="none">
+    <path d="M118 172 L196 340 L268 208" stroke="url(#v1)" stroke-width="66"/>
+    <path d="M244 208 L316 340 L394 172" stroke="url(#v2)" stroke-width="66" style="mix-blend-mode:screen"/>
+  </g>
+</svg>

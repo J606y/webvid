@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!-- 图标设计预览板（常驻，改 icon-master.svg 后浏览器直接打开自查）：母版在各真实
+     落点形态下的观感 — iOS 主屏圆角、Android 圆形蒙版、浏览器标签 32/16、暗/亮底 -->
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { margin: 0; padding: 28px; background: #1c1e26; font: 12px/1.6 sans-serif; color: #aab; }
+  .row { display: flex; align-items: flex-end; gap: 28px; margin-bottom: 26px; }
+  .cell { text-align: center; }
+  .cell img { display: block; margin: 0 auto 6px; }
+  .ios { border-radius: 22.4%; overflow: hidden; }       /* iOS 主屏圆角 ≈ r 22.4% */
+  .droid { border-radius: 50%; overflow: hidden; }        /* Android 圆形蒙版 */
+  .ios img, .droid img { border-radius: 0; }
+  .light { background: #f2f3f7; padding: 18px; border-radius: 10px; display: inline-flex; gap: 18px; }
+</style>
+</head>
+<body>
+  <div class="row">
+    <div class="cell"><img src="icon-master.svg" width="512" height="512"><div>512 母版（全出血）</div></div>
+    <div class="cell"><div class="ios"><img src="icon-master.svg" width="180" height="180"></div><div>iOS 主屏 180</div></div>
+    <div class="cell"><div class="droid"><img src="icon-master.svg" width="128" height="128"></div><div>Android 圆形</div></div>
+    <div class="cell"><div class="ios"><img src="icon-master.svg" width="64" height="64"></div><div>64</div></div>
+    <div class="cell"><div class="ios"><img src="icon-master.svg" width="32" height="32"></div><div>标签 32</div></div>
+    <div class="cell"><div class="ios"><img src="icon-master.svg" width="16" height="16"></div><div>16</div></div>
+  </div>
+  <div class="row">
+    <div class="light">
+      <div class="cell"><div class="ios"><img src="icon-master.svg" width="120" height="120"></div><div style="color:#667">亮底 120</div></div>
+      <div class="cell"><div class="ios"><img src="icon-master.svg" width="48" height="48"></div><div style="color:#667">48</div></div>
+      <div class="cell"><div class="ios"><img src="icon-master.svg" width="24" height="24"></div><div style="color:#667">24</div></div>
+    </div>
+  </div>
+</body>
+</html>

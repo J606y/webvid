@@ -2,7 +2,7 @@
   <div class="login-wrap">
     <div class="login-card glass glass-panel">
       <div class="logo">
-        <el-icon :size="34"><Platform /></el-icon>
+        <img src="/favicon.svg" alt="" width="64" height="64">
       </div>
       <h1>{{ app.siteTitle }}</h1>
       <p class="dim sub">登录以继续</p>
@@ -26,7 +26,7 @@
 import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Platform, User, Lock } from '@element-plus/icons-vue'
+import { User, Lock } from '@element-plus/icons-vue'
 import { useAuth } from '../stores/auth'
 import { useApp } from '../stores/app'
 
@@ -73,11 +73,8 @@ onMounted(() => app.fetchPublic())
 .logo {
   width: 64px; height: 64px;
   margin: 0 auto 14px;
-  display: flex; align-items: center; justify-content: center;
-  border-radius: 20px;
-  background: linear-gradient(135deg, rgba(122, 162, 255, 0.35), rgba(170, 100, 255, 0.3));
-  border: 1px solid rgba(255, 255, 255, 0.2);
 }
+.logo img { display: block; } /* app 图标瓦片：圆角/极光底已烙在 svg 里，不再套渐变底框 */
 h1 { margin: 0 0 4px; font-size: 24px; font-weight: 700; }
 .sub { margin: 0 0 26px; font-size: 13px; }
 .submit { width: 100%; margin-top: 4px; font-size: 15px; }

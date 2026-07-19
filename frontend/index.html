@@ -12,6 +12,11 @@
   <meta name="theme-color" content="#0a0a12" />
   <!-- 标准 PWA 清单：现代 iOS(16.4+)/Android 据此以独立 App 方式运行 -->
   <link rel="manifest" href="/manifest.webmanifest" />
+  <!-- 图标：svg 优先（现代浏览器矢量无损），png 兜 Safari 桌面等不认 svg favicon 的；
+       apple-touch-icon 供 iOS 加主屏（全出血方版，圆角 iOS 自己裁）。母版与生成管线见 icon-lab/ -->
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
   <title>WebVid</title>
   <style>body{background:#0a0a12;margin:0}</style>
 </head>

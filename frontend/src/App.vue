@@ -3,7 +3,7 @@
 
   <header v-if="showNav" class="topbar glass" :class="{ 'immersive-hide': immersive }">
     <router-link to="/" class="brand">
-      <el-icon :size="20"><Platform /></el-icon>
+      <img class="brand-logo" src="/favicon.svg" alt="">
       <span>{{ app.siteTitle }}</span>
     </router-link>
     <nav ref="navRef" class="nav">
@@ -52,7 +52,7 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
-  Platform, User, ArrowDown, Setting, SwitchButton,
+  User, ArrowDown, Setting, SwitchButton,
   VideoCamera, Picture, Folder, Search,
 } from '@element-plus/icons-vue'
 import { useAuth } from './stores/auth'
@@ -136,6 +136,7 @@ onUnmounted(() => window.removeEventListener('resize', syncPills))
   display: flex; align-items: center; gap: 8px;
   font-weight: 700; font-size: 17px; letter-spacing: 0.5px;
 }
+.brand-logo { width: 22px; height: 22px; display: block; } /* 圆角已烙在 svg 里 */
 .nav { display: flex; gap: 4px; position: relative; }
 /* dock 指示丸：选中背景不再画在项上，由这枚胶囊在项间滑动（transform+width 过渡） */
 .nav-pill {

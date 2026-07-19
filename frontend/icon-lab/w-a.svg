@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- 方案A：一笔 W，极光渐变流过笔画，暗底微光 -->
+  <defs>
+    <linearGradient id="wg" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#4664ff"/>
+      <stop offset=".38" stop-color="#9646ff"/>
+      <stop offset=".72" stop-color="#ff5fa5"/>
+      <stop offset="1" stop-color="#00b9be"/>
+    </linearGradient>
+    <radialGradient id="haze" cx="50%" cy="46%" r="60%">
+      <stop offset="0" stop-color="#7aa2ff" stop-opacity=".2"/>
+      <stop offset=".55" stop-color="#9646ff" stop-opacity=".08"/>
+      <stop offset="1" stop-color="#9646ff" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="512" height="512" fill="#0a0a12"/>
+  <rect width="512" height="512" fill="url(#haze)"/>
+  <!-- 光晕：同路径更宽更淡的一层垫底（不用 filter） -->
+  <path d="M120 172 L190 340 L256 205 L322 340 L392 172" fill="none"
+        stroke="url(#wg)" stroke-width="112" stroke-linecap="round" stroke-linejoin="round" opacity=".22"/>
+  <path d="M120 172 L190 340 L256 205 L322 340 L392 172" fill="none"
+        stroke="url(#wg)" stroke-width="62" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- WebVid favicon（由 icon-lab/icon-master.svg 经 render-icons.mjs 生成，勿手改）
+       圆角 22.4% 的 app 瓦片形态，浏览器标签/顶栏/登录页共用 -->
+  <clipPath id="tile"><rect width="512" height="512" rx="115"/></clipPath>
+  <defs>
+      <linearGradient id="v1" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#4664ff"/>
+        <stop offset="1" stop-color="#9646ff"/>
+      </linearGradient>
+      <linearGradient id="v2" x1="0" y1="1" x2="1" y2="0">
+        <stop offset="0" stop-color="#00b9be"/>
+        <stop offset="1" stop-color="#ff5fa5"/>
+      </linearGradient>
+      <radialGradient id="haze" cx="50%" cy="46%" r="60%">
+        <stop offset="0" stop-color="#7aa2ff" stop-opacity=".16"/>
+        <stop offset="1" stop-color="#7aa2ff" stop-opacity="0"/>
+      </radialGradient>
+    </defs>
+  <g clip-path="url(#tile)">
+    <rect width="512" height="512" fill="#0a0a12"/>
+      <rect width="512" height="512" fill="url(#haze)"/>
+      <g stroke-linecap="round" stroke-linejoin="round" fill="none">
+        <path d="M118 172 L196 340 L268 208" stroke="url(#v1)" stroke-width="66"/>
+        <path d="M244 208 L316 340 L394 172" stroke="url(#v2)" stroke-width="66" style="mix-blend-mode:screen"/>
+      </g>
+  </g>
+</svg>

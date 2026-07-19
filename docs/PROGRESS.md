@@ -306,6 +306,36 @@ NL_ADMIN_PASSWORD=admin123 ./webvid.exe     # 或 go run .
   ORB/tempauth 波动被隔离在服务端（仅首次下载失败的 302 兜底还会直连一次）
 
 ## UI 迭代记录（用户反馈）
+- 2026-07-19 反馈#52「给这个项目设计一个图标」（此前项目完全没有图标：无 favicon、
+  manifest 无 icons、无 apple-touch-icon，iOS 加主屏用网页截图兜底）：
+  设计 = 产品自身视觉语言的浓缩——暗底 #0a0a12 + 四色极光光斑（取 glass.css .aurora
+  同源色蓝/紫/青/粉，透明度加档补小尺寸失色、光斑放大推向中心让颜色从玻璃后透出，
+  v1 教训：光斑守角落会中心发灰没毛玻璃感）+ 液态玻璃圆（上亮下暗白渐变模拟磨砂 +
+  顶亮底弱描边）+ 白色圆角三角（stroke-linejoin:round 圆角法，重心右移视觉居中），
+  即「播放器暂停态图标坐在极光上」。母版 frontend/icon-lab/icon-master.svg（512 全出血
+  方版，手写 SVG 纯渐变无 filter），生成管线 icon-lab/render-icons.mjs（Playwright/Edge
+  栅格化）产 public/ 全套：favicon.svg（包 rx 22.4% 圆角裁切成 app 瓦片，标签页/顶栏/
+  登录页共用）+ icon-{192,512}.png（manifest any+maskable，玻璃圆 d300 在 maskable 安全
+  区内）+ apple-touch-icon.png 180（全出血，圆角 iOS 自己裁）+ favicon-32.png +
+  favicon.ico（PNG-in-ICO 容器手拼 22 字节头，兜老 UA 硬编码 /favicon.ico）；
+  icon-lab/preview.html 预览板（iOS 圆角/Android 圆形/32/16/亮底形态一屏自查）。
+  接线 = manifest.webmanifest 加 icons 数组 4 条、index.html 加三条 link（svg 优先 +
+  png 兜 Safari 桌面 + apple-touch-icon）、App.vue 顶栏与 Login.vue 登录卡的通用
+  Platform 显示器图标换成 img /favicon.svg（22px/64px，Login 原渐变底框删掉——瓦片
+  自带底；两处 Platform import 同步移除防 lint）。验证 = 隔离实例 curl 7 资产全 200
+  且 MIME 正确（.ico 自动 image/x-icon）、manifest icons 解析 4 条、登录页/顶栏截图
+  _shots/icon-{login,topbar}.png 复核、mobile-check 37/37 零控制台错误；npm run build
+  + go build 已重嵌。注意：iOS 已加主屏的用户需重启实例后重新「添加到主屏幕」才换新图。
+  二轮（用户：「有点丑，用首字母 W 做一个艺术的 icon」）：图标重设计为 W 字标——两条
+  V 形圆头彩带交叠成 W（左 V 蓝#4664ff→紫#9646ff、右 V 青#00b9be→粉#ff5fa5，仍取
+  .aurora 极光四色），右 V mix-blend-mode:screen 让交叠处提亮成半透明「玻璃彩带」呼应
+  液态玻璃语言；暗底 #0a0a12 + 顶部淡蓝紫雾光；中间两顶点(y208)压低于外侧(y172)保 W
+  字形层级（一轮草稿几乎同高读作 X 交叉——教训）；字形含圆头端帽落在 maskable 圆形
+  安全区(r≈205)内。对比过的方案 A（一笔 W + 极光渐变 + 宽笔画光晕垫底）因光晕显脏
+  淘汰，探索稿留 icon-lab/w-{a,b}.svg + compare.html。母版重写后跑 render-icons.mjs
+  再生全套资产（管线/接线不变，favicon.svg 1.4KB），二进制已重编、5243 已带新图标
+  重启。坑：playwright setContent 页面里 file:// 子资源被 Edge 拦（about:blank 上下文），
+  预览板须落盘 html 再 goto file:// 打开。
 - 2026-07-19 反馈#51「播放器 iOS 暂停三角消失 + 手机底栏控件
   选项排列太挤」（均 Play.vue，改 YouTube 液态玻璃后的遗留）：
   ① 真因 = f3be8b5 把 state 图标换成纯三角时 svg 只写了 viewBox 没带 width/height 属性
