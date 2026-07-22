@@ -18,7 +18,7 @@
 <script setup>
 import { ref } from 'vue'
 import { ElMessage } from 'element-plus'
-import http from '../api/http'
+import { api } from '../utils/api'
 import { join } from '../utils/path'
 
 const props = defineProps({
@@ -41,7 +41,7 @@ function onOpen() {
 async function loadNode(node, resolve) {
   const path = node.level === 0 ? '/' : node.data.path
   try {
-    const d = await http.get('/fs/list', { params: { path } })
+    const d = await api.fs.list(path)
     const dirs = (d.items || []).filter((x) => x.is_dir).map((x) => ({
       name: x.name,
       path: join(path, x.name),
@@ -64,10 +64,9 @@ function onSelect(data) {
 async function submit() {
   loading.value = true
   try {
-    const d = await http.post(props.mode === 'move' ? '/fs/move' : '/fs/copy', {
-      paths: props.paths,
-      dst_dir: selected.value,
-    })
+    const d = await (props.mode === 'move'
+      ? api.fs.move(props.paths, selected.value)
+      : api.fs.copy(props.paths, selected.value))
     const taskIDs = d?.task_ids || []
     const errs = d?.errors || []
     if (errs.length) ElMessage.warning(errs.join('；'))

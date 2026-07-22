@@ -1,6 +1,6 @@
 import { ref, computed, watch, onMounted, onUnmounted, onActivated, onDeactivated } from 'vue'
 import { useRoute } from 'vue-router'
-import http from '../api/http'
+import { api } from '../utils/api'
 import { isMobile } from '../utils/viewport'
 import { swipeHandlers } from '../utils/swipe'
 
@@ -59,7 +59,7 @@ export function useMediaLibrary(opts) {
     try {
       // 历史视图（最近播放/查看）：一次取 historyCap 条，不分页
       if (historyView.value) {
-        const d = await http.get('/media/history', { params: { kind, limit: historyCap } })
+        const d = await api.media.history({ kind, limit: historyCap })
         if (g !== gen) return
         grid.value = d.items || []
         hasMore.value = false
@@ -74,7 +74,7 @@ export function useMediaLibrary(opts) {
         params.order = sort.value === 'name' ? 'asc' : 'desc'
       }
       if (dir.value) params.parent = dir.value
-      const d = await http.get('/media/list', { params })
+      const d = await api.media.list(params)
       if (g !== gen) return
       const items = d.items || []
       grid.value.push(...items)

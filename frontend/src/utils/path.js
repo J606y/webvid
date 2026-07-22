@@ -1,4 +1,5 @@
 // 逻辑路径工具：路径恒以 / 开头、/ 分隔。
+import { getToken } from './token'
 
 export function encodePath(p) {
   return p.split('/').map(encodeURIComponent).join('/')
@@ -17,22 +18,18 @@ export function segments(p) {
   return p.split('/').filter(Boolean)
 }
 
-function token() {
-  return localStorage.getItem('nl_token') || ''
-}
-
-// img/video 标签带不了 Header，token 走 query
+// img/video 标签带不了 Header，token 走 query（getToken 见 utils/token.js）
 export function rawUrl(p, dl = false) {
-  return `/api/raw${encodePath(p)}?token=${encodeURIComponent(token())}` + (dl ? '&dl=1' : '')
+  return `/api/raw${encodePath(p)}?token=${encodeURIComponent(getToken())}` + (dl ? '&dl=1' : '')
 }
 
 export function thumbUrl(p, size = 400) {
-  return `/api/thumb${encodePath(p)}?size=${size}&token=${encodeURIComponent(token())}`
+  return `/api/thumb${encodePath(p)}?size=${size}&token=${encodeURIComponent(getToken())}`
 }
 
 // HLS 转码播放列表地址（分片 URI 的 token 由服务端注入回列表）
 export function hlsUrl(p) {
-  return `/api/video/hls${encodePath(p)}/index.m3u8?token=${encodeURIComponent(token())}`
+  return `/api/video/hls${encodePath(p)}/index.m3u8?token=${encodeURIComponent(getToken())}`
 }
 
 // 构造 /files /play 路由（逐段编码，兼容 % # ? 等字符）

@@ -54,6 +54,20 @@ export function formatTime(iso) {
 // 缩略图加载失败：隐藏 img，让下方 .thumb-fallback 兜底图标露出（Files/Library*/Search/VideoDetailCard 共用）
 export function hideImg(e) { e.target.style.display = 'none' }
 
+// hasThumb：文件（非目录）且为图片/视频 → 有缩略图（Files/Search 网格共用）。
+export function hasThumb(item) {
+  if (item.is_dir) return false
+  const t = extType(item.name)
+  return t === 'image' || t === 'video'
+}
+
+// progressPct：播放进度百分比（0-100 整数）；position/duration 任一为空 → 0
+// （续播条/继续观看的显示判据，LibraryVideo 与 VideoDetailCard 共用）。
+export function progressPct(position, duration) {
+  if (!position || !duration) return 0
+  return Math.min(100, Math.round((position / duration) * 100))
+}
+
 // 去扩展名（同 ext() 的 lastIndexOf 判定：i>0 才算有扩展名，隐藏文件如 .gitignore 保持原样不截断）
 export function stripExt(name) {
   const i = name.lastIndexOf('.')

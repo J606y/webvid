@@ -56,13 +56,15 @@
 </template>
 
 <script setup>
-import { ref, computed, nextTick } from 'vue'
+import { ref, computed } from 'vue'
 import { useRouter, onBeforeRouteLeave } from 'vue-router'
 import { Close, FolderOpened, RefreshLeft, VideoCamera, VideoPlay } from '@element-plus/icons-vue'
-import http from '../api/http'
+import { api } from '../utils/api'
 import { fetchVideoInfo } from '../utils/videoInfo'
+import { useHeroDialog } from '../utils/heroDialog'
+import { extractVibrant } from '../utils/monet'
 import { thumbUrl, playRoute, filesRoute, parent } from '../utils/path'
-import { formatSize, formatTime, hideImg, stripExt, formatDuration } from '../utils/file'
+import { formatSize, formatTime, hideImg, stripExt, formatDuration, progressPct } from '../utils/file'
 
 const router = useRouter()
 const visible = ref(false)
@@ -74,11 +76,7 @@ const tint = ref(null) // 封面莫奈主色 {r,g,b}，取不到 = 中性玻璃
 let seq = 0 // 连开多个卡片时丢弃过期响应
 
 // resumePct 续播百分比（0 = 无进度，不显示进度条/继续观看）
-const resumePct = computed(() => {
-  const { position, duration } = progress.value
-  if (!position || !duration) return 0
-  return Math.min(100, Math.round((position / duration) * 100))
-})
+const resumePct = computed(() => progressPct(progress.value.position, progress.value.duration))
 // 信息区玻璃染色：主色由近及远渐隐（叠在 backdrop 磨砂上，保持玻璃质感）
 const tintStyle = computed(() => {
   if (!tint.value) return {}
@@ -89,66 +87,12 @@ const tintStyle = computed(() => {
   }
 })
 
-// 封面加载完取莫奈主色：缩样到 24×24 → 粗量化分桶挑主导色（跳过近黑/近白）→
-// HSL 里抬饱和度、钳亮度，得到 Material You 式基调
+// 封面加载完取莫奈主色（算法见 utils/monet）；取不到落 null = 中性玻璃。
+// :key 切换后旧 img 的迟到 load 要忽略（已脱离文档）。
 function onArtLoad(e) {
   const img = e.target
-  if (!img.isConnected) return // :key 切换后旧 img 的迟到 load
-  try {
-    const S = 24
-    const c = document.createElement('canvas')
-    c.width = S; c.height = S
-    const ctx = c.getContext('2d', { willReadFrequently: true })
-    ctx.drawImage(img, 0, 0, S, S)
-    const d = ctx.getImageData(0, 0, S, S).data // 同源缩略图；跨域 302 兜底会抛错走 catch
-    const buckets = new Map()
-    for (let i = 0; i < d.length; i += 4) {
-      const r = d[i], g = d[i + 1], b = d[i + 2]
-      const max = Math.max(r, g, b), min = Math.min(r, g, b)
-      if ((max + min) / 2 < 24 || (max + min) / 2 > 235) continue
-      const key = ((r >> 5) << 10) | ((g >> 5) << 5) | (b >> 5)
-      const e2 = buckets.get(key) || { n: 0, r: 0, g: 0, b: 0, s: 0 }
-      e2.n++; e2.r += r; e2.g += g; e2.b += b; e2.s += max - min
-      buckets.set(key, e2)
-    }
-    let best = null, bestScore = -1
-    for (const v of buckets.values()) {
-      const score = v.n * (1 + v.s / v.n / 64) // 占比为主，饱和度加成防灰底压过主体色
-      if (score > bestScore) { bestScore = score; best = v }
-    }
-    tint.value = best ? vibrant(best.r / best.n, best.g / best.n, best.b / best.n) : null
-  } catch { tint.value = null }
-}
-
-// rgb→hsl 调整→rgb：s ≥ 0.42（莫奈鲜度）、l 钳 [0.34, 0.58]（深色 UI 上既显色又不刺眼）
-function vibrant(r, g, b) {
-  r /= 255; g /= 255; b /= 255
-  const max = Math.max(r, g, b), min = Math.min(r, g, b)
-  let h = 0
-  const l = (max + min) / 2
-  const dd = max - min
-  let s = dd === 0 ? 0 : dd / (1 - Math.abs(2 * l - 1))
-  if (dd > 0) {
-    if (max === r) h = ((g - b) / dd + (g < b ? 6 : 0)) / 6
-    else if (max === g) h = ((b - r) / dd + 2) / 6
-    else h = ((r - g) / dd + 4) / 6
-  }
-  s = Math.max(s, 0.42)
-  const l2 = Math.min(Math.max(l, 0.34), 0.58)
-  const q = l2 < 0.5 ? l2 * (1 + s) : l2 + s - l2 * s
-  const p = 2 * l2 - q
-  const f = (t) => {
-    t = (t + 1) % 1
-    if (t < 1 / 6) return p + (q - p) * 6 * t
-    if (t < 1 / 2) return q
-    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6
-    return p
-  }
-  return {
-    r: Math.round(f(h + 1 / 3) * 255),
-    g: Math.round(f(h) * 255),
-    b: Math.round(f(h - 1 / 3) * 255),
-  }
+  if (!img.isConnected) return
+  tint.value = extractVibrant(img)
 }
 
 const ext = computed(() => {
@@ -169,191 +113,28 @@ const durationText = computed(() => {
   return s ? formatDuration(s) : ''
 })
 
-// ---- iOS 式 hero 转场：卡片从点击的封面处放大展开、关闭缩回原位 ----
-// 全程只动 transform 与 overlay opacity（纯合成器属性，iOS WebKit 安全，见 glass.css
-// 反馈#35 教训——严禁 filter 参与动画）；EP 自带的 modal-fade/dialog-fade 在 zoomIn 里
-// 用内联 animation:none 接管（overlay 是 v-show 持久节点，内联样式常驻，此后每次
-// 开合都由这里驱动）。动画期间 .vdc-zooming 临时停掉卡片磨砂（样式见下方全局块）。
-const ZOOM_EASE = 'cubic-bezier(0.32, 0.72, 0, 1)' // iOS 卡片/Sheet 手感曲线
-let origin = null    // { el, rect }：点击来源缩略图
-let cardRect = null  // 弹窗落定矩形（开场量取，供开场中途关闭时反推）
-let zoomTimer = 0    // 开场收尾定时器，关场开始前须取消（防半路清样式）
-let closeTimer = 0   // 关场收尾定时器，关场途中重开新卡须取消（防迟到 done() 关掉新卡）
-let closing = false
-
-const reduced = () => window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches ?? false
-
-// 以「顶边中点」为锚计算转场变换：缩放比取宽度比，这样卡片顶部 16:9 封面区
-// 恰好与来源缩略图（.art 同为 16:9）重合，信息区在展开途中从封面下方生长出来
-function originTransform(from, to) {
-  const s = Math.max(from.width / to.width, 0.01)
-  const dx = from.left + from.width / 2 - (to.left + to.width / 2)
-  const dy = from.top - to.top
-  return `translate(${dx}px, ${dy}px) scale(${s})`
-}
-
-// 起始态贴合来源矩形"四边"的非等比变换（scale(sx, sy)）：超大横幅的开场专用——
-// 等比大窗口的高度是卡片高×宽度比，远高过横幅、上下探出屏幕，观感仍像飞进来
-// （反馈#44 二轮）；非等比让卡片起始就压成横幅的精确矩形，从大图四周向内收缩落定，
-// 途中纵横比渐复原，叠加开场淡入几乎无感。关场保持等比放大+淡出（用户确认手感）
-function coverTransform(from, to) {
-  const sx = Math.max(from.width / to.width, 0.01)
-  const sy = Math.max(from.height / to.height, 0.01)
-  const dx = from.left + from.width / 2 - (to.left + to.width / 2)
-  const dy = from.top - to.top
-  return `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})`
-}
-
-function zoomIn() {
-  const dlg = document.querySelector('.el-dialog.vdc')
-  const ov = dlg?.closest('.el-overlay')
-  const ovd = dlg?.closest('.el-overlay-dialog')
-  if (!dlg || !ov) return
-  ov.style.animation = 'none'
-  if (ovd) ovd.style.animation = 'none'
-  ov.style.transition = 'none'
-  ov.style.opacity = '0'
-  const from = origin?.rect
-  if (!from || reduced()) { // 无来源矩形 / 系统偏好减少动态：退化为整层快速淡入
-    void ov.offsetWidth
-    ov.style.transition = 'opacity 0.2s ease'
-    ov.style.opacity = ''
-    zoomTimer = setTimeout(() => { ov.style.transition = '' }, 240)
-    return
-  }
-  if (ovd) ovd.style.overflow = 'hidden' // 起飞姿态可能探出视口底部，别闪滚动条
-  cardRect = dlg.getBoundingClientRect()
-  // 来源比卡片还大（Featured 随机推荐横幅）：按真实矩形互变——开场贴横幅四边向内收缩
-  // 落定成卡片（coverTransform 非等比）、关场由卡片向后等比放大回横幅（反馈#44，推翻
-  // #41 二轮的 92% 虚拟矩形中心浮出方案）。配一段快速 opacity 淡入/淡出，大窗口是
-  // "从横幅里凝聚出来/消融回去"；opacity 纯合成器属性，iOS 安全（#35 教训只针对
-  // filter）。普通缩略图恒小于卡片，不带淡入淡出
-  const big = from.width > cardRect.width
-  dlg.classList.add('vdc-zooming')
-  dlg.style.transformOrigin = '50% 0'
-  dlg.style.transition = 'none'
-  // 横幅开场：仅桌面端用贴四边的非等比姿态（从大图向内收缩）——移动端横幅与卡片
-  // 几乎同宽（scale≈1.06 幅度极小本无飞入感），维持等比第一版手感（用户确认）；
-  // 普通缩略图仍等比封面重合。断点与全站移动端样式一致（≤768px）
-  dlg.style.transform = big && window.innerWidth > 768
-    ? coverTransform(from, cardRect)
-    : originTransform(from, cardRect)
-  if (big) dlg.style.opacity = '0'
-  void ov.offsetWidth // 起始态强制落地，随后的改动才走 transition
-  ov.style.transition = 'opacity 0.3s ease'
-  ov.style.opacity = ''
-  dlg.style.transition = `transform 0.6s ${ZOOM_EASE}` + (big ? ', opacity 0.3s ease' : '')
-  dlg.style.transform = ''
-  if (big) dlg.style.opacity = '1'
-  zoomTimer = setTimeout(() => {
-    dlg.classList.remove('vdc-zooming')
-    dlg.style.transition = ''; dlg.style.transform = ''; dlg.style.transformOrigin = ''
-    dlg.style.opacity = ''
-    ov.style.transition = ''
-    if (ovd) ovd.style.overflow = ''
-  }, 660)
-}
-
-// 关闭转场（el-dialog before-close：ESC/点遮罩，及卡片右上关闭钮共用）：
-// 卡片缩回来源缩略图处、遮罩磨砂稍滞后淡出，结束才真正关弹窗
-function animatedClose(done = () => { visible.value = false }) {
-  if (closing) return
-  const dlg = document.querySelector('.el-dialog.vdc')
-  const ov = dlg?.closest('.el-overlay')
-  const ovd = dlg?.closest('.el-overlay-dialog')
-  // 回位锚点：来源在轮播里（Featured 随机推荐）时，弹窗开着的工夫轮播可能已自动切到
-  // 下一张（interval 6s），原 item 被 translate 挪出画面，按其实时矩形回位会飞向屏幕外
-  // ——改锚定轮播容器（横幅在页面上的固定位置，item 恒填满容器）；普通缩略图仍用自身实时矩形
-  const srcEl = origin?.el?.isConnected
-    ? (origin.el.closest('.el-carousel') || origin.el)
-    : null
-  const to = srcEl ? srcEl.getBoundingClientRect() : origin?.rect
-  if (!dlg || !ov || !to || reduced()) { done(); return }
-  // 开场动画进行中被关：布局矩形取开场量好的 cardRect——此刻 gBCR 含补间中的 transform
-  // 不可用（zoomIn 的内联 transform 同步清空靠 transition 补间，不能用 style.transform 判断，
-  // 得看 vdc-zooming 是否还在；补间期布局盒本就没变，恒等于 cardRect）
-  const from = dlg.classList.contains('vdc-zooming') ? cardRect : dlg.getBoundingClientRect()
-  if (!from) { done(); return }
-  closing = true
-  clearTimeout(zoomTimer)
-  // 关场瞬间就把页面还给用户（反馈#42）：EP 的 body 滚动锁（el-popup-parent--hidden）要等
-  // done() 才开始解、内部还再延 200ms，加上遮罩全程拦触摸，关闭后约半秒滑不动页面。
-  // 提前摘锁类 + 遮罩输入穿透，缩回动画只是收尾演出；body 的滚动条宽度补偿（inline width）
-  // 留给 EP 稍后的幂等 cleanup 恢复——现在动它会让滚动条回归时跳版
-  document.body.classList.remove('el-popup-parent--hidden')
-  ov.style.pointerEvents = 'none'
-  if (ovd) ovd.style.overflow = 'hidden'
-  const big = to.width > from.width // 缩回目标比卡片大=Featured 横幅：向后放大 + 淡出消融
-  // vdc-closing：关场一开始就快速淡掉卡片 chrome（信息区 / 关闭钮 / 续播进度条 / 卡底玻璃 +
-  // 阴影），只留顶部 16:9 封面独自缩回熔入缩略图。普通缩略图缩回时，只有封面能与缩略图重合，
-  // 其余 chrome 比缩略图高、无处安放——若随卡片一路缩到位仍半透明可见，会与网格内容错位叠字、
-  // 最后又随卸载啪地消失，观感就是"没收完、闪一下、突然收完"（详见下方全局样式块）
-  dlg.classList.add('vdc-zooming', 'vdc-closing')
-  dlg.style.transformOrigin = '50% 0'
-  // 内联 transition 会盖过类里的，卡底玻璃/边框/阴影的淡出过渡须一并列在这里（否则瞬切）
-  dlg.style.transition = `transform 0.48s ${ZOOM_EASE}, background 0.16s ease, ` +
-    `border-color 0.16s ease, box-shadow 0.16s ease` + (big ? ', opacity 0.36s ease 0.1s' : '')
-  // 桌面端横幅与开场对称：贴四边放大回横幅矩形；移动端保持等比（第一版手感，用户确认）
-  dlg.style.transform = big && window.innerWidth > 768
-    ? coverTransform(to, from)
-    : originTransform(to, from)
-  if (big) dlg.style.opacity = '0'
-  else {
-    // 关场淡掉 chrome 后只余顶部封面，其下边缘本是卡片中部的直切（下方两角是方的），与四角
-    // 皆圆的目标缩略图（.art 圆角 12px）对不上——观感"关闭时没有圆角"。给封面补圆角：封面是被
-    // dlg transform 缩放的子节点，全尺寸设 12/scale，缩到位时正好渲染成 12px 与缩略图严丝合缝
-    const scale = Math.max(to.width / from.width, 0.01)
-    dlg.style.setProperty('--vdc-art-r', `${(12 / scale).toFixed(1)}px`)
-  }
-  // 遮罩（暗底 + 磨砂）保持到封面快落位时才退：封面要从屏幕中心一路平移 + 缩小到源缩略图，
-  // 若遮罩早早淡出，这张大封面就会半透明地"飞越"已露出的网格、与最终缩略图错位一下再消失
-  // （用户反馈的收尾问题）。延后起退让封面在暗底上缩小、快到缩略图时网格才露出、封面顺势熔入，
-  // 与开场（封面从缩略图在暗底上长大）对称。页面可用性已由 pointer-events:none + 提前解滚动锁
-  // 保证，与遮罩视觉停留无关（反馈#42）。封面是遮罩子节点，其有效不透明度随遮罩同步淡出
-  ov.style.transition = 'opacity 0.18s ease 0.28s'
-  ov.style.opacity = '0'
-  closeTimer = setTimeout(() => {
-    ov.style.transition = '' // 先清 transition 再 done()：EP 的 leave 立即完成，节点马上卸载
-    done()
-    // 不复原 dlg 内联样式：done() 后节点由 Vue 异步卸载（destroy-on-close 下次打开是全新
-    // 节点），若在移除前抢先清掉 transform/opacity，卸载前被绘制的那一帧就是全尺寸、
-    // 全不透明、居中的卡片闪现（反馈#45 移动端关场收尾闪一下）
-    ov.style.pointerEvents = '' // overlay 是 v-show 持久节点，穿透态不清会漏到下次打开
-    if (ovd) ovd.style.overflow = ''
-    closing = false
-    // ov.opacity 留在 0（清掉会闪回不透明），下次 zoomIn 以 0 起步淡入
-  }, 500)
-}
-
-// 瞬时终结进行中的关场（遮罩已放行输入，缩回途中可能直接点开下一张卡）：
-// 清收尾定时器（否则 360ms 后迟到的 done() 会把新开的卡关掉）、复原转场内联样式，
-// 并把提前摘掉的 EP 滚动锁类补回——visible 全程没翻过 false，EP 自己不会再加
-function cancelClose() {
-  clearTimeout(closeTimer)
-  closing = false
-  document.body.classList.add('el-popup-parent--hidden')
-  const dlg = document.querySelector('.el-dialog.vdc')
-  const ov = dlg?.closest('.el-overlay')
-  const ovd = dlg?.closest('.el-overlay-dialog')
-  if (dlg) {
-    dlg.classList.remove('vdc-zooming', 'vdc-closing') // 复位 chrome 淡出（中途重开卡片要完整可见）
-    dlg.style.transition = 'none' // 别让 transform 复位走 0.34s 缩放（随后 zoomIn 会重设）
-    dlg.style.transform = ''
-    dlg.style.transformOrigin = ''
-    dlg.style.opacity = '' // 横幅关场淡出中途被截，得复原不透明
-    dlg.style.removeProperty('--vdc-art-r')
-  }
-  if (ov) ov.style.pointerEvents = ''
-  if (ovd) ovd.style.overflow = ''
-}
+// ---- iOS 式 hero 转场：卡片从点击的封面处放大展开、关闭缩回原位（详见 utils/heroDialog）----
+// 详情卡特化（options 覆盖后台弹窗缺省手感）：顶边锚——顶部 16:9 封面与来源缩略图重合、
+// 超大来源（Featured 横幅）贴四边 morph + 淡入淡出、关场淡掉 chrome（vdc-closing）只留封面缩回、
+// 圆角补偿（--vdc-art-r）、关场回位锚到轮播容器（横幅 6s 自转后不飞屏外）。
+// iOS 磨砂/合成器安全策略（反馈#35/#42/#44/#45/#48）已内建于 heroDialog；本组件磨砂见下方全局块。
+const hero = useHeroDialog({
+  selector: '.el-dialog.vdc',
+  setClosed: () => { visible.value = false }, // 关闭钮/无 done 时兜底
+  zoomClass: 'vdc-zooming',
+  anchor: 'top',
+  coverBig: true,
+  chromeClass: 'vdc-closing',
+  cornerVar: '--vdc-art-r',
+  reanchor: (el) => el.closest('.el-carousel') || el,
+  dur: { in: 600, close: 480 },
+  fadeOutClose: { dur: 180, delay: 280 },
+})
+// 模板 :before-close 与关闭钮共用（EP 传 done；无 done 走 setClosed）
+const animatedClose = hero.animatedClose
 
 function open(v, originEl = null) {
-  clearTimeout(zoomTimer)
-  if (closing) cancelClose()
-  cardRect = null
-  origin = originEl ? { el: originEl, rect: originEl.getBoundingClientRect() } : null
   video.value = v
-  visible.value = true
   info.value = null
   tint.value = null
   infoLoading.value = true
@@ -366,10 +147,11 @@ function open(v, originEl = null) {
     .then((d) => { if (g === seq) info.value = d })
     .catch(() => {})
     .finally(() => { if (g === seq) infoLoading.value = false })
-  http.get('/media/progress', { params: { path: v.path } })
+  api.media.progress(v.path)
     .then((d) => { if (g === seq) progress.value = { position: d?.position || 0, duration: d?.duration || 0 } })
     .catch(() => {})
-  nextTick(zoomIn) // 弹窗 DOM 就绪后、首帧上屏前摆好起飞姿态（nextTick 在 paint 之前跑完）
+  // 记录来源矩形 → 翻 visible → nextTick 摆位起飞（zoomIn 在 paint 前跑）
+  hero.open(originEl, () => { visible.value = true })
 }
 defineExpose({ open })
 
@@ -498,7 +280,7 @@ function goDir() {
 }
 .vdc-prog span {
   display: block; height: 100%;
-  background: var(--accent, #7aa2ff);
+  background: var(--accent);
   border-radius: 0 2.5px 2.5px 0;
 }
 
@@ -519,12 +301,12 @@ function goDir() {
 .vdc-row { display: flex; gap: 12px; }
 .vdc-row .k { flex: 0 0 62px; color: var(--text-dim, #9aa0b4); }
 .vdc-row .v { word-break: break-all; min-width: 0; }
-.vdc-link { cursor: pointer; color: #7aa2ff; }
+.vdc-link { cursor: pointer; color: var(--accent); }
 .vdc-link:hover { text-decoration: underline; }
 
 .vdc-note { margin: 12px 0 0; font-size: 12.5px; }
 .vdc-ops { margin-top: 20px; display: flex; gap: 4px; }
-.vdc-play { box-shadow: 0 6px 24px rgba(122, 162, 255, 0.35); }
+.vdc-play { box-shadow: 0 6px 24px rgba(var(--accent-rgb), 0.35); }
 
 /* ---- 移动端 ---- */
 @media (max-width: 768px) {

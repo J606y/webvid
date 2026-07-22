@@ -30,7 +30,7 @@ import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { Back, VideoCamera, Download, Loading } from '@element-plus/icons-vue'
 import Artplayer from 'artplayer'
-import http from '../api/http'
+import { api } from '../utils/api'
 import { fetchVideoInfo } from '../utils/videoInfo'
 import { rawUrl, hlsUrl, fromParams } from '../utils/path'
 
@@ -63,7 +63,7 @@ onMounted(async () => {
   // ?restart=1（详情卡「从头播放」）跳过续播定位
   const progP = route.query.restart === '1'
     ? Promise.resolve()
-    : http.get('/media/progress', { params: { path: path.value } })
+    : api.media.progress(path.value)
       .then((d) => { resumeAt = d?.position > 0 ? d.position : 0 })
       .catch(() => {})
 
@@ -97,7 +97,7 @@ onMounted(async () => {
 function report(position) {
   const sec = Math.floor(position || 0)
   const dur = art && isFinite(art.duration) ? art.duration : 0
-  http.post('/media/played', { path: path.value, position: sec, duration: dur }, { silent: true }).catch(() => {})
+  api.media.played({ path: path.value, position: sec, duration: dur }).catch(() => {})
 }
 
 async function mount(url, isHls) {
@@ -197,8 +197,8 @@ onBeforeUnmount(() => {
 }
 .badge {
   flex: none; font-size: 12px; padding: 2px 10px; border-radius: 999px;
-  background: rgba(122, 162, 255, .18); color: var(--accent, #7aa2ff);
-  border: 1px solid rgba(122, 162, 255, .35);
+  background: rgba(var(--accent-rgb), .18); color: var(--accent);
+  border: 1px solid rgba(var(--accent-rgb), .35);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }

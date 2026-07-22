@@ -7,14 +7,14 @@
 //
 // 成功结果缓存整段会话（后端另按 size+mtime 失效缓存，同路径换内容会重探）；失败不缓存
 // 允许重试。返回值即 /video/info 的 PlayInfo：{ strategy, reason, duration, message }。
-import http from '../api/http'
+import { api } from './api'
 
 const cache = new Map() // path -> Promise<PlayInfo>
 
 export function fetchVideoInfo(path) {
   let p = cache.get(path)
   if (!p) {
-    p = http.get('/video/info', { params: { path } })
+    p = api.video.info(path)
     p.catch(() => cache.delete(path)) // 失败清缓存，下次重试
     cache.set(path, p)
   }

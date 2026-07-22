@@ -29,7 +29,7 @@
 <script setup>
 import { ref, reactive } from 'vue'
 import { UploadFilled } from '@element-plus/icons-vue'
-import http from '../api/http'
+import { api } from '../utils/api'
 import { join } from '../utils/path'
 import { formatSize } from '../utils/file'
 import { useApp } from '../stores/app'
@@ -79,9 +79,7 @@ async function run(t) {
   t.state = 'uploading'
   try {
     const target = join(t.dir, t.file.name)
-    // path 含中文与特殊字符，编码为 query 值；body 为原始字节流
-    const url = `/fs/upload?path=${encodeURIComponent(target)}${t.overwrite ? '&overwrite=1' : ''}`
-    await http.put(url, t.file, {
+    await api.fs.upload(target, t.overwrite, t.file, {
       headers: { 'Content-Type': 'application/octet-stream' },
       timeout: 0,
       onUploadProgress: (ev) => {

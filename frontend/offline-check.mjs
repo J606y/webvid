@@ -1,11 +1,11 @@
-// 任务设置 + 离线下载验证：后台「站点设置」新增线程数/限速表单保存热生效；
+// 任务设置 + 离线下载验证：后台「任务设置」Tab 的线程数/限速表单保存热生效；
 // Files 工具栏「离线下载」→ 弹窗提交 URL → offline 组任务完成 → 文件落盘可列出。
 // 用法: node offline-check.mjs （需服务在跑，admin/admin123）
 import { chromium } from 'playwright-core'
 import { execSync } from 'node:child_process'
 import http from 'node:http'
 
-const BASE = 'http://localhost:5243'
+const BASE = process.env.NL_BASE || 'http://localhost:5243'
 const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 const OUT = '../_shots'
 execSync(`mkdir -p ${OUT}`, { shell: 'bash' })
@@ -54,6 +54,9 @@ await page.waitForURL(`${BASE}/library/video`)
 console.log('— 后台任务设置 —')
 await page.goto(`${BASE}/@admin`)
 await page.waitForSelector('.el-tabs')
+// 线程数/限速在独立的「任务设置」Tab（#33 起），切过去这些输入才可见可填
+await page.click('.el-tabs__item:has-text("任务设置")')
+await page.waitForSelector('#pane-task .el-input-number input', { state: 'visible' })
 for (const label of ['复制任务线程', '离线下载线程', '上传并发数', '复制限速', '上传限速', '下载限速']) {
   ok(`表单含「${label}」`, await page.locator(`.el-form-item:has-text("${label}")`).count() === 1)
 }
@@ -67,7 +70,8 @@ const setNum = async (label, val) => {
 }
 await setNum('复制任务线程', 3)
 await setNum('下载限速', 1024)
-await page.click('.el-form button:has-text("保存")')
+// 任务设置 Tab 有自己的保存按钮（站点设置 Tab 另有一个），限定到本 Tab 面板
+await page.click('#pane-task button:has-text("保存")')
 await page.waitForSelector('.el-message--success')
 let st = (await api('/admin/settings')).data
 ok('保存后 copy_workers=3', st.copy_workers === 3)

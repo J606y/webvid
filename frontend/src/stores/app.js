@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import http from '../api/http'
+import { api } from '../utils/api'
 
 export const useApp = defineStore('app', {
   state: () => ({
@@ -11,7 +11,7 @@ export const useApp = defineStore('app', {
   actions: {
     async fetchPublic() {
       try {
-        const d = await http.get('/public/settings')
+        const d = await api.publicSettings()
         this.siteTitle = d.site_title || 'WebVid'
         this.version = d.version || ''
         this.uploadWorkers = d.upload_workers || 2

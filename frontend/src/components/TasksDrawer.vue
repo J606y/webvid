@@ -35,7 +35,7 @@
 <script setup>
 import { ref, onBeforeUnmount } from 'vue'
 import { Delete } from '@element-plus/icons-vue'
-import http from '../api/http'
+import { api } from '../utils/api'
 import { formatSize } from '../utils/file'
 
 const props = defineProps({ modelValue: Boolean })
@@ -62,7 +62,7 @@ function percent(t) {
 
 async function poll() {
   try {
-    tasks.value = (await http.get('/tasks')) || []
+    tasks.value = (await api.tasks.list()) || []
     emit('count', tasks.value.filter((t) => t.state === 'pending' || t.state === 'running').length)
   } catch { /* 网络抖动忽略，下轮再取 */ }
 }
@@ -77,22 +77,22 @@ function onClose() {
 }
 
 async function cancel(t) {
-  await http.post(`/tasks/${t.id}/cancel`)
+  await api.tasks.cancel(t.id)
   poll()
 }
 
 async function retry(t) {
-  await http.post(`/tasks/${t.id}/retry`)
+  await api.tasks.retry(t.id)
   poll()
 }
 
 async function remove(t) {
-  await http.post(`/tasks/${t.id}/remove`)
+  await api.tasks.remove(t.id)
   poll()
 }
 
 async function clearDone() {
-  await http.delete('/tasks/done')
+  await api.tasks.clearDone()
   poll()
 }
 

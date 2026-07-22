@@ -8,7 +8,7 @@
 //      读真实尺寸原地刷新（slide.resize），全程零额外原图请求。
 import PhotoSwipe from 'photoswipe'
 import 'photoswipe/style.css'
-import http from '../api/http'
+import { api } from './api'
 import { rawUrl, thumbUrl } from './path'
 
 // 记录一次「查看」（「最近查看」货架数据源，复用视频最近播放的 play_history）。
@@ -18,7 +18,7 @@ function reportView(p) {
   if (!p) return
   clearTimeout(viewTimer)
   viewTimer = setTimeout(() => {
-    http.post('/media/played', { path: p }, { silent: true }).catch(() => {})
+    api.media.played({ path: p }).catch(() => {})
   }, 600)
 }
 

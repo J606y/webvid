@@ -7,7 +7,8 @@
   --radius-panel: 24px;
   --text-main: #e9e9f2;
   --text-dim: #9d9db2;
-  --accent: #7aa2ff;
+  --accent-rgb: 122, 162, 255;      /* accent 主色 RGB 分量：供 rgba(var(--accent-rgb), α) 调透明度 */
+  --accent: rgb(var(--accent-rgb));  /* 主色实心值（由分量派生，改色只改上面一处） */
 }
 
 * { box-sizing: border-box; }
@@ -145,14 +146,14 @@ html.dark {
   --el-text-color-primary: #e9e9f2;
   --el-text-color-regular: #c4c4d4;
   --el-text-color-secondary: #9d9db2;
-  --el-color-primary: #7aa2ff;
+  --el-color-primary: var(--accent);
   --el-mask-color: rgba(6, 6, 12, 0.5);
   --el-table-bg-color: transparent;
   --el-table-tr-bg-color: transparent;
   --el-table-header-bg-color: rgba(255, 255, 255, 0.05);
   --el-table-row-hover-bg-color: rgba(255, 255, 255, 0.07);
   --el-table-border-color: rgba(255, 255, 255, 0.08);
-  --el-radio-button-checked-bg-color: rgba(122, 162, 255, 0.35);
+  --el-radio-button-checked-bg-color: rgba(var(--accent-rgb), 0.35);
   --el-radio-button-checked-border-color: rgba(150, 182, 255, 0.6);
 }
 
@@ -250,11 +251,11 @@ html.dark .el-button:not(.is-text):not(.is-link):not(.el-button--primary):not(.e
   --el-button-active-bg-color: rgba(255, 255, 255, 0.18);
 }
 html.dark .el-button--primary:not(.is-text):not(.is-link):not(.is-plain) {
-  --el-button-bg-color: rgba(122, 162, 255, 0.32);
+  --el-button-bg-color: rgba(var(--accent-rgb), 0.32);
   --el-button-border-color: rgba(150, 182, 255, 0.55);
-  --el-button-hover-bg-color: rgba(122, 162, 255, 0.48);
+  --el-button-hover-bg-color: rgba(var(--accent-rgb), 0.48);
   --el-button-hover-border-color: rgba(170, 196, 255, 0.7);
-  --el-button-active-bg-color: rgba(122, 162, 255, 0.55);
+  --el-button-active-bg-color: rgba(var(--accent-rgb), 0.55);
   --el-button-text-color: #fff;
   --el-button-hover-text-color: #fff;
   --el-button-active-text-color: #fff;
@@ -273,8 +274,8 @@ html.dark .el-tag {
   -webkit-backdrop-filter: blur(8px);
 }
 html.dark .el-tag.el-tag--primary, html.dark .el-tag:not([class*='el-tag--success']):not([class*='el-tag--danger']):not([class*='el-tag--warning']):not([class*='el-tag--info']) {
-  --el-tag-bg-color: rgba(122, 162, 255, 0.16);
-  --el-tag-border-color: rgba(122, 162, 255, 0.4);
+  --el-tag-bg-color: rgba(var(--accent-rgb), 0.16);
+  --el-tag-border-color: rgba(var(--accent-rgb), 0.4);
   --el-tag-text-color: #a8c2ff;
 }
 html.dark .el-tag.el-tag--success {

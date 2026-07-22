@@ -4,31 +4,10 @@
    仍留在各页 inline <style scoped>。 */
 
 /* ---- Featured 横幅 ---- */
-.feat {
-  margin: 4px 0 36px;
-  border-radius: 22px;
-  overflow: hidden;
-  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
-}
-.feat-item { position: relative; height: 100%; cursor: pointer; background: #101018; }
-.feat-img { width: 100%; height: 100%; object-fit: cover; display: block; }
-.feat-mask {
-  position: absolute; inset: 0;
-  background: linear-gradient(to top, rgba(5, 6, 10, 0.94) 0%, rgba(5, 6, 10, 0.35) 42%, transparent 72%);
-}
-.feat-info { position: absolute; left: 40px; bottom: 32px; right: 40px; }
-.feat-kicker {
-  font-size: 12px; letter-spacing: 3px; color: var(--text-dim);
-  text-transform: uppercase; margin-bottom: 8px;
-}
-.feat-title { font-size: 34px; font-weight: 800; margin-bottom: 8px; text-shadow: 0 2px 14px rgba(0,0,0,.6); }
-.feat-meta { margin-bottom: 18px; font-size: 13px; }
-.hero-btn { box-shadow: 0 6px 24px rgba(122, 162, 255, 0.4); }
-.feat :deep(.el-carousel__indicators--horizontal) {
-  left: auto; right: 26px; bottom: 14px; transform: none;
-}
-.feat :deep(.el-carousel__button) { width: 7px; height: 7px; border-radius: 50%; opacity: 0.4; }
-.feat :deep(.el-carousel__indicator.is-active .el-carousel__button) { opacity: 1; }
+/* .feat* 容器样式已随 FeaturedCarousel.vue 抽出（组件作用域）。这里只留 .hero-btn：
+   它是 FeaturedCarousel 的 action 插槽内容，由各页模板渲染 → 属父页作用域，故样式须留在
+   两页共享的本文件才能命中（scoped 插槽内容不吃子组件的作用域样式）。 */
+.hero-btn { box-shadow: 0 6px 24px rgba(var(--accent-rgb), 0.4); }
 
 /* ---- 目录视图大标题 ---- */
 .lib-head { display: flex; align-items: center; gap: 12px; margin: 6px 0 22px; }
@@ -85,13 +64,8 @@
 
 /* ---- 移动端（公共部分） ---- */
 @media (max-width: 768px) {
-  .feat { margin-bottom: 24px; border-radius: 16px; }
-  .feat-info { left: 16px; right: 16px; bottom: 16px; }
-  .feat-kicker { letter-spacing: 2px; margin-bottom: 4px; }
-  .feat-title { font-size: 20px; margin-bottom: 4px; }
-  .feat-meta { margin-bottom: 10px; font-size: 12px; }
+  /* .feat* 移动端样式随 FeaturedCarousel.vue 抽出；.hero-btn 属插槽内容仍留此 */
   .hero-btn { height: 34px; padding: 0 16px; font-size: 13px; }
-  .feat :deep(.el-carousel__indicators--horizontal) { right: 14px; bottom: 8px; }
   .lib-head { margin-bottom: 16px; }
   .lib-title { font-size: 22px; }
   .back-btn { width: 32px; height: 32px; }

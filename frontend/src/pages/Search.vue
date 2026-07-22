@@ -44,17 +44,10 @@
 
       <!-- 方格网视图 -->
       <div v-else class="poster-grid">
-        <div v-for="it in items" :key="it.path" class="g-card glass glass-hover" @click="open(it)">
-          <div class="g-thumb">
-            <img v-if="hasThumb(it)" :src="thumbUrl(it.path, 320)" loading="lazy" @error="hideImg" />
-            <div class="thumb-fallback abs">
-              <el-icon :size="34" :class="{ folder: it.is_dir }">
-                <component :is="icons[typeIcon(it)]" />
-              </el-icon>
-            </div>
-          </div>
-          <div class="g-name" :title="it.name">{{ it.name }}</div>
-        </div>
+        <MediaGridCard v-for="it in items" :key="it.path"
+          :thumb-path="it.path" :label="it.name"
+          :icon-key="typeIcon(it)" :has-thumb="hasThumb(it)" :is-dir="it.is_dir"
+          @open="open(it)" />
       </div>
     </template>
   </div>
@@ -65,10 +58,11 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search as SearchIcon, Expand, Grid } from '@element-plus/icons-vue'
 import { iconMap as icons } from '../utils/icons'
-import http from '../api/http'
-import { filesRoute, playRoute, parent, thumbUrl } from '../utils/path'
-import { extType, typeIcon, formatSize, formatTime, hideImg } from '../utils/file'
+import { api } from '../utils/api'
+import { filesRoute, playRoute, parent } from '../utils/path'
+import { extType, typeIcon, formatSize, formatTime, hasThumb } from '../utils/file'
 import { useApp } from '../stores/app'
+import MediaGridCard from '../components/MediaGridCard.vue'
 
 defineOptions({ name: 'Search' }) // App.vue keep-alive include 按此名匹配
 
@@ -88,7 +82,7 @@ async function doSearch() {
   try {
     const params = { q: query, limit: 100 }
     if (kind.value) params.type = kind.value
-    const d = await http.get('/fs/search', { params })
+    const d = await api.fs.search(params)
     items.value = d.items || []
     lastQ.value = query
     searched.value = true
@@ -107,11 +101,6 @@ function open(it) {
 }
 
 // 方格视图：仅图片/视频有缩略图，其余回退到类型图标
-function hasThumb(it) {
-  if (it.is_dir) return false
-  const t = extType(it.name)
-  return t === 'image' || t === 'video'
-}
 </script>
 
 <style scoped>

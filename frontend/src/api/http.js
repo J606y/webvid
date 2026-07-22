@@ -1,11 +1,12 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import 'element-plus/es/components/message/style/css'
+import { getToken, clearToken } from '../utils/token'
 
 const http = axios.create({ baseURL: '/api', timeout: 60000 })
 
 http.interceptors.request.use((cfg) => {
-  const t = localStorage.getItem('nl_token')
+  const t = getToken()
   if (t) cfg.headers.Authorization = 'Bearer ' + t
   return cfg
 })
@@ -24,7 +25,7 @@ http.interceptors.response.use(
     if (status === 401) {
       // 登录页自己处理 401 提示；其他页面清 token 回登录
       if (!location.pathname.startsWith('/login')) {
-        localStorage.removeItem('nl_token')
+        clearToken()
         location.href = '/login'
       }
     } else if (!err.config?.silent) {

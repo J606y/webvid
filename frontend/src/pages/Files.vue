@@ -86,18 +86,10 @@
 
     <!-- 网格视图 -->
     <div v-else class="poster-grid">
-      <div v-for="row in sorted" :key="row.name" class="g-card glass glass-hover" @click="dispatch(row)">
-        <div class="g-thumb">
-          <img v-if="hasThumb(row)" :src="thumbUrl(join(current, row.name), 320)"
-            loading="lazy" @error="hideImg" />
-          <div class="thumb-fallback abs">
-            <el-icon :size="34" :class="{ folder: row.is_dir }">
-              <component :is="icons[typeIcon(row)]" />
-            </el-icon>
-          </div>
-        </div>
-        <div class="g-name" :title="row.name">{{ row.name }}</div>
-      </div>
+      <MediaGridCard v-for="row in sorted" :key="row.name"
+        :thumb-path="join(current, row.name)" :label="row.name"
+        :icon-key="typeIcon(row)" :has-thumb="hasThumb(row)" :is-dir="row.is_dir"
+        @open="dispatch(row)" />
       <div v-if="!loaded" class="dim empty-tip loading-tip"><el-icon class="is-loading"><Loading /></el-icon>加载中…</div>
       <div v-else-if="!items.length" class="dim empty-tip">空目录</div>
     </div>
@@ -134,9 +126,9 @@ import {
   Refresh, Expand, Grid, SortUp, SortDown, Delete, Rank, CopyDocument,
   FolderAdd, Upload, UploadFilled, HomeFilled, EditPen, Download, Van, Link, Loading,
 } from '@element-plus/icons-vue'
-import http from '../api/http'
-import { join, filesRoute, playRoute, fromParams, rawUrl, thumbUrl } from '../utils/path'
-import { extType, typeIcon, formatSize, formatTime, hideImg } from '../utils/file'
+import { api } from '../utils/api'
+import { join, filesRoute, playRoute, fromParams, rawUrl } from '../utils/path'
+import { extType, typeIcon, formatSize, formatTime, hasThumb } from '../utils/file'
 import { openLightbox } from '../utils/lightbox'
 import { isMobile } from '../utils/viewport'
 import { useApp } from '../stores/app'
@@ -144,6 +136,7 @@ import NameDialog from '../components/NameDialog.vue'
 import MoveCopyDialog from '../components/MoveCopyDialog.vue'
 import UploadDrawer from '../components/UploadDrawer.vue'
 import TasksDrawer from '../components/TasksDrawer.vue'
+import MediaGridCard from '../components/MediaGridCard.vue'
 
 // 懒加载：TextDrawer 静态引入 highlight.js/marked/dompurify/github-markdown-css（体积不小），
 // 只有用户点开文本/markdown 文件才用到，按需加载不塞进 Files 路由主 chunk
@@ -187,7 +180,7 @@ async function submitOffline() {
   if (!urls.length) return ElMessage.warning('请填写下载链接')
   offlineSubmitting.value = true
   try {
-    const d = await http.post('/fs/offline', { urls, dst_dir: current.value || '/' })
+    const d = await api.fs.offline(urls, current.value || '/')
     ElMessage.success(`已创建 ${d.task_ids.length} 个离线下载任务`)
     offlineVisible.value = false
     offlineUrls.value = ''
@@ -198,7 +191,7 @@ async function submitOffline() {
 }
 
 // 首次进入取一次进行中任务数；抽屉打开后由其轮询接管
-http.get('/tasks').then((list) => {
+api.tasks.list().then((list) => {
   activeTasks.value = (list || []).filter((t) => t.state === 'pending' || t.state === 'running').length
 }).catch(() => {})
 
@@ -261,7 +254,7 @@ async function load() {
     items.value = []
   }
   try {
-    const d = await http.get('/fs/list', { params: { path } })
+    const d = await api.fs.list(path)
     if (seq !== loadSeq) return // 有更新的加载在途，丢弃过期结果
     items.value = d.items || []
     caps.value = { write: !!d.write, upload: !!d.upload }
@@ -278,11 +271,6 @@ async function load() {
 
 function fullPath(row) { return join(current.value, row.name) }
 
-function hasThumb(row) {
-  if (row.is_dir) return false
-  const t = extType(row.name)
-  return t === 'image' || t === 'video'
-}
 
 function dispatch(row) {
   if (navigating) return // 上一次文件夹导航尚未加载完成，忽略点击，避免基于旧列表拼出错误深层路径
@@ -324,7 +312,7 @@ function download(row) {
 }
 
 async function doMkdir(name) {
-  await http.post('/fs/mkdir', { path: join(current.value, name) })
+  await api.fs.mkdir(join(current.value, name))
   ElMessage.success('已创建')
   load()
 }
@@ -336,7 +324,7 @@ function openRename(row) {
 
 async function doRename(name) {
   if (!renameTarget.value || name === renameTarget.value.name) return
-  await http.post('/fs/rename', { path: fullPath(renameTarget.value), name })
+  await api.fs.rename(fullPath(renameTarget.value), name)
   ElMessage.success('已重命名')
   load()
 }
@@ -345,7 +333,7 @@ async function removeSelected() {
   const paths = selection.value.map(fullPath)
   await ElMessageBox.confirm(`确定删除选中的 ${paths.length} 项？此操作不可恢复。`, '删除确认',
     { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
-  await http.post('/fs/remove', { paths })
+  await api.fs.remove(paths)
   ElMessage.success('已删除')
   load()
 }

@@ -1,25 +1,17 @@
 <template>
   <div class="page">
-    <!-- Featured 大幅轮播：随机 5 张照片（根视图才显示，Infuse 首页顶部横幅） -->
-    <!-- 移动端无 hover 箭头，绑触屏左右滑动切换（swipe.onTouch* 落到 el-carousel 根元素） -->
-    <el-carousel v-if="isHome && hero.length" ref="carousel" class="feat" :height="featHeight"
-      :interval="6000" :autoplay="heroActive" arrow="hover"
-      @touchstart="swipe.onTouchstart" @touchend="swipe.onTouchend">
-      <el-carousel-item v-for="(p, i) in hero" :key="p.path">
-        <div class="feat-item" @click="openList(hero, i, 1200, '.feat .el-carousel__item .feat-img')">
-          <img :src="thumbUrl(p.path, 1200)" class="feat-img" @error="hideImg" />
-          <div class="feat-mask" />
-          <div class="feat-info">
-            <div class="feat-kicker">随机推荐</div>
-            <div class="feat-title">{{ stripExt(p.name) }}</div>
-            <div class="dim feat-meta">{{ formatTime(p.modified) }} · {{ formatSize(p.size) }}</div>
-            <el-button type="primary" size="large" round :icon="View" class="hero-btn">
-              查看大图
-            </el-button>
-          </div>
-        </div>
-      </el-carousel-item>
-    </el-carousel>
+    <!-- Featured 大幅轮播：随机 5 张照片（根视图才显示，Infuse 首页顶部横幅）。
+         轮播骨架抽到 FeaturedCarousel：整块点击 → openList 开灯箱（选择器按 DOM 类名定位缩略图做 hero 转场），
+         右下角「查看大图」按钮经 action 插槽。ref=carousel 供 swipe 触屏翻页（见 useMediaLibrary）。 -->
+    <FeaturedCarousel v-if="isHome && hero.length" ref="carousel" :items="hero"
+      :height="featHeight" :autoplay="heroActive" :swipe="swipe"
+      @select="(p, i) => openList(hero, i, 1200, '.feat .el-carousel__item .feat-img')">
+      <template #action>
+        <el-button type="primary" size="large" round :icon="View" class="hero-btn">
+          查看大图
+        </el-button>
+      </template>
+    </FeaturedCarousel>
 
     <!-- 目录/全部/最近查看视图大标题（Infuse 资料库式） -->
     <div v-if="!isHome" class="lib-head">
@@ -103,9 +95,10 @@
 <script setup>
 import { ref } from 'vue'
 import { ArrowLeft, ArrowRight, Picture, View, FolderOpened } from '@element-plus/icons-vue'
-import http from '../api/http'
+import { api } from '../utils/api'
+import FeaturedCarousel from '../components/FeaturedCarousel.vue'
 import { thumbUrl } from '../utils/path'
-import { formatSize, formatTime, hideImg, stripExt } from '../utils/file'
+import { formatTime, hideImg, stripExt } from '../utils/file'
 import { openLightbox } from '../utils/lightbox'
 import { useMediaLibrary } from '../composables/useMediaLibrary'
 
@@ -119,9 +112,9 @@ async function loadStatic() {
     // Featured/最近查看两路互不依赖，并发请求缩短首屏等待
     const [r, h] = await Promise.all([
       // Featured：整库随机抽 5 张（封面 object-fit:cover，竖图也能铺满横幅）
-      http.get('/media/list', { params: { kind: 'image', limit: 5, sort: 'random' } }),
+      api.media.list({ kind: 'image', limit: 5, sort: 'random' }),
       // 最近查看：本用户查看历史（灯箱打开照片时上报，见 utils/lightbox），文件删/移后自然消失
-      http.get('/media/history', { params: { kind: 'image', limit: 12 } }),
+      api.media.history({ kind: 'image', limit: 12 }),
     ])
     hero.value = r.items || []
     viewed.value = h.items || []

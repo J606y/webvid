@@ -142,7 +142,7 @@ onUnmounted(() => window.removeEventListener('resize', syncPills))
 .nav-pill {
   position: absolute; top: 0; bottom: 0; left: 0;
   border-radius: 10px;
-  background: rgba(122, 162, 255, 0.22);
+  background: rgba(var(--accent-rgb), 0.22);
   transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1),
     width 0.35s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.15s ease;
   pointer-events: none;
@@ -201,7 +201,7 @@ onUnmounted(() => window.removeEventListener('resize', syncPills))
   .tab-pill {
     position: absolute; top: 5px; bottom: 5px; left: 0;
     border-radius: 14px;
-    background: rgba(122, 162, 255, 0.22);
+    background: rgba(var(--accent-rgb), 0.22);
     transition: transform 0.35s cubic-bezier(0.32, 0.72, 0, 1),
       width 0.35s cubic-bezier(0.32, 0.72, 0, 1), opacity 0.15s ease;
     pointer-events: none;
