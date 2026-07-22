@@ -1,15 +1,21 @@
 # 技术债务整改 · 执行进度（交接）
 
 > 配套方案见 `docs/REFACTOR-PLAN.md`。本文件是跨会话交接：记录已完成/已验证、未完成、验证方式、注意事项。
-> 截至此存档：**全部改动未 commit**（工作区改动，git 未提交）。用户当时开新对话续接。
+> **最新状态见下「一句话状态（07-22 二次更新）」**：重构 #1~#5 已 commit 到 main（3 提交），v1.7.0 发布后已撤回。
 
-## 一句话状态
+## 一句话状态（07-22 二次更新）
 
-方案阶段一~四**全部完成并 e2e 验证**（含唯一真 bug 数据竞争、最大前端负债 hero 转场合并）；
-阶段五/六**已全部完成并 e2e 验证**（本轮续接把剩余「高风险/低价值尾部」做完）：
-FeaturedCarousel 抽出、MediaGridCard 抽出、Admin.vue 拆分、api.js 集中、accent/断点 token 化。
-**唯一未做 = 阶段 6.2 的 UploadDrawer 409**（需后端先返错误码，属阶段 2.1 的后端延伸，前端暂缓）。
-**全部改动仍未 commit**（工作区）。
+方案阶段一~四 + 五/六**全部完成并 e2e 验证**：telegram 数据竞争修复、错误码化、util DRY、hero 转场合并、
+FeaturedCarousel/MediaGridCard/VideoCard 抽出、Admin.vue 拆分、api.js/token 集中、accent/断点 token 化。
+
+**⚠️ 已 commit 到 main（3 个提交），但 v1.7.0 发布后又按用户要求撤回**：
+- 提交：`3ea3458` 后端（阶段1-3）｜`9d8bc71` 前端（阶段4-6）｜`4969ea4` `v1.7.0` 版本号。**均已 push origin/main**。
+- v1.7.0 曾发布（run 29916573792 success），**随后 `gh release delete v1.7.0` + 删远程/本地 tag 撤回**——
+  GitHub 上 v1.6.0 重新为 Latest；**3 个提交保留在 main、未 force-push**；`conf.Version` 仍是 `1.7.0`。
+- 撤回原因：用户想把**阶段三剩余的 httpx 统一 + 两处 ffmpeg 合并**一起做完再正式发 v1.7.0（见下「未完成」）。
+
+**下次发版**：做完剩余项 → 确认/bump `conf.Version` → 提交 → `git tag v1.7.0 && git push origin v1.7.0`
+触发 release.yml → `gh release edit v1.7.0 --notes-file <changelog>`（**Bash heredoc 写 notes**）。委派 sonnet。
 
 ## 已完成并验证 ✅
 
@@ -103,10 +109,26 @@ search-grid 13/13、history 12/12、photos-history 11/11、photos ✔、detect 3
 SSRF 守卫（`internal/server/safedial.go`，committed 未改）拒绝下载回环地址 127.0.0.1**——脚本用 127.0.0.1:5321 起测试
 源，与该守卫**天然冲突，非本次重构回归**（前端 `api.fs.offline` 提交路径正常：任务已建、命名正确）。
 
-## 未完成（仅剩 1 项，需后端）
+## 未完成（07-22 核实过，均真未做）
 
-1. `UploadDrawer.vue` `includes('已存在')` 字符串判冲突 → 需后端返 409/错误码后前端按码分支（配阶段 2.1 的后端 409
-   分流）。**属阶段 6.2、需先动后端**，本轮前端范围内暂缓。
+**A. 阶段三尾（后端去重，做完阶段三就 100%）——推荐下一轮优先做，收益/风险比最好：**
+1. **httpx 统一**（中价值·中风险，方案里就标「较大·单列」）：HTTP 重试/退避/换链**四处各写一份**——
+   `onedrive/graph.go`、`pikpak/client.go`、`stream/serve.go`、`stream/accel.go` → 抽 `internal/httpx.Do(ctx,req,policy)`
+   （policy 描述「401/403/404/410→换链、429/503→Retry-After 待、预算内不计次」）。**需配 httpx 单测覆盖各策略分支**。
+2. **两处 ffmpeg 合并**（低价值·低风险）：①探测（PATH+winget）`thumb.go` 与 `media/probe.go` 各一份 → 留 media、
+   thumb 调它；②抽帧 `try("3")/try("0")` 在 `hls.go:143` 与 `thumb.go:388` 近同 → 抽共享 `media.FrameAt(ctx,in,out,w,offsets...)`。
+
+**B. 需后端配合：**
+3. **#6 UploadDrawer 409**：`UploadDrawer.vue:93` `includes('已存在')` 字符串判冲突 → 后端先返 409/错误码，
+   前端按码分支（配阶段 2.1）。全栈小改。
+
+**C. 可选加固/卫生（低优先）：**
+4. **驱动 use-after-Drop 方案 B**（阶段一加固）：现只做了 telegram 锁纪律（方案 A，已消 UB）；fs 层「借用守卫」
+   （引用计数 borrow/release，LinkEx 流式下载期持借用）根治所有驱动没做，改动面大，**方案 A 已够安全故可选**。
+5. **拆 `docs/PROGRESS.md`**（阶段一 1.2）：仍 1158 行/118KB 单文件，未按里程碑归档到 `docs/progress/`。极低价值。
+
+**D. 项目层面（非重构）：**
+- ~~M4 PikPak 真实账号联调~~ **✅ 已 pass（07-22 用户确认）**。
 
 ## 如何续接 / 重新验证
 
@@ -129,7 +151,8 @@ cd frontend && NL_BASE=http://localhost:5299 node zoom-check.mjs   # 等
 
 ## 注意事项 / 坑
 
-- **全部未 commit**。改动全在工作区。提交/发版按用户习惯委派下级模型。
+- **已全部 commit 到 main（3 提交，见「一句话状态」）**；v1.7.0 曾发布已撤回（Release+tag 删、提交保留、未 force-push）。
+  提交/发版按用户习惯委派下级模型。
 - **e2e 用 Edge**（`C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe`）、playwright-core。
 - **杀进程一律 taskkill //PID**，`//IM webvid.exe` 会误杀用户自己跑的 5243 实例。
 - 本机**无 gcc**，`go test -race` 跑不了（Linux CI 可）。
