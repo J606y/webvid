@@ -1,30 +1,32 @@
 # 技术债务整改 · 执行进度（交接）
 
 > 配套方案见 `docs/REFACTOR-PLAN.md`。本文件是跨会话交接：记录已完成/已验证、未完成、验证方式、注意事项。
-> **最新状态见下「一句话状态（07-22 三次更新）」**：阶段一~六 + 阶段三尾全部完成；v1.7.0 已重发并为 GitHub Latest。
+> **最新状态见下「一句话状态（07-23 四次更新）」**：重构方案全部完成；v1.7.0 已正式发布并为 GitHub Latest，无剩余重构项。
 
-## 一句话状态（07-22 三次更新 · 阶段三尾完成 + v1.7.0 重发）
+## 一句话状态（07-23 四次更新 · 全部完成 + v1.7.0 正式发布）
 
-方案阶段一~六 + **阶段三尾全部完成并验证**。v1.7.0 已重发、为 GitHub Latest。
+重构方案**全部完成**（阶段一~六 + 阶段三尾 + #6 UploadDrawer 409 + PROGRESS.md 归档拆分）。
+v1.7.0 已正式发布、为 GitHub Latest，**无剩余重构项**。
 
-**已发布**：`git log` = `5994752`(阶段三尾) ← `4e687e3`(docs) ← `4969ea4`(v1.7.0 版本号) ←
-`9d8bc71`(前端 4-6) ← `3ea3458`(后端 1-3)，均在 origin/main。
-- **v1.7.0 重发成功**：tag `v1.7.0` → `5994752`，release.yml run `29921752874` success，
-  `gh api repos/J606y/webvid/releases/latest` = v1.7.0（Latest），资产 = 3× linux tar.gz + checksums.txt，
-  notes 已覆盖为「纯重构·行为界面零变化」。
-- （历史：v1.7.0 曾于 run `29916573792` 发布后按用户要求撤回，为的是补齐阶段三尾一起发；现已连阶段三尾重发。）
+**已发布**：`git log` HEAD = `5699b5f`(PROGRESS 归档) ← `f2e2217`(#6) ← `0613f51`(docs) ←
+`5994752`(阶段三尾) ← `4e687e3`(docs) ← `4969ea4`(版本号) ← `9d8bc71`(前端 4-6) ← `3ea3458`(后端 1-3)，均在 origin/main。
+- **v1.7.0 正式发布**：tag `v1.7.0` → `5699b5f`，release.yml run `29949210968` success，
+  `gh api repos/J606y/webvid/releases/latest` = v1.7.0，资产 = 3× linux tar.gz + checksums.txt，notes = 完整整改说明。
+- （历史：v1.7.0 两度撤回后第三次重发——① 首发 run `29916573792` 撤回（补阶段三尾）；② run `29921752874`
+  发后按用户「全做完再发」撤回（补 #6 + PROGRESS 归档）；③ 现连全部重构正式发。conf.Version 全程 1.7.0、提交均保留未 force-push。）
 
-**阶段三尾·本会话补做完（4 文件，纯后端，行为零变化）**：
-- **stream 状态分类去重**：`package stream` 内提 `classifyErrStatus(code)→disposition{Relink 401/403/404/410,
-  Throttle 429/503, Hard}`，`serve.openUpstream`(单流) 与 `accel.doRange`(分块) 共用；消除码集两处漂移；
-  守 `accel.go:2`「纯标准库·不依赖项目内包」不变量（故 dedup 只留 package 内）。
-- **ffmpeg 探测去重**：`thumb.FFmpeg()` → `media.LookTool("ffmpeg")`（thumb→media acyclic 已核）。
-- **ffmpeg 抽帧去重**：抽 `media.FrameAt(ctx,ff,in,out,width,internalToken,offsets...)`（`httpInputArgs` 对本地
-  返回 nil，一份兼容 http/本地），`media.FrameJPEG` + `thumb.genVideo` 共用。
-- 验证：`go build/vet/test ./...` 全绿 + `FrameAt` 真实 ffmpeg 抽帧冒烟 17KB JPEG（临时 test 用后删）。
-  前端零改动故 e2e 未再跑（纯后端 round 的门控是 go test）。
+**本会话补做完并验证**：
+- **阶段三尾（纯后端）**：stream 内 `classifyErrStatus(code)→disposition{Relink 401/403/404/410, Throttle 429/503, Hard}`
+  单流(serve)/分块(accel)共用（守 `accel.go:2`「纯标准库·不依赖项目内包」不变量）；ffmpeg 探测→`media.LookTool`、
+  抽帧→`media.FrameAt`（thumb 复用 media，acyclic 已核）。验证 `go build/vet/test ./...` 全绿 + FrameAt 真实 ffmpeg 冒烟 17KB。
+- **#6 UploadDrawer 409**：真因 = 拦截器 `http.js` 丢状态码（**非后端**，后端本就 `fs.Put→ErrExist→fsError→409`）；
+  修 = `httpError(msg,status)` 在 Error 保留 `.status`（向后兼容留 `.message`），UploadDrawer 按 `e.status===409` 判冲突
+  + 上传 `silent:true`（冲突由队列行内呈现不弹重复 toast）。新增 `frontend/upload-conflict-check.mjs` e2e
+  （首传200→同名409进conflict→覆盖200，**8/8**）+ 回归 mobile37/files-nav11 全绿零控制台错误。
+- **PROGRESS.md 归档拆分**：1158→104 行，里程碑→`docs/progress/milestones.md`、UI 反馈 #1~#52→`docs/progress/ui-feedback.md`，
+  主文件留活跃小节 + 存档索引；**自校验脚本逐字节比对确认零丢失**（区间完整分区 + 归档正文=原文对应行）。
 
-**⚠️ httpx.Do 通用引擎——读完四处代码判定「前提不成立」，有意不做（勿再尝试，理由见下「未完成」A）。**
+**⚠️ httpx.Do 通用引擎——读完四处代码判定「前提不成立」，有意不做（勿再尝试，理由见下「未完成」A3）。**
 用户 07-22 选「稳妥子集」确认此路线。
 
 ## 已完成并验证 ✅
@@ -119,7 +121,7 @@ search-grid 13/13、history 12/12、photos-history 11/11、photos ✔、detect 3
 SSRF 守卫（`internal/server/safedial.go`，committed 未改）拒绝下载回环地址 127.0.0.1**——脚本用 127.0.0.1:5321 起测试
 源，与该守卫**天然冲突，非本次重构回归**（前端 `api.fs.offline` 提交路径正常：任务已建、命名正确）。
 
-## 未完成 / 已决策不做（07-22 三次更新）
+## 未完成 / 已决策不做（07-23 四次更新 · 重构项已全部完成/决策）
 
 **A. 阶段三尾——已完成 / 已决策（详见「一句话状态」）：**
 1. ✅ **两处 ffmpeg 合并** 已做完：探测 → `media.LookTool("ffmpeg")`（thumb 复用）、抽帧 → `media.FrameAt`
@@ -133,14 +135,17 @@ SSRF 守卫（`internal/server/safedial.go`，committed 未改）拒绝下载回
    `package stream`（`accel.go:2`）有「纯标准库·不依赖项目内包·便于独立单测」硬不变量，**不能 import 跨包 httpx**，
    其去重只能留 package 内（即已做的 `classifyErrStatus`）。故无 sound 的跨包 httpx 抽象，`internal/httpx` 不建。
 
-**B. 需后端配合：**
-3. **#6 UploadDrawer 409**：`UploadDrawer.vue:93` `includes('已存在')` 字符串判冲突 → 后端先返 409/错误码，
-   前端按码分支（配阶段 2.1）。全栈小改。
+**B. #6 UploadDrawer 409 —— ✅ 已完成（07-23，commit `f2e2217`）：**
+真因 = 拦截器 `http.js` 丢 HTTP 状态码（**非后端**，后端本就 `fs.Put→driver.ErrExist→fsError→409`）；
+修 = `httpError(msg,status)` 在 Error 保留 `.status`（向后兼容留 `.message`），`UploadDrawer.vue` 按
+`e.status===409` 判冲突 + 上传 `silent:true`（冲突由队列行内呈现，不弹重复 toast）。
+新增 `frontend/upload-conflict-check.mjs` e2e（首传200→同名409进conflict→覆盖200，**8/8**）+ 回归 mobile37/files-nav11 全绿。
 
-**C. 可选加固/卫生（低优先）：**
-4. **驱动 use-after-Drop 方案 B**（阶段一加固）：现只做了 telegram 锁纪律（方案 A，已消 UB）；fs 层「借用守卫」
-   （引用计数 borrow/release，LinkEx 流式下载期持借用）根治所有驱动没做，改动面大，**方案 A 已够安全故可选**。
-5. **拆 `docs/PROGRESS.md`**（阶段一 1.2）：仍 1158 行/118KB 单文件，未按里程碑归档到 `docs/progress/`。极低价值。
+**C. 卫生——✅ 已完成 / 可选未做：**
+4. ✅ **拆 `docs/PROGRESS.md`** 已做完（07-23，commit `5699b5f`）：1158→104 行，里程碑→`docs/progress/milestones.md`、
+   UI 反馈 #1~#52→`docs/progress/ui-feedback.md`，主文件留活跃小节 + 存档索引；自校验脚本逐字节比对零丢失。
+5. （可选，未做）**驱动 use-after-Drop 方案 B**：fs 层「借用守卫」（引用计数 borrow/release，LinkEx 流式下载期持借用）
+   根治所有驱动；改动面大，**方案 A（telegram 锁纪律）已消 UB 够安全，故本次未做**，用户 07-22 明确跳过。
 
 **D. 项目层面（非重构）：**
 - ~~M4 PikPak 真实账号联调~~ **✅ 已 pass（07-22 用户确认）**。
