@@ -80,13 +80,19 @@ func mapErr(err error) error {
 		return driver.ErrNotFound
 	case errors.Is(err, iofs.ErrExist):
 		return driver.ErrExist
+	case isPathEscape(err):
+		// os.Root 拒绝越界，一律按不存在处理，不暴露细节。
+		return driver.ErrNotFound
 	default:
-		// os.Root 拒绝越界时报 "path escapes from parent"，一律按不存在处理，不暴露细节。
-		if strings.Contains(err.Error(), "escapes from parent") {
-			return driver.ErrNotFound
-		}
 		return err
 	}
+}
+
+// isPathEscape 判断 err 是否为 os.Root 的越界拒绝。Go 标准库未导出该 sentinel，
+// 只能匹配文案 "path escapes from parent"；集中此一处，配 local_test.go 的
+// TestPathEscapeSentinel 监视标准库文案变更（变更时该测试先红给出信号）。
+func isPathEscape(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "escapes from parent")
 }
 
 // checkName 校验单个文件/目录名在 Windows/NTFS 上的合法性。

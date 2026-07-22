@@ -10,6 +10,7 @@ import (
 	"newlist/internal/fs"
 	"newlist/internal/model"
 	"newlist/internal/task"
+	"newlist/internal/util"
 )
 
 // GET /api/fs/get?path=
@@ -76,7 +77,7 @@ func (s *Server) fsRename(c *gin.Context) {
 		fsError(c, err)
 		return
 	}
-	s.index.RenamePrefix(p, joinLogical(path.Dir(p), req.Name))
+	s.index.RenamePrefix(p, util.JoinLogical(path.Dir(p), req.Name))
 	OK(c, nil)
 }
 
@@ -139,7 +140,7 @@ func (s *Server) fsMoveCopy(isMove bool) gin.HandlerFunc {
 				fsError(c, err)
 				return
 			}
-			target := joinLogical(dst, path.Base(p))
+			target := util.JoinLogical(dst, path.Base(p))
 			if same {
 				if err := s.fs.MoveCopy(c.Request.Context(), u, p, dst, isMove); err != nil {
 					fsError(c, err)
@@ -201,11 +202,4 @@ func (s *Server) fsUpload(c *gin.Context) {
 		s.index.Upsert(p, fi)
 	}
 	OK(c, nil)
-}
-
-func joinLogical(dir, name string) string {
-	if dir == "/" {
-		return "/" + name
-	}
-	return dir + "/" + name
 }

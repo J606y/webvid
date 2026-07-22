@@ -15,6 +15,7 @@ import (
 
 	"newlist/internal/driver"
 	"newlist/internal/model"
+	"newlist/internal/util"
 )
 
 func init() {
@@ -224,19 +225,12 @@ func (d *PikPak) lookup(ctx context.Context, rel string) (pkFile, error) {
 	}
 	base := path.Base(rel)
 	for _, ch := range children {
-		d.cachePut(pathJoin(parentRel, ch.name), ch)
+		d.cachePut(util.JoinRel(parentRel, ch.name), ch)
 		if ch.name == base {
 			return ch, nil
 		}
 	}
 	return pkFile{}, driver.ErrNotFound
-}
-
-func pathJoin(dir, name string) string {
-	if dir == "" {
-		return name
-	}
-	return dir + "/" + name
 }
 
 func (d *PikPak) cacheGet(rel string) (pkFile, bool) {
@@ -276,7 +270,7 @@ func (d *PikPak) List(ctx context.Context, relPath string) ([]model.FileInfo, er
 	rel := strings.Trim(relPath, "/")
 	out := make([]model.FileInfo, 0, len(children))
 	for _, ch := range children {
-		d.cachePut(pathJoin(rel, ch.name), ch)
+		d.cachePut(util.JoinRel(rel, ch.name), ch)
 		out = append(out, ch.fileInfo())
 	}
 	return out, nil
@@ -368,7 +362,7 @@ func (d *PikPak) MakeDir(ctx context.Context, relPath string) error {
 	parentID := d.root
 	curRel := ""
 	for i, seg := range segs {
-		curRel = pathJoin(curRel, seg)
+		curRel = util.JoinRel(curRel, seg)
 		children, err := d.listAll(ctx, parentID)
 		if err != nil {
 			return err
@@ -466,7 +460,7 @@ func (d *PikPak) moveOrCopy(ctx context.Context, srcRel, dstDirRel, op string) e
 		return driver.ErrNotFound
 	}
 	// 预检查目标是否已有同名条目（PikPak 允许重名，需自行拒绝以贴合语义）。
-	dstPath := pathJoin(strings.Trim(dstDirRel, "/"), src.name)
+	dstPath := util.JoinRel(strings.Trim(dstDirRel, "/"), src.name)
 	if _, err := d.lookup(ctx, dstPath); err == nil {
 		return driver.ErrExist
 	}

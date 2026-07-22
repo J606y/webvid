@@ -6,6 +6,9 @@ import (
 	"path"
 	"strings"
 	"time"
+
+	"newlist/internal/db"
+	"newlist/internal/util"
 )
 
 var (
@@ -75,10 +78,10 @@ func (s *Store) Create(username, passwordHash, role, basePath string, canWrite b
 	res, err := s.db.Exec(
 		`INSERT INTO users(username, password_hash, role, base_path, can_write, enabled, created_at)
 		 VALUES(?,?,?,?,?,1,?)`,
-		username, passwordHash, role, NormBasePath(basePath), boolInt(canWrite),
+		username, passwordHash, role, NormBasePath(basePath), util.BoolInt(canWrite),
 		time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if db.IsUniqueViolation(err) {
 			return nil, ErrExists
 		}
 		return nil, err
@@ -129,8 +132,8 @@ func (s *Store) Update(u *User) error {
 	}
 	_, err = s.db.Exec(
 		`UPDATE users SET username=?, role=?, base_path=?, can_write=?, enabled=? WHERE id=?`,
-		u.Username, u.Role, NormBasePath(u.BasePath), boolInt(u.CanWrite), boolInt(u.Enabled), u.ID)
-	if err != nil && strings.Contains(err.Error(), "UNIQUE") {
+		u.Username, u.Role, NormBasePath(u.BasePath), util.BoolInt(u.CanWrite), util.BoolInt(u.Enabled), u.ID)
+	if err != nil && db.IsUniqueViolation(err) {
 		return ErrExists
 	}
 	return err
@@ -163,11 +166,4 @@ func (s *Store) countEnabledAdmins() (int, error) {
 	var n int
 	err := s.db.QueryRow(`SELECT COUNT(*) FROM users WHERE role='admin' AND enabled=1`).Scan(&n)
 	return n, err
-}
-
-func boolInt(b bool) int {
-	if b {
-		return 1
-	}
-	return 0
 }

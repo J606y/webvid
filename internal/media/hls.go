@@ -24,6 +24,7 @@ import (
 	"newlist/internal/fs"
 	"newlist/internal/model"
 	"newlist/internal/user"
+	"newlist/internal/util"
 )
 
 const (
@@ -221,7 +222,7 @@ func (s *Service) saveInfo(logical string, fi model.FileInfo, d Decision) {
 		 (path,size,modified,video_copy,audio_copy,audio_aac,has_video,has_audio,duration,probed_at)
 		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		logical, fi.Size, modKey(fi.Modified),
-		boolInt(d.VideoCopy), boolInt(d.AudioCopy), boolInt(d.AudioAAC), boolInt(d.HasVideo), boolInt(d.HasAudio),
+		util.BoolInt(d.VideoCopy), util.BoolInt(d.AudioCopy), util.BoolInt(d.AudioAAC), util.BoolInt(d.HasVideo), util.BoolInt(d.HasAudio),
 		d.Duration, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		log.Printf("[media] media_info 写入失败 %s: %v", logical, err)
@@ -234,13 +235,6 @@ func modKey(t time.Time) string {
 		return ""
 	}
 	return t.UTC().Format(time.RFC3339)
-}
-
-func boolInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
 }
 
 // Playlist 返回 index.m3u8 内容（不存在则创建会话并启动 ffmpeg）。

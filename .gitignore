@@ -25,3 +25,6 @@ node_modules/
 .DS_Store
 Thumbs.db
 *.swp
+
+# 临时查询/调试残骸
+/zz_tmpquery/

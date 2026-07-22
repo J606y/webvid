@@ -16,6 +16,7 @@ import (
 	"newlist/internal/fs"
 	"newlist/internal/model"
 	"newlist/internal/user"
+	"newlist/internal/util"
 )
 
 // adminIdent 扫描时使用的管理员身份（全视野）。
@@ -127,7 +128,7 @@ func (b *Builder) flush(batch []row) error {
 	}
 	for _, r := range batch {
 		if _, err := stmt.Exec(r.path, r.parent, r.name, strings.ToLower(r.name),
-			boolInt(r.isDir), r.size, r.modified, r.extType); err != nil {
+			util.BoolInt(r.isDir), r.size, r.modified, r.extType); err != nil {
 			stmt.Close()
 			tx.Rollback()
 			return err
@@ -182,7 +183,7 @@ func (b *Builder) run() {
 				continue
 			}
 			for _, it := range items {
-				full := joinPath(dir, it.Name)
+				full := util.JoinLogical(dir, it.Name)
 				if err := add(newRow(full, it)); err != nil {
 					b.finish(err)
 					return
@@ -215,7 +216,7 @@ func (b *Builder) run() {
 func (b *Builder) Upsert(logical string, fi model.FileInfo) {
 	r := newRow(logical, fi)
 	if _, err := b.db.Exec(upsertSQL, r.path, r.parent, r.name, strings.ToLower(r.name),
-		boolInt(r.isDir), r.size, r.modified, r.extType); err != nil {
+		util.BoolInt(r.isDir), r.size, r.modified, r.extType); err != nil {
 		log.Printf("[index] upsert %s: %v", logical, err)
 	}
 }
@@ -289,7 +290,7 @@ func (b *Builder) ScanSubtree(logical string) {
 				continue
 			}
 			for _, it := range items {
-				full := joinPath(dir, it.Name)
+				full := util.JoinLogical(dir, it.Name)
 				b.Upsert(full, it)
 				if it.IsDir {
 					queue = append(queue, full)
@@ -299,16 +300,3 @@ func (b *Builder) ScanSubtree(logical string) {
 	}()
 }
 
-func joinPath(dir, name string) string {
-	if dir == "/" {
-		return "/" + name
-	}
-	return dir + "/" + name
-}
-
-func boolInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
-}

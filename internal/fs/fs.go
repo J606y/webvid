@@ -22,6 +22,7 @@ import (
 	"newlist/internal/model"
 	"newlist/internal/stream"
 	"newlist/internal/user"
+	"newlist/internal/util"
 )
 
 var ErrBadPath = errors.New("路径非法")
@@ -203,13 +204,6 @@ func (f *FS) Resolve(u *user.User, p string) (*Mount, string, error) {
 	return m, rel, nil
 }
 
-func joinPath(p, name string) string {
-	if p == "/" {
-		return "/" + name
-	}
-	return p + "/" + name
-}
-
 // Get 返回单个条目信息（含虚拟目录）。
 func (f *FS) Get(ctx context.Context, u *user.User, p string) (model.FileInfo, error) {
 	p, err := NormPath(p)
@@ -258,7 +252,7 @@ func (f *FS) List(ctx context.Context, u *user.User, p string) ([]model.FileInfo
 		if err == nil {
 			foundAny = true
 			for _, it := range items {
-				if navOK(u, joinPath(p, it.Name)) {
+				if navOK(u, util.JoinLogical(p, it.Name)) {
 					out[it.Name] = it
 				}
 			}
@@ -278,7 +272,7 @@ func (f *FS) List(ctx context.Context, u *user.User, p string) ([]model.FileInfo
 			continue
 		}
 		seg := strings.SplitN(strings.TrimPrefix(m.Path, prefix), "/", 2)[0]
-		fp := joinPath(p, seg)
+		fp := util.JoinLogical(p, seg)
 		if navOK(u, fp) {
 			out[seg] = model.FileInfo{Name: seg, IsDir: true}
 			foundAny = true

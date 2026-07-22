@@ -100,6 +100,33 @@ func (s *Service) FFmpeg() string {
 	return s.ffPath
 }
 
+// once 是 Get/remote/remoteVideoFrame 三处共用的 singleflight 前置：同一 key 已有在途
+// 计算时，本调用挂起等待其完成（ctx 取消则 err 非空，调用方应立即返回）；
+// 抢到 leader 身份（lead=true）的调用方负责实际计算，算完必须 defer finish() 唤醒等待者
+// 并从 flight 表摘除 key——无论成功与否，「是否有旧缓存可沿用」由各自读盘判断，
+// finish 本身不携带结果。lead=false 时 finish 为 nil，调用方转去检查磁盘产物是否已就绪。
+func (s *Service) once(ctx context.Context, key string) (lead bool, finish func(), err error) {
+	s.mu.Lock()
+	if ch, busy := s.flight[key]; busy {
+		s.mu.Unlock()
+		select {
+		case <-ch:
+			return false, nil, nil
+		case <-ctx.Done():
+			return false, nil, ctx.Err()
+		}
+	}
+	ch := make(chan struct{})
+	s.flight[key] = ch
+	s.mu.Unlock()
+	return true, func() {
+		s.mu.Lock()
+		delete(s.flight, key)
+		s.mu.Unlock()
+		close(ch)
+	}, nil
+}
+
 // Get 返回 (302 重定向 URL, 本地缓存文件路径, error)，二者最多一个非空。
 func (s *Service) Get(ctx context.Context, u *user.User, logical string, width int) (string, string, error) {
 	if width <= 0 || width > 1600 {
@@ -145,28 +172,17 @@ func (s *Service) Get(ctx context.Context, u *user.User, logical string, width i
 	}
 
 	// singleflight：同 key 只生成一次
-	s.mu.Lock()
-	if ch, busy := s.flight[key]; busy {
-		s.mu.Unlock()
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			return "", "", ctx.Err()
-		}
+	lead, finish, err := s.once(ctx, key)
+	if err != nil {
+		return "", "", err
+	}
+	if !lead {
 		if _, err := os.Stat(out); err == nil {
 			return "", out, nil
 		}
 		return "", "", driver.ErrNotSupported
 	}
-	ch := make(chan struct{})
-	s.flight[key] = ch
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.flight, key)
-		s.mu.Unlock()
-		close(ch)
-	}()
+	defer finish()
 
 	select {
 	case s.sem <- struct{}{}:
@@ -200,28 +216,17 @@ func (s *Service) remote(ctx context.Context, t driver.Thumber, rel, logical str
 	}
 
 	// singleflight：同 key 只取直链+下载一次
-	s.mu.Lock()
-	if ch, busy := s.flight[key]; busy {
-		s.mu.Unlock()
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			return "", ""
-		}
-		if _, err := os.Stat(out); err == nil {
+	lead, finish, err := s.once(ctx, key)
+	if err != nil {
+		return "", ""
+	}
+	if !lead {
+		if _, e := os.Stat(out); e == nil {
 			return "", out
 		}
 		return "", ""
 	}
-	ch := make(chan struct{})
-	s.flight[key] = ch
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.flight, key)
-		s.mu.Unlock()
-		close(ch)
-	}()
+	defer finish()
 
 	url, err := t.Thumb(ctx, rel)
 	if err != nil || url == "" {
@@ -260,28 +265,17 @@ func (s *Service) remoteVideoFrame(ctx context.Context, u *user.User, logical st
 	}
 
 	// singleflight：同 key 只抽一次
-	s.mu.Lock()
-	if ch, busy := s.flight[key]; busy {
-		s.mu.Unlock()
-		select {
-		case <-ch:
-		case <-ctx.Done():
-			return ""
-		}
-		if _, err := os.Stat(out); err == nil {
+	lead, finish, err := s.once(ctx, key)
+	if err != nil {
+		return ""
+	}
+	if !lead {
+		if _, e := os.Stat(out); e == nil {
 			return out
 		}
 		return ""
 	}
-	ch := make(chan struct{})
-	s.flight[key] = ch
-	s.mu.Unlock()
-	defer func() {
-		s.mu.Lock()
-		delete(s.flight, key)
-		s.mu.Unlock()
-		close(ch)
-	}()
+	defer finish()
 
 	// 抽帧走 ffmpeg（CPU）+ 网络拉流，占 sem 生成闸
 	select {

@@ -16,6 +16,7 @@ import (
 	"newlist/internal/fs"
 	"newlist/internal/task"
 	"newlist/internal/user"
+	"newlist/internal/util"
 )
 
 // POST /api/fs/offline {urls[], dst_dir} —— 离线下载：每个 URL 建一个后台任务（offline 组），
@@ -117,7 +118,7 @@ func (s *Server) offlineFetch(ctx context.Context, u *user.User, t *task.Task, s
 	if resp.ContentLength <= 0 {
 		t.SetTotal(pr.n) // 源未报大小：以实收字节数收尾，避免完成时进度归零
 	}
-	target := joinLogical(dstDir, name)
+	target := util.JoinLogical(dstDir, name)
 	if fi, err := s.fs.Get(ctx, u, target); err == nil {
 		s.index.Upsert(target, fi)
 	}

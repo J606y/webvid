@@ -86,16 +86,36 @@ func (d *Telegram) Init(ctx context.Context, cfg driver.Config) error {
 		c.close()
 		return ErrNotLoggedIn
 	}
+	d.mu.Lock()
 	d.conn = c
+	d.mu.Unlock()
 	return nil
 }
 
+// Drop 关闭连接。d.mu 保护 d.conn 的置空，与 snapshot/message/getFile 经 currentConn 的
+// 读取互斥：并发的进行中请求要么在关闭前捕获到有效连接（gotd 对已关连接安全，在途调用只报错），
+// 要么在关闭后拿到 nil→干净的未登录错误，杜绝对 nil 的解引用与数据竞争。
 func (d *Telegram) Drop() error {
-	if d.conn != nil {
-		d.conn.close()
-		d.conn = nil
+	d.mu.Lock()
+	c := d.conn
+	d.conn = nil
+	d.mu.Unlock()
+	if c != nil {
+		c.close()
 	}
 	return nil
+}
+
+// currentConn 在锁内快照 d.conn 后即释放锁（网络 I/O 在锁外用捕获的指针进行）；
+// 驱动已 Drop 时返回未登录错误，替代此前对 d.conn 的无同步读取。
+func (d *Telegram) currentConn() (*conn, error) {
+	d.mu.Lock()
+	c := d.conn
+	d.mu.Unlock()
+	if c == nil {
+		return nil, ErrNotLoggedIn
+	}
+	return c, nil
 }
 
 func (d *Telegram) List(ctx context.Context, relPath string) ([]model.FileInfo, error) {
@@ -124,7 +144,11 @@ func (d *Telegram) snapshot(ctx context.Context) (*savedTree, error) {
 	}
 	d.mu.Unlock()
 
-	t, err := listSaved(ctx, d.conn.client.API())
+	c, err := d.currentConn()
+	if err != nil {
+		return nil, err
+	}
+	t, err := listSaved(ctx, c.client.API())
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +214,11 @@ func (d *Telegram) Link(ctx context.Context, relPath string) (*driver.Link, erro
 
 // getFile 对指定 DC 调 upload.getFile 拉一块（不带 cdn_supported，服务器不会 CDN 重定向）。
 func (d *Telegram) getFile(ctx context.Context, dc int, loc *tg.InputDocumentFileLocation, offset int64) ([]byte, error) {
-	inv, err := d.conn.invoker(ctx, dc)
+	c, err := d.currentConn()
+	if err != nil {
+		return nil, err
+	}
+	inv, err := c.invoker(ctx, dc)
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +237,11 @@ func (d *Telegram) getFile(ctx context.Context, dc int, loc *tg.InputDocumentFil
 
 // message 按消息 ID 取单条并提取文件（比列表缓存新鲜，file_reference 也最新）。
 func (d *Telegram) message(ctx context.Context, id int) (*tg.Message, *tg.Document, error) {
-	r, err := d.conn.client.API().MessagesGetMessages(ctx,
+	c, err := d.currentConn()
+	if err != nil {
+		return nil, nil, err
+	}
+	r, err := c.client.API().MessagesGetMessages(ctx,
 		[]tg.InputMessageClass{&tg.InputMessageID{ID: id}})
 	if err != nil {
 		return nil, nil, fmt.Errorf("telegram: 读取消息失败: %w", err)
@@ -319,7 +351,7 @@ func buildTree(entries []fileEntry) *savedTree {
 		if name, ok := folderName[ref.key]; ok {
 			return name
 		}
-		base := sanitizeName(ref.name)
+		base := safeSegment(ref.name)
 		if base == "" {
 			base = "对话"
 		}
@@ -505,7 +537,7 @@ func entryName(msgID int, doc *tg.Document) string {
 			break
 		}
 	}
-	name = sanitizeName(name)
+	name = safeSegment(name)
 	if name == "" {
 		name = "file_" + time.Unix(int64(doc.Date), 0).Format("20060102") + extByMime(doc.MimeType)
 	}
@@ -526,8 +558,8 @@ func parseMsgID(rel string) (int, error) {
 	return id, nil
 }
 
-// sanitizeName 清洗文件名中的路径分隔符与控制字符，去掉首尾点/空格。
-func sanitizeName(s string) string {
+// safeSegment 清洗文件名中的路径分隔符与控制字符，去掉首尾点/空格。
+func safeSegment(s string) string {
 	var b strings.Builder
 	for _, r := range s {
 		if r == '/' || r == '\\' || r < 0x20 || r == 0x7f {

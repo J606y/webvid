@@ -11,6 +11,7 @@ import (
 	"newlist/internal/driver"
 	"newlist/internal/stream"
 	"newlist/internal/user"
+	"newlist/internal/util"
 )
 
 // Progress 由任务层实现（task.Task 结构化满足），Transfer 通过它上报进度。
@@ -69,7 +70,7 @@ func (f *FS) Transfer(ctx context.Context, u *user.User, src, dstDir string, isM
 	var files []fileJob
 	var dirs []string
 	if sfi.IsDir {
-		if err := f.planDir(ctx, sm, srcRel, joinRel(dstRel, base), &files, &dirs); err != nil {
+		if err := f.planDir(ctx, sm, srcRel, util.JoinRel(dstRel, base), &files, &dirs); err != nil {
 			return err
 		}
 	} else {
@@ -123,9 +124,9 @@ func (f *FS) planDir(ctx context.Context, sm *Mount, srcRel, dstRel string, file
 		return err
 	}
 	for _, it := range items {
-		childSrc := joinRel(srcRel, it.Name)
+		childSrc := util.JoinRel(srcRel, it.Name)
 		if it.IsDir {
-			if err := f.planDir(ctx, sm, childSrc, joinRel(dstRel, it.Name), files, dirs); err != nil {
+			if err := f.planDir(ctx, sm, childSrc, util.JoinRel(dstRel, it.Name), files, dirs); err != nil {
 				return err
 			}
 		} else {
@@ -222,12 +223,4 @@ func (c *countingReader) Read(p []byte) (int, error) {
 		c.pr.Add(int64(n))
 	}
 	return n, err
-}
-
-// joinRel 拼相对路径（"" 为存储根）。
-func joinRel(dir, name string) string {
-	if dir == "" {
-		return name
-	}
-	return dir + "/" + name
 }

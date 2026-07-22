@@ -8,7 +8,9 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"newlist/internal/db"
 	"newlist/internal/driver"
+	"newlist/internal/util"
 )
 
 type storageDTO struct {
@@ -142,10 +144,10 @@ func (s *Server) storageCreate(c *gin.Context) {
 	_, err := s.db.Exec(
 		`INSERT INTO storages(mount_path, driver, config, ord, enabled, status, created_at)
 		 VALUES(?,?,?,?,?, '', ?)`,
-		mp, req.Driver, string(cfgJSON), req.Ord, boolInt(req.Enabled),
+		mp, req.Driver, string(cfgJSON), req.Ord, util.BoolInt(req.Enabled),
 		time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if db.IsUniqueViolation(err) {
 			Fail(c, 409, "该挂载路径已存在")
 			return
 		}
@@ -188,9 +190,9 @@ func (s *Server) storageUpdate(c *gin.Context) {
 	cfgJSON, _ := json.Marshal(req.Config)
 	_, err := s.db.Exec(
 		`UPDATE storages SET mount_path=?, driver=?, config=?, ord=?, enabled=? WHERE id=?`,
-		normMount(req.MountPath), req.Driver, string(cfgJSON), req.Ord, boolInt(req.Enabled), id)
+		normMount(req.MountPath), req.Driver, string(cfgJSON), req.Ord, util.BoolInt(req.Enabled), id)
 	if err != nil {
-		if strings.Contains(err.Error(), "UNIQUE") {
+		if db.IsUniqueViolation(err) {
 			Fail(c, 409, "该挂载路径已存在")
 			return
 		}
@@ -225,11 +227,4 @@ func (s *Server) storageReload(c *gin.Context) {
 		return
 	}
 	OK(c, nil)
-}
-
-func boolInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
 }
