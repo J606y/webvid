@@ -1,21 +1,31 @@
 # 技术债务整改 · 执行进度（交接）
 
 > 配套方案见 `docs/REFACTOR-PLAN.md`。本文件是跨会话交接：记录已完成/已验证、未完成、验证方式、注意事项。
-> **最新状态见下「一句话状态（07-22 二次更新）」**：重构 #1~#5 已 commit 到 main（3 提交），v1.7.0 发布后已撤回。
+> **最新状态见下「一句话状态（07-22 三次更新）」**：阶段一~六 + 阶段三尾全部完成；v1.7.0 已重发并为 GitHub Latest。
 
-## 一句话状态（07-22 二次更新）
+## 一句话状态（07-22 三次更新 · 阶段三尾完成 + v1.7.0 重发）
 
-方案阶段一~四 + 五/六**全部完成并 e2e 验证**：telegram 数据竞争修复、错误码化、util DRY、hero 转场合并、
-FeaturedCarousel/MediaGridCard/VideoCard 抽出、Admin.vue 拆分、api.js/token 集中、accent/断点 token 化。
+方案阶段一~六 + **阶段三尾全部完成并验证**。v1.7.0 已重发、为 GitHub Latest。
 
-**⚠️ 已 commit 到 main（3 个提交），但 v1.7.0 发布后又按用户要求撤回**：
-- 提交：`3ea3458` 后端（阶段1-3）｜`9d8bc71` 前端（阶段4-6）｜`4969ea4` `v1.7.0` 版本号。**均已 push origin/main**。
-- v1.7.0 曾发布（run 29916573792 success），**随后 `gh release delete v1.7.0` + 删远程/本地 tag 撤回**——
-  GitHub 上 v1.6.0 重新为 Latest；**3 个提交保留在 main、未 force-push**；`conf.Version` 仍是 `1.7.0`。
-- 撤回原因：用户想把**阶段三剩余的 httpx 统一 + 两处 ffmpeg 合并**一起做完再正式发 v1.7.0（见下「未完成」）。
+**已发布**：`git log` = `5994752`(阶段三尾) ← `4e687e3`(docs) ← `4969ea4`(v1.7.0 版本号) ←
+`9d8bc71`(前端 4-6) ← `3ea3458`(后端 1-3)，均在 origin/main。
+- **v1.7.0 重发成功**：tag `v1.7.0` → `5994752`，release.yml run `29921752874` success，
+  `gh api repos/J606y/webvid/releases/latest` = v1.7.0（Latest），资产 = 3× linux tar.gz + checksums.txt，
+  notes 已覆盖为「纯重构·行为界面零变化」。
+- （历史：v1.7.0 曾于 run `29916573792` 发布后按用户要求撤回，为的是补齐阶段三尾一起发；现已连阶段三尾重发。）
 
-**下次发版**：做完剩余项 → 确认/bump `conf.Version` → 提交 → `git tag v1.7.0 && git push origin v1.7.0`
-触发 release.yml → `gh release edit v1.7.0 --notes-file <changelog>`（**Bash heredoc 写 notes**）。委派 sonnet。
+**阶段三尾·本会话补做完（4 文件，纯后端，行为零变化）**：
+- **stream 状态分类去重**：`package stream` 内提 `classifyErrStatus(code)→disposition{Relink 401/403/404/410,
+  Throttle 429/503, Hard}`，`serve.openUpstream`(单流) 与 `accel.doRange`(分块) 共用；消除码集两处漂移；
+  守 `accel.go:2`「纯标准库·不依赖项目内包」不变量（故 dedup 只留 package 内）。
+- **ffmpeg 探测去重**：`thumb.FFmpeg()` → `media.LookTool("ffmpeg")`（thumb→media acyclic 已核）。
+- **ffmpeg 抽帧去重**：抽 `media.FrameAt(ctx,ff,in,out,width,internalToken,offsets...)`（`httpInputArgs` 对本地
+  返回 nil，一份兼容 http/本地），`media.FrameJPEG` + `thumb.genVideo` 共用。
+- 验证：`go build/vet/test ./...` 全绿 + `FrameAt` 真实 ffmpeg 抽帧冒烟 17KB JPEG（临时 test 用后删）。
+  前端零改动故 e2e 未再跑（纯后端 round 的门控是 go test）。
+
+**⚠️ httpx.Do 通用引擎——读完四处代码判定「前提不成立」，有意不做（勿再尝试，理由见下「未完成」A）。**
+用户 07-22 选「稳妥子集」确认此路线。
 
 ## 已完成并验证 ✅
 
@@ -109,14 +119,19 @@ search-grid 13/13、history 12/12、photos-history 11/11、photos ✔、detect 3
 SSRF 守卫（`internal/server/safedial.go`，committed 未改）拒绝下载回环地址 127.0.0.1**——脚本用 127.0.0.1:5321 起测试
 源，与该守卫**天然冲突，非本次重构回归**（前端 `api.fs.offline` 提交路径正常：任务已建、命名正确）。
 
-## 未完成（07-22 核实过，均真未做）
+## 未完成 / 已决策不做（07-22 三次更新）
 
-**A. 阶段三尾（后端去重，做完阶段三就 100%）——推荐下一轮优先做，收益/风险比最好：**
-1. **httpx 统一**（中价值·中风险，方案里就标「较大·单列」）：HTTP 重试/退避/换链**四处各写一份**——
-   `onedrive/graph.go`、`pikpak/client.go`、`stream/serve.go`、`stream/accel.go` → 抽 `internal/httpx.Do(ctx,req,policy)`
-   （policy 描述「401/403/404/410→换链、429/503→Retry-After 待、预算内不计次」）。**需配 httpx 单测覆盖各策略分支**。
-2. **两处 ffmpeg 合并**（低价值·低风险）：①探测（PATH+winget）`thumb.go` 与 `media/probe.go` 各一份 → 留 media、
-   thumb 调它；②抽帧 `try("3")/try("0")` 在 `hls.go:143` 与 `thumb.go:388` 近同 → 抽共享 `media.FrameAt(ctx,in,out,w,offsets...)`。
+**A. 阶段三尾——已完成 / 已决策（详见「一句话状态」）：**
+1. ✅ **两处 ffmpeg 合并** 已做完：探测 → `media.LookTool("ffmpeg")`（thumb 复用）、抽帧 → `media.FrameAt`
+   （`media.FrameJPEG` + `thumb.genVideo` 共用）。
+2. ✅ **stream serve↔accel 状态分类去重** 已做完：`classifyErrStatus`（换链/限流/硬错误）package 内共用。
+3. ❌ **httpx.Do 通用引擎——有意不做（读码后判定前提不成立，勿再尝试）**：方案设想把 `onedrive/graph.go`、
+   `pikpak/client.go`、`stream/serve.go`、`stream/accel.go`「四处」抽一个 `internal/httpx.Do(ctx,req,policy)`，
+   但读完四处后是**两种不相关形态**——①onedrive/pikpak 是 JSON-API 鉴权重试且**彼此不共享策略**（onedrive 按
+   HTTP 状态 401/429，pikpak 按业务 error_code 4122/9/10，恢复动作也不同）：强套通用引擎需 per-provider
+   classify+recover 回调，各 `req` 不缩短反添间接层 = 净负抽象；②stream serve↔accel 确实共享策略，但
+   `package stream`（`accel.go:2`）有「纯标准库·不依赖项目内包·便于独立单测」硬不变量，**不能 import 跨包 httpx**，
+   其去重只能留 package 内（即已做的 `classifyErrStatus`）。故无 sound 的跨包 httpx 抽象，`internal/httpx` 不建。
 
 **B. 需后端配合：**
 3. **#6 UploadDrawer 409**：`UploadDrawer.vue:93` `includes('已存在')` 字符串判冲突 → 后端先返 409/错误码，
