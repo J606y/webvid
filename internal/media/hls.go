@@ -123,13 +123,22 @@ func (s *Service) FrameJPEG(ctx context.Context, u *user.User, logical, out stri
 	if err != nil {
 		return err
 	}
+	return FrameAt(ctx, ff, in, out, width, s.internalToken, "3", "0")
+}
+
+// FrameAt 用 ffmpeg 抽取视频某一帧写入 out（缩放到宽 width 的 JPEG）。依次尝试 offsets 中
+// 各秒点（如 "3","0"：先 3s 处、失败回退取首帧），第一个产出非空帧的即成功；全部失败返回最后错误。
+// in 为本地绝对路径或 http(s) 直链——http 输入自动挂 -reconnect 续传与 X-Internal-Auth 头
+// （见 httpInputArgs），本地输入这些旗标为空、无副作用，故一份代码兼容云盘回环抽帧与本地抽帧。
+// ff 为 ffmpeg 可执行路径，internalToken 为回环鉴权令牌（本地或无令牌传 ""）。
+func FrameAt(ctx context.Context, ff, in, out string, width int, internalToken string, offsets ...string) error {
 	tmp := out + ".vf.tmp.jpg"
 	defer os.Remove(tmp)
 	try := func(ss string) error {
 		cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		a := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-ss", ss}
-		a = append(a, httpInputArgs(in, s.internalToken)...)
+		a = append(a, httpInputArgs(in, internalToken)...)
 		a = append(a, "-i", in, "-frames:v", "1",
 			"-vf", fmt.Sprintf("scale=%d:-2", width), "-q:v", "5", "-y", tmp)
 		if err := exec.CommandContext(cctx, ff, a...).Run(); err != nil {
@@ -140,12 +149,13 @@ func (s *Service) FrameJPEG(ctx context.Context, u *user.User, logical, out stri
 		}
 		return nil
 	}
-	if err := try("3"); err != nil {
-		if err := try("0"); err != nil { // 短视频/seek 失败回退取首帧
-			return err
+	lastErr := fmt.Errorf("未指定抽帧偏移")
+	for _, ss := range offsets {
+		if lastErr = try(ss); lastErr == nil {
+			return os.Rename(tmp, out)
 		}
 	}
-	return os.Rename(tmp, out)
+	return lastErr
 }
 
 // Decide 探测文件并给出播放决策（结果按 路径+size+mtime 内存缓存）。

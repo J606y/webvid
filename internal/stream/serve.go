@@ -217,14 +217,15 @@ func openUpstream(ctx context.Context, provider LinkProvider, rg httpRange, size
 			}
 			resp.Body.Close()
 			return nil, errNoRange
-		case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
-			resp.Body.Close()
+		}
+		resp.Body.Close()
+		switch classifyErrStatus(resp.StatusCode) {
+		case dispRelink:
 			lastErr = fmt.Errorf("直链疑似过期: HTTP %d", resp.StatusCode)
 			url = "" // 下轮换新链
 			attempt++
-		case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		case dispThrottle:
 			wait := retryAfter(resp.Header.Get("Retry-After"))
-			resp.Body.Close()
 			lastErr = fmt.Errorf("源限流: HTTP %d", resp.StatusCode)
 			if throttled+wait <= openThrottleLimit {
 				throttled += wait
@@ -234,8 +235,7 @@ func openUpstream(ctx context.Context, provider LinkProvider, rg httpRange, size
 				continue // 限流等待不消耗尝试次数
 			}
 			attempt++
-		default:
-			resp.Body.Close()
+		default: // dispHard
 			lastErr = fmt.Errorf("拉取源失败: HTTP %d", resp.StatusCode)
 			attempt++
 			if attempt <= openAttempts && !ctxPause(ctx, retryBackoff*time.Duration(attempt-1)) {

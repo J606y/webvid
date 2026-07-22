@@ -41,6 +41,29 @@ func retryAfter(h string) time.Duration {
 	return throttleDefault
 }
 
+// disposition 是一个非成功上游状态码的处置动作。
+type disposition int
+
+const (
+	dispRelink   disposition = iota // 401/403/404/410：直链疑似过期 → 换链重试
+	dispThrottle                    // 429/503：源限流 → 按 Retry-After 等待（预算内不计次）
+	dispHard                        // 其它非 2xx：硬错误 → 退避重试
+)
+
+// classifyErrStatus 把一个非 2xx（且非可接受的 200-Range）上游状态码归类到处置动作。
+// serve.openUpstream（单流）与 accel.doRange（分块）共用同一判定，避免"哪些码换链、
+// 哪些码限流"两处各写一份而漂移——两者仅在拿到处置后的动作（返回体 vs 返回标志）不同。
+func classifyErrStatus(code int) disposition {
+	switch code {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+		return dispRelink
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return dispThrottle
+	default:
+		return dispHard
+	}
+}
+
 var errNoRange = errors.New("源不支持 Range 分块")
 
 // chunkResult 一个分块的下载结果。
@@ -274,9 +297,11 @@ func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int6
 			return buf, false, 0, nil
 		}
 		return nil, false, 0, errNoRange
-	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+	}
+	switch classifyErrStatus(resp.StatusCode) {
+	case dispRelink:
 		return nil, true, 0, fmt.Errorf("直链疑似过期: HTTP %d", resp.StatusCode)
-	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+	case dispThrottle:
 		return nil, false, retryAfter(resp.Header.Get("Retry-After")),
 			fmt.Errorf("源限流: HTTP %d", resp.StatusCode)
 	default:

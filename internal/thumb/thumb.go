@@ -14,7 +14,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -26,6 +25,7 @@ import (
 
 	"newlist/internal/driver"
 	"newlist/internal/fs"
+	"newlist/internal/media"
 	"newlist/internal/model"
 	"newlist/internal/user"
 )
@@ -76,26 +76,13 @@ func New(f *fs.FS, dataDir string) *Service {
 }
 
 // FFmpeg 返回探测到的 ffmpeg 路径（可能为空 = 不可用）。
+// 探测逻辑（NL_FFMPEG / PATH / winget 兜底）与 media 共用一份，见 media.LookTool。
 func (s *Service) FFmpeg() string {
 	s.ffOnce.Do(func() {
-		if p := os.Getenv("NL_FFMPEG"); p != "" {
-			s.ffPath = p
-			return
+		s.ffPath = media.LookTool("ffmpeg")
+		if s.ffPath == "" {
+			log.Println("[thumb] 未找到 ffmpeg，视频缩略图不可用（可设 NL_FFMPEG 指定路径）")
 		}
-		if p, err := exec.LookPath("ffmpeg"); err == nil {
-			s.ffPath = p
-			return
-		}
-		// Windows: winget 安装但当前进程 PATH 未刷新的兜底
-		if la := os.Getenv("LOCALAPPDATA"); la != "" {
-			matches, _ := filepath.Glob(filepath.Join(la,
-				"Microsoft", "WinGet", "Packages", "Gyan.FFmpeg*", "ffmpeg-*", "bin", "ffmpeg.exe"))
-			if len(matches) > 0 {
-				s.ffPath = matches[len(matches)-1]
-				return
-			}
-		}
-		log.Println("[thumb] 未找到 ffmpeg，视频缩略图不可用（可设 NL_FFMPEG 指定路径）")
 	})
 	return s.ffPath
 }
@@ -366,29 +353,6 @@ func (s *Service) genVideo(ctx context.Context, abs, out string, width int) erro
 	if ff == "" {
 		return driver.ErrNotSupported
 	}
-	tmp := out + ".tmp.jpg"
-	defer os.Remove(tmp)
-	try := func(ss string) error {
-		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-		defer cancel()
-		cmd := exec.CommandContext(cctx, ff,
-			"-hide_banner", "-loglevel", "error",
-			"-ss", ss, "-i", abs,
-			"-frames:v", "1",
-			"-vf", fmt.Sprintf("scale=%d:-2", width),
-			"-q:v", "5", "-y", tmp)
-		if err := cmd.Run(); err != nil {
-			return err
-		}
-		if st, err := os.Stat(tmp); err != nil || st.Size() == 0 {
-			return fmt.Errorf("ffmpeg 未产出帧")
-		}
-		return nil
-	}
-	if err := try("3"); err != nil {
-		if err := try("0"); err != nil {
-			return err
-		}
-	}
-	return os.Rename(tmp, out)
+	// 本地绝对路径抽帧：与 media 的云盘回环抽帧共用一份实现（本地输入无 http 旗标，internalToken 传空）。
+	return media.FrameAt(ctx, ff, abs, out, width, "", "3", "0")
 }
