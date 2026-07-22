@@ -82,6 +82,7 @@ async function run(t) {
     await api.fs.upload(target, t.overwrite, t.file, {
       headers: { 'Content-Type': 'application/octet-stream' },
       timeout: 0,
+      silent: true, // 队列内每任务行内展示状态与重试/覆盖，无需全局 toast
       onUploadProgress: (ev) => {
         if (ev.total) t.percent = Math.round((ev.loaded / ev.total) * 100)
       },
@@ -90,7 +91,7 @@ async function run(t) {
     t.state = 'done'
     emit('uploaded')
   } catch (e) {
-    if ((e.message || '').includes('已存在')) {
+    if (e.status === 409) { // 后端 fsError：同名冲突（driver.ErrExist → 409）
       t.state = 'conflict'
       t.error = '同名文件已存在'
     } else {
