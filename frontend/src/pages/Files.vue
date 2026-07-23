@@ -1,5 +1,5 @@
 <template>
-  <div class="page" @dragover.prevent="onDragOver" @drop.prevent="onDrop" @dragleave="dragging = false">
+  <div class="page">
     <div v-if="dragging && caps.upload" class="drop-mask glass-panel">
       <el-icon :size="46"><UploadFilled /></el-icon>
       <p>松开以上传到 {{ current }}</p>
@@ -118,7 +118,7 @@
 </template>
 
 <script setup>
-import { ref, computed, watch, defineAsyncComponent } from 'vue'
+import { ref, computed, watch, defineAsyncComponent, onActivated, onDeactivated } from 'vue'
 import { useRoute, useRouter, onBeforeRouteLeave } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import 'element-plus/es/components/message-box/style/css'
@@ -347,16 +347,41 @@ function openMoveCopy(mode) {
   mcVisible.value = true
 }
 
-function onDragOver(e) {
-  if (caps.value.upload && e.dataTransfer?.types?.includes('Files')) dragging.value = true
+// 拖拽落区挂在 window 而非 .page：.page 只有内容那么高，文件夹一空/宽屏留白处
+// 拖上去落不到（浏览器显示禁止符号）。文件拖拽一律 preventDefault（避免浏览器把文件
+// 当导航打开），仅当前目录可上传时才显示遮罩并接收；非文件拖拽（选中文本等）忽略。
+function isFileDrag(e) {
+  return !!e.dataTransfer && Array.prototype.includes.call(e.dataTransfer.types || [], 'Files')
 }
-
-function onDrop(e) {
+function onWinDragOver(e) {
+  if (!isFileDrag(e)) return
+  e.preventDefault()
+  dragging.value = caps.value.upload
+}
+function onWinDrop(e) {
+  if (!isFileDrag(e)) return
+  e.preventDefault()
   dragging.value = false
   if (!caps.value.upload) return
-  const files = [...(e.dataTransfer?.files || [])]
+  const files = [...(e.dataTransfer.files || [])]
   if (files.length) uploader.value?.addFiles(files)
 }
+function onWinDragLeave(e) {
+  if (e.relatedTarget === null) dragging.value = false // 拖出整个窗口才收起遮罩
+}
+
+// keep-alive：仅在本页激活时监听，离开（缓存驻留）时摘掉，避免后台页误吞其它页的拖放。
+onActivated(() => {
+  window.addEventListener('dragover', onWinDragOver)
+  window.addEventListener('drop', onWinDrop)
+  window.addEventListener('dragleave', onWinDragLeave)
+})
+onDeactivated(() => {
+  window.removeEventListener('dragover', onWinDragOver)
+  window.removeEventListener('drop', onWinDrop)
+  window.removeEventListener('dragleave', onWinDragLeave)
+  dragging.value = false
+})
 
 watch(current, load, { immediate: true })
 

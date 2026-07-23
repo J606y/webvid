@@ -16,6 +16,7 @@ var (
 	ErrExist        = errors.New("目标已存在")
 	ErrNotSupported = errors.New("该存储不支持此操作")
 	ErrBadName      = errors.New("名称包含非法字符或为保留名")
+	ErrDenied       = errors.New("存储拒绝了该操作（权限不足）") // 云盘写被拒：如 OneDrive accessDenied/403
 )
 
 // Config 是存储配置（storages.config 的 JSON 反序列化结果）。

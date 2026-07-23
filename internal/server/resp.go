@@ -45,6 +45,8 @@ func fsError(c *gin.Context, err error) {
 		Fail(c, 501, "该存储不支持此操作")
 	case errors.Is(err, driver.ErrBadName):
 		Fail(c, 400, "名称包含非法字符或为保留名")
+	case errors.Is(err, driver.ErrDenied):
+		Fail(c, 403, "存储拒绝写入：该账号对此存储无写入权限，请重新授权（OneDrive 需 Files.ReadWrite）")
 	case errors.Is(err, fs.ErrBadPath):
 		Fail(c, 400, "路径非法")
 	default:

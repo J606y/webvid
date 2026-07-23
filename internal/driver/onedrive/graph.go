@@ -223,6 +223,9 @@ func mapGraphError(status int, code, message string) error {
 		return driver.ErrExist
 	case code == "invalidRequest" && status == 400:
 		return driver.ErrBadName
+	case code == "accessDenied" || status == 403:
+		// 授权范围不含写权限（如只授了 Files.Read）或该盘对此账号只读 → 写操作被拒。
+		return driver.ErrDenied
 	}
 	return fmt.Errorf("onedrive: %s(HTTP %d): %s", code, status, message)
 }

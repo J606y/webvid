@@ -11,6 +11,7 @@
       <div class="row">
         <span class="name" :title="t.file.name">{{ t.file.name }}</span>
         <span class="dim size">{{ formatSize(t.file.size) }}</span>
+        <el-icon class="rm" title="移除" @click="removeTask(t)"><Close /></el-icon>
       </div>
       <el-progress :percentage="t.percent" :status="statusOf(t)" :stroke-width="6" />
       <div class="row">
@@ -28,7 +29,7 @@
 
 <script setup>
 import { ref, reactive } from 'vue'
-import { UploadFilled } from '@element-plus/icons-vue'
+import { UploadFilled, Close } from '@element-plus/icons-vue'
 import { api } from '../utils/api'
 import { join } from '../utils/path'
 import { formatSize } from '../utils/file'
@@ -45,6 +46,7 @@ const fileInput = ref(null)
 const tasks = ref([])
 let nextId = 1
 let active = 0
+const controllers = new Map() // 任务 id → AbortController（非响应式，供移除时中断在途上传）
 
 function pick() { fileInput.value?.click() }
 
@@ -77,11 +79,14 @@ function pump() {
 async function run(t) {
   active++
   t.state = 'uploading'
+  const ctrl = new AbortController()
+  controllers.set(t.id, ctrl)
   try {
     const target = join(t.dir, t.file.name)
     await api.fs.upload(target, t.overwrite, t.file, {
       headers: { 'Content-Type': 'application/octet-stream' },
       timeout: 0,
+      signal: ctrl.signal, // 移除任务时中断在途请求
       silent: true, // 队列内每任务行内展示状态与重试/覆盖，无需全局 toast
       onUploadProgress: (ev) => {
         if (ev.total) t.percent = Math.round((ev.loaded / ev.total) * 100)
@@ -91,6 +96,7 @@ async function run(t) {
     t.state = 'done'
     emit('uploaded')
   } catch (e) {
+    if (ctrl.signal.aborted) return // 用户已移除该任务，忽略中断异常（finally 仍释放并发槽）
     if (e.status === 409) { // 后端 fsError：同名冲突（driver.ErrExist → 409）
       t.state = 'conflict'
       t.error = '同名文件已存在'
@@ -99,9 +105,16 @@ async function run(t) {
       t.error = e.message || '上传失败'
     }
   } finally {
+    controllers.delete(t.id)
     active--
     pump()
   }
+}
+
+// 从队列移除任务：正在上传的中断请求，其余直接删；空出并发槽由 pump 补位。
+function removeTask(t) {
+  controllers.get(t.id)?.abort()
+  tasks.value = tasks.value.filter((x) => x.id !== t.id)
 }
 
 function retry(t) {
@@ -148,4 +161,9 @@ defineExpose({ addFiles })
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .size, .state { font-size: 12px; }
+.rm {
+  flex-shrink: 0; cursor: pointer; color: var(--text-dim);
+  border-radius: 6px; padding: 2px; transition: color 0.15s, background 0.15s;
+}
+.rm:hover { color: #f56c6c; background: rgba(245, 108, 108, 0.12); }
 </style>
