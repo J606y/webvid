@@ -106,7 +106,8 @@
     <!-- 离线下载：URL 拉取到当前目录，进度在传输任务抽屉查看 -->
     <el-dialog v-model="offlineVisible" title="离线下载" width="480px" append-to-body class="offline-dlg">
       <el-input v-model="offlineUrls" type="textarea" :rows="5"
-        placeholder="每行一个 http/https 链接" />
+        placeholder="每行一个 http/https 链接（支持 m3u8）" />
+      <el-input v-model="offlineName" class="offline-name" placeholder="文件名（可选，仅单个链接时生效）" clearable />
       <div class="dim offline-dst">将下载到：{{ current || '/' }}</div>
       <template #footer>
         <el-button @click="offlineVisible = false">取消</el-button>
@@ -171,6 +172,7 @@ const tasksVisible = ref(false)
 const activeTasks = ref(0)
 const offlineVisible = ref(false)
 const offlineUrls = ref('')
+const offlineName = ref('')
 const offlineSubmitting = ref(false)
 
 function onTaskCount(n) { activeTasks.value = n }
@@ -180,10 +182,11 @@ async function submitOffline() {
   if (!urls.length) return ElMessage.warning('请填写下载链接')
   offlineSubmitting.value = true
   try {
-    const d = await api.fs.offline(urls, current.value || '/')
+    const d = await api.fs.offline(urls, current.value || '/', offlineName.value.trim())
     ElMessage.success(`已创建 ${d.task_ids.length} 个离线下载任务`)
     offlineVisible.value = false
     offlineUrls.value = ''
+    offlineName.value = ''
     tasksVisible.value = true // 直接打开任务抽屉看进度
   } finally {
     offlineSubmitting.value = false
@@ -372,6 +375,7 @@ onBeforeRouteLeave(() => { tasksVisible.value = false })
   padding: 10px 14px; margin-bottom: 14px;
 }
 .spacer { flex: 1; }
+.offline-name { margin-top: 10px; }
 .offline-dst { font-size: 12px; margin-top: 8px; word-break: break-all; }
 .sel-info { font-size: 12px; }
 

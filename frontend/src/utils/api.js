@@ -22,7 +22,7 @@ export const api = {
     remove: (paths) => http.post('/fs/remove', { paths }),
     move: (paths, dst_dir) => http.post('/fs/move', { paths, dst_dir }),
     copy: (paths, dst_dir) => http.post('/fs/copy', { paths, dst_dir }),
-    offline: (urls, dst_dir) => http.post('/fs/offline', { urls, dst_dir }),
+    offline: (urls, dst_dir, name) => http.post('/fs/offline', { urls, dst_dir, name }),
     // 上传：path 含中文/特殊字符走 query，body 为原始字节流；config 传 headers/timeout/onUploadProgress
     upload: (target, overwrite, file, config) =>
       http.put(`/fs/upload?path=${encodeURIComponent(target)}${overwrite ? '&overwrite=1' : ''}`, file, config),
