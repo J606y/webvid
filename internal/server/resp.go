@@ -47,6 +47,10 @@ func fsError(c *gin.Context, err error) {
 		Fail(c, 400, "名称包含非法字符或为保留名")
 	case errors.Is(err, driver.ErrDenied):
 		Fail(c, 403, "存储拒绝写入：该账号对此存储无写入权限，请重新授权（OneDrive 需 Files.ReadWrite）")
+	case errors.Is(err, driver.ErrQuota):
+		Fail(c, 507, "写入被拒（配额限制 quotaLimitReached）：即便显示有剩余空间也可能如此，多因账号未分配含 OneDrive 的许可证或站点存储配额受限，请检查该账号的 OneDrive 许可与配额")
+	case errors.Is(err, driver.ErrUpstream):
+		Fail(c, 502, err.Error()) // 云盘原始错误透传（自用定位，便于一眼定因）
 	case errors.Is(err, fs.ErrBadPath):
 		Fail(c, 400, "路径非法")
 	default:

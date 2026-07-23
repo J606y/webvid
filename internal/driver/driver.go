@@ -17,6 +17,8 @@ var (
 	ErrNotSupported = errors.New("该存储不支持此操作")
 	ErrBadName      = errors.New("名称包含非法字符或为保留名")
 	ErrDenied       = errors.New("存储拒绝了该操作（权限不足）") // 云盘写被拒：如 OneDrive accessDenied/403
+	ErrQuota        = errors.New("存储空间已满")               // 云盘配额用尽：如 OneDrive quotaLimitReached/507
+	ErrUpstream     = errors.New("存储返回错误")               // 其余云盘 API 错误：包裹原始信息透传给用户，避免不透明 500
 )
 
 // Config 是存储配置（storages.config 的 JSON 反序列化结果）。

@@ -226,8 +226,12 @@ func mapGraphError(status int, code, message string) error {
 	case code == "accessDenied" || status == 403:
 		// 授权范围不含写权限（如只授了 Files.Read）或该盘对此账号只读 → 写操作被拒。
 		return driver.ErrDenied
+	case code == "quotaLimitReached" || code == "insufficientStorage" || status == 507:
+		// OneDrive 配额用尽（读不占额度所以读正常、写全挂）。
+		return driver.ErrQuota
 	}
-	return fmt.Errorf("onedrive: %s(HTTP %d): %s", code, status, message)
+	// 其余未归类的 API 错误：包裹 ErrUpstream 把原始信息透传到界面，不再兜底成不透明 500。
+	return fmt.Errorf("%w：%s(HTTP %d) %s", driver.ErrUpstream, code, status, message)
 }
 
 // req 发送带鉴权的 Graph 请求并解析 JSON 到 out（可为 nil）。
