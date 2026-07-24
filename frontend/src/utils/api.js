@@ -72,6 +72,10 @@ export const api = {
       sendCode: (id) => http.post(`/admin/telegram/${id}/send_code`, null, { timeout: 90000 }),
       signIn: (id, body) => http.post(`/admin/telegram/${id}/sign_in`, body),
     },
+    googledrive: {
+      // 返回 Google OAuth 同意页 URL；body 带浏览器 origin 用于拼回调 redirect_uri
+      authUrl: (id, body) => http.post(`/admin/googledrive/${id}/auth_url`, body),
+    },
     index: {
       progress: () => http.get('/admin/index/progress'),
       rebuild: () => http.post('/admin/index/rebuild'),

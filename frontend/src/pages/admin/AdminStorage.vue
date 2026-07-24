@@ -19,6 +19,8 @@
         <template #default="{ row }">
           <el-button v-if="row.driver === 'telegram'" link size="small" type="primary"
             :icon="Key" title="验证码登录" @click="openTgLogin(row, $event)" />
+          <el-button v-if="row.driver === 'googledrive'" link size="small" type="primary"
+            :icon="Connection" title="授权 Google" @click="authGoogle(row)" />
           <el-button link size="small" :icon="EditPen" @click="openStorage(row, $event)" />
           <el-button link size="small" :icon="RefreshRight" @click="reloadStorage(row)" />
           <el-button link size="small" type="danger" :icon="Delete" @click="deleteStorage(row)" />
@@ -105,7 +107,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import 'element-plus/es/components/message-box/style/css'
-import { Plus, EditPen, Delete, RefreshRight, Key } from '@element-plus/icons-vue'
+import { Plus, EditPen, Delete, RefreshRight, Key, Connection } from '@element-plus/icons-vue'
 import { api } from '../../utils/api'
 import { useHeroDialog } from '../../utils/heroDialog'
 import { isMobile } from '../../utils/viewport'
@@ -209,7 +211,7 @@ async function deleteStorage(row) {
 // 原 hasTg 124 会把合计顶到 358 触发内部横向溢出（mobile-check「存储表格无内部横向溢出」）。
 const storageOpsWidth = computed(() => {
   if (isMobile.value) return 96
-  return storages.value.some((s) => s.driver === 'telegram') ? 200 : 170
+  return storages.value.some((s) => s.driver === 'telegram' || s.driver === 'googledrive') ? 200 : 170
 })
 const tgDlg = ref(false)
 const tgHero = useHeroDialog('.admin-hero-tg .el-dialog', () => { tgDlg.value = false })
@@ -268,6 +270,25 @@ async function tgSignIn() {
   } finally {
     tgSigning.value = false
   }
+}
+
+// ---- Google Drive 一键授权 ----
+// 打开 Google 同意页新标签；回调在服务端换 refresh_token 并重载存储，回来刷新列表即可看到就绪。
+async function authGoogle(row) {
+  let d
+  try {
+    d = await api.admin.googledrive.authUrl(row.id, { origin: window.location.origin })
+  } catch (e) {
+    return // 拦截器已弹错误（多为未填 client_id/secret）
+  }
+  window.open(d.auth_url, '_blank', 'noopener')
+  try {
+    await ElMessageBox.confirm(
+      '已在新标签打开 Google 授权页。请在其中完成授权（首次需选择账号并允许访问），成功后回到这里点「已完成」刷新存储状态。',
+      'Google 授权',
+      { confirmButtonText: '已完成', cancelButtonText: '关闭', type: 'info' })
+  } catch { /* 用户点关闭：仍刷新一下 */ }
+  loadStorages()
 }
 
 onMounted(() => {

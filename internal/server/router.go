@@ -25,6 +25,8 @@ func (s *Server) Router() *gin.Engine {
 	api.GET("/ping", func(c *gin.Context) { OK(c, "pong") })
 	api.POST("/auth/login", s.login)
 	api.GET("/public/settings", s.publicSettings)
+	// Google OAuth 回调：浏览器经 Google 302 过来不带 JWT，靠单次有效的 state 保护（见 handler_googledrive）。
+	api.GET("/googledrive/callback", s.gdCallback)
 
 	// 登录后
 	authed := api.Group("", s.Authed())
@@ -73,6 +75,7 @@ func (s *Server) Router() *gin.Engine {
 	admin.POST("/storages/:id/reload", s.storageReload)
 	admin.POST("/telegram/:id/send_code", s.tgSendCode)
 	admin.POST("/telegram/:id/sign_in", s.tgSignIn)
+	admin.POST("/googledrive/:id/auth_url", s.gdAuthURL)
 	admin.GET("/settings", s.settingsGet)
 	admin.PUT("/settings", s.settingsPut)
 	admin.GET("/index/progress", s.indexProgress)

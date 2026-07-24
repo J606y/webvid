@@ -16,10 +16,11 @@ import (
 	"newlist/internal/auth"
 	"newlist/internal/conf"
 	"newlist/internal/db"
-	_ "newlist/internal/driver/local"    // 注册本地驱动
-	_ "newlist/internal/driver/onedrive" // 注册 onedrive / onedrive_app 驱动
-	_ "newlist/internal/driver/pikpak"   // 注册 pikpak 驱动
-	_ "newlist/internal/driver/telegram" // 注册 telegram 收藏夹驱动
+	_ "newlist/internal/driver/googledrive" // 注册 Google Drive 驱动
+	_ "newlist/internal/driver/local"       // 注册本地驱动
+	_ "newlist/internal/driver/onedrive"    // 注册 onedrive / onedrive_app 驱动
+	_ "newlist/internal/driver/pikpak"      // 注册 pikpak 驱动
+	_ "newlist/internal/driver/telegram"    // 注册 telegram 收藏夹驱动
 	"newlist/internal/fs"
 	"newlist/internal/index"
 	"newlist/internal/media"

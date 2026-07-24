@@ -70,7 +70,10 @@ func (s *Server) rawHandler(c *gin.Context) {
 		// 而 ffmpeg 的 -reconnect_on_http_error 只认 429/5xx，跟着 302 出去一遇
 		// 401 抽帧/转码即整体失败（exit 0xCECFCB08 = AVERROR_HTTP_UNAUTHORIZED）；
 		// 单流透传在首字节前对 401/403/404/410 经 RefreshLink 换链重试。
-		if !res.Accel.Proxy && !s.isInternal(c) {
+		// 需鉴权头的直链（如 Google Drive alt=media 需 Bearer）不能 302——302 会丢掉
+		// Authorization 令客户端 401；一律走代理，由 stream 层把头透传到上游。
+		// 仅针对 Authorization：PikPak 只带 UA 头，302 后浏览器自带 UA，行为不变。
+		if !res.Accel.Proxy && !s.isInternal(c) && lk.Header.Get("Authorization") == "" {
 			// 云盘直链每次都变，灯箱前后翻页会反复请求同一图；短缓存 302 本身
 			if isImage(fi.Name) {
 				c.Header("Cache-Control", "private, max-age=600")
