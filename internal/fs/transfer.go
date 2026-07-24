@@ -96,6 +96,15 @@ func (f *FS) Transfer(ctx context.Context, u *user.User, src, dstDir string, isM
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		// 断点续传：目标已存在且大小一致 → 跳过，避免重试时重复下载/上传已完成文件
+		//（尤其云盘有每日上传上限，如 Google Drive 750GB/天，重传已完成部分很浪费）。
+		// 上传失败不会留下"半个可见文件"（resumable 会话未完成不出文件、小文件 multipart 原子），
+		// 故同名同大小即视为已完成，安全。
+		target := util.JoinRel(fj.dstDirRel, fj.name)
+		if fi, err := dm.drv.Stat(ctx, target); err == nil && !fi.IsDir && fj.size > 0 && fi.Size == fj.size {
+			pr.Add(fj.size)
+			continue
+		}
 		if err := f.copyOne(ctx, sm, up, fj, pr); err != nil {
 			return err
 		}

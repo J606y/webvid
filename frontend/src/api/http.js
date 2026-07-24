@@ -29,7 +29,17 @@ http.interceptors.response.use(
   },
   (err) => {
     const status = err.response?.status
-    const msg = err.response?.data?.message || err.message || '网络错误'
+    // 优先用后端返回的人话 message；无响应（服务没起/网络断/超时）时把 axios 英文文案翻成人话
+    let msg = err.response?.data?.message
+    if (!msg) {
+      if (err.code === 'ECONNABORTED' || /timeout/i.test(err.message || '')) {
+        msg = '请求超时，请稍后重试'
+      } else if (/network error/i.test(err.message || '')) {
+        msg = '连不上服务器：请检查网络，或服务是否在运行'
+      } else {
+        msg = err.message || '网络错误'
+      }
+    }
     if (status === 401) {
       // 登录页自己处理 401 提示；其他页面清 token 回登录
       if (!location.pathname.startsWith('/login')) {

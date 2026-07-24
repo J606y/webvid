@@ -136,6 +136,46 @@ func TestTransferDirTreeCopy(t *testing.T) {
 	}
 }
 
+// TestTransferResumeSkipsExisting 断点续传：目标已存在且大小一致的文件被跳过（不重复复制），
+// 大小不一致或缺失的文件照常复制。模拟中途失败后点「重试」不重传已完成文件。
+func TestTransferResumeSkipsExisting(t *testing.T) {
+	dirA, dirB := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(dirA, "相册", "a.jpg"), "AAAA") // 4 字节
+	writeFile(t, filepath.Join(dirA, "相册", "b.jpg"), "BBBB") // 4 字节
+	writeFile(t, filepath.Join(dirA, "相册", "c.jpg"), "CCCC") // 4 字节
+	// 预置目标：a.jpg 同大小(4)不同内容→应跳过；c.jpg 大小不符(2)→应重新复制覆盖。
+	writeFile(t, filepath.Join(dirB, "相册", "a.jpg"), "ZZZZ")
+	writeFile(t, filepath.Join(dirB, "相册", "c.jpg"), "ZZ")
+	f := newTestFS(
+		newLocalMount(t, 1, "/存储A", dirA),
+		newLocalMount(t, 2, "/存储B", dirB),
+	)
+	pr := &fakeProgress{}
+	if err := f.Transfer(context.Background(), adminUser(), "/存储A/相册", "/存储B", false, pr); err != nil {
+		t.Fatalf("Transfer: %v", err)
+	}
+	// a.jpg 跳过 → 仍是预置的 ZZZZ
+	if got, _ := os.ReadFile(filepath.Join(dirB, "相册", "a.jpg")); string(got) != "ZZZZ" {
+		t.Fatalf("a.jpg 应被跳过(保持 ZZZZ)，实际 %q", got)
+	}
+	// b.jpg 缺失 → 复制
+	if got, _ := os.ReadFile(filepath.Join(dirB, "相册", "b.jpg")); string(got) != "BBBB" {
+		t.Fatalf("b.jpg 应被复制为 BBBB，实际 %q", got)
+	}
+	// c.jpg 大小不符 → 重新复制覆盖
+	if got, _ := os.ReadFile(filepath.Join(dirB, "相册", "c.jpg")); string(got) != "CCCC" {
+		t.Fatalf("c.jpg 应被覆盖为 CCCC，实际 %q", got)
+	}
+	// 进度：三个文件各 4 字节都计入（跳过的也 Add 其大小），共 12
+	if pr.total != 12 || pr.done != 12 {
+		t.Fatalf("进度不符: total=%d done=%d（应 12/12）", pr.total, pr.done)
+	}
+	// 只有 b、c 真正走复制（SetFile 上报），a 被跳过不上报
+	if len(pr.files) != 2 {
+		t.Fatalf("应仅 2 个文件走复制(b/c)，SetFile 次数=%d: %v", len(pr.files), pr.files)
+	}
+}
+
 func TestTransferMove(t *testing.T) {
 	dirA, dirB := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(dirA, "搬家", "x.bin"), strings.Repeat("x", 1024))
