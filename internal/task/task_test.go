@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -47,8 +48,10 @@ func TestError(t *testing.T) {
 	tk := m.Submit(1, "失败任务", func(ctx context.Context, t *Task) error {
 		return errors.New("boom")
 	})
+	// 任务失败原因经 util.Humanize 转成人话后再存：纯英文错误包一层「操作失败：」，
+	// 原始错误只进服务端日志（前端任务列表不再出现裸英文）。
 	snap := waitState(t, m, tk.ID, StateError)
-	if snap.Err != "boom" {
+	if !strings.Contains(snap.Err, "boom") || !strings.Contains(snap.Err, "操作失败") {
 		t.Fatalf("Err 不符: %q", snap.Err)
 	}
 }

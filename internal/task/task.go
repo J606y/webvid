@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"newlist/internal/util"
 )
 
 type State string
@@ -208,7 +210,8 @@ func (m *Manager) run(t *Task) {
 		t.State = StateCanceled
 	default:
 		t.State = StateError
-		t.Err = err.Error()
+		t.Err = util.Humanize(err)
+		log.Printf("[task] 任务 %s 失败: %v", t.ID, err)
 	}
 	t.mu.Unlock()
 }

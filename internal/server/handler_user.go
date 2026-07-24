@@ -95,7 +95,7 @@ func (s *Server) userUpdate(c *gin.Context) {
 		Password string `json:"password"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Username == "" {
-		Fail(c, 400, "参数不完整")
+		Fail(c, 400, "用户名不能为空")
 		return
 	}
 	if req.Role != "admin" {

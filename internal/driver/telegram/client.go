@@ -61,11 +61,11 @@ func (s *sessionStore) bytes() []byte {
 func newClient(cfg driver.Config, store *sessionStore) (*telegram.Client, error) {
 	apiID, err := strconv.Atoi(strings.TrimSpace(cfg["api_id"]))
 	if err != nil || apiID <= 0 {
-		return nil, fmt.Errorf("telegram: api_id 必须是正整数（my.telegram.org 申请）")
+		return nil, fmt.Errorf("Telegram：api_id 必须是正整数（my.telegram.org 申请）")
 	}
 	apiHash := strings.TrimSpace(cfg["api_hash"])
 	if apiHash == "" {
-		return nil, fmt.Errorf("telegram: api_hash 必填")
+		return nil, fmt.Errorf("Telegram：api_hash 必填")
 	}
 	if b, err := base64.StdEncoding.DecodeString(cfg["session"]); err == nil && len(b) > 0 {
 		store.data = b
@@ -103,7 +103,7 @@ func socksDial(addr string) (dcs.DialFunc, error) {
 	}
 	d, err := proxy.SOCKS5("tcp", addr, auth, proxy.Direct)
 	if err != nil {
-		return nil, fmt.Errorf("telegram: SOCKS5 代理地址无效: %w", err)
+		return nil, fmt.Errorf("Telegram：SOCKS5 代理地址无效: %w", err)
 	}
 	if cd, ok := d.(proxy.ContextDialer); ok {
 		return cd.DialContext, nil
@@ -128,7 +128,7 @@ func connect(cfg driver.Config, store *sessionStore) (*conn, error) {
 	}
 	stop, err := bg.Connect(client, bg.WithStartupTimeout(startupTimeout))
 	if err != nil {
-		return nil, fmt.Errorf("telegram: 连接失败（检查网络或 SOCKS5 代理）: %w", err)
+		return nil, fmt.Errorf("Telegram：连接失败（检查网络或 SOCKS5 代理）: %w", err)
 	}
 	return &conn{
 		client: client,
@@ -170,7 +170,7 @@ func (c *conn) invoker(ctx context.Context, dc int) (tg.Invoker, error) {
 	defer cancel()
 	closer, err := c.client.DC(pctx, dc, 2)
 	if err != nil {
-		return nil, fmt.Errorf("telegram: 连接 DC%d 失败: %w", dc, err)
+		return nil, fmt.Errorf("Telegram：连接 DC%d 失败: %w", dc, err)
 	}
 	// client.DC 不经过客户端中间件，FLOOD_WAIT 自动等待需手动包一层
 	p := dcPool{inv: c.wait.Handle(closer), closer: closer}

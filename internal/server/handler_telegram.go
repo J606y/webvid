@@ -8,6 +8,7 @@ import (
 
 	"newlist/internal/driver"
 	"newlist/internal/driver/telegram"
+	"newlist/internal/util"
 )
 
 // tgStorageCfg 读取并校验 telegram 存储行，返回其配置。
@@ -28,7 +29,7 @@ func (s *Server) tgStorageCfg(c *gin.Context) (int64, driver.Config, bool) {
 	}
 	cfg := driver.Config{}
 	if err := json.Unmarshal([]byte(cfgJSON), &cfg); err != nil {
-		Fail(c, 500, "存储配置损坏: "+err.Error())
+		Fail(c, 500, "存储配置已损坏，无法读取")
 		return 0, nil, false
 	}
 	return id, cfg, true
@@ -43,7 +44,7 @@ func (s *Server) tgSendCode(c *gin.Context) {
 	}
 	info, err := telegram.Logins.SendCode(c.Request.Context(), id, cfg)
 	if err != nil {
-		Fail(c, 502, err.Error())
+		Fail(c, 502, util.Humanize(err))
 		return
 	}
 	OK(c, info)
@@ -61,13 +62,13 @@ func (s *Server) tgSignIn(c *gin.Context) {
 		Password string `json:"password"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Code) == "" {
-		Fail(c, 400, "code 不能为空")
+		Fail(c, 400, "请输入验证码")
 		return
 	}
 	sess, needPwd, err := telegram.Logins.SignIn(
 		c.Request.Context(), id, strings.TrimSpace(req.Code), req.Password)
 	if err != nil {
-		Fail(c, 502, err.Error())
+		Fail(c, 502, util.Humanize(err))
 		return
 	}
 	if needPwd {

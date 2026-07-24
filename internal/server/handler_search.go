@@ -28,7 +28,7 @@ func escapeLike(q string) string {
 func (s *Server) fsSearch(c *gin.Context) {
 	q := strings.TrimSpace(c.Query("q"))
 	if q == "" {
-		Fail(c, 400, "q 不能为空")
+		Fail(c, 400, "请输入搜索关键词")
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "100"))

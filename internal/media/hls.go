@@ -463,8 +463,8 @@ func (sess *session) startLocked(from int) {
 		}
 		sess.cmd = nil
 		if err != nil && ctx.Err() == nil {
-			sess.runErr = fmt.Errorf("ffmpeg 退出: %v（%s）", err, scrubToken(sess.stderr.String()))
-			log.Printf("[media] %s %v", sess.key, sess.runErr)
+			log.Printf("[media] %s ffmpeg 退出: %v（%s）", sess.key, err, scrubToken(sess.stderr.String()))
+			sess.runErr = fmt.Errorf("转码失败：该视频可能已损坏或格式不受支持")
 		}
 		cancel()
 	}()

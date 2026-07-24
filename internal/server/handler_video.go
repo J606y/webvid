@@ -28,7 +28,7 @@ func (s *Server) videoInfo(c *gin.Context) {
 		return
 	}
 	if fi.IsDir {
-		Fail(c, 400, "path 不是文件")
+		Fail(c, 400, "该路径不是文件")
 		return
 	}
 	OK(c, s.media.Info(c.Request.Context(), getUser(c), p, fi))

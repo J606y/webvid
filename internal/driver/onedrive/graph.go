@@ -170,7 +170,7 @@ func (c *client) refreshLocked(ctx context.Context) error {
 	}
 	var tr tokenResp
 	if err := json.Unmarshal(body, &tr); err != nil {
-		perr := fmt.Errorf("onedrive: token 响应解析失败(HTTP %d)", resp.StatusCode)
+		perr := fmt.Errorf("OneDrive：token 响应解析失败(HTTP %d)", resp.StatusCode)
 		if resp.StatusCode >= 500 {
 			return &transientTokenError{perr}
 		}
@@ -181,10 +181,7 @@ func (c *client) refreshLocked(ctx context.Context) error {
 		if msg == "" {
 			msg = tr.Error
 		}
-		if i := strings.IndexByte(msg, '\n'); i > 0 { // AAD 错误描述常带多行 trace，取首行
-			msg = msg[:i]
-		}
-		ferr := fmt.Errorf("onedrive: 获取 token 失败(HTTP %d): %s", resp.StatusCode, msg)
+		ferr := fmt.Errorf("OneDrive：%s", aadMessage(msg))
 		if resp.StatusCode >= 500 {
 			return &transientTokenError{ferr}
 		}
@@ -375,4 +372,45 @@ func joinRel(root, rel string) string {
 	default:
 		return root + "/" + rel
 	}
+}
+
+// aadMessage 把 Azure AD 的 token 错误压成一句人话。
+// AAD 的 error_description 会把 Trace ID / Correlation ID / Timestamp 塞在同一行，
+// 对用户毫无意义——常见错误码直接翻成「哪里填错了、该去哪改」，未知码保留首句
+// （含 AADSTS 码，便于按码检索），只丢掉诊断噪音。
+func aadMessage(msg string) string {
+	code := ""
+	if i := strings.Index(msg, "AADSTS"); i >= 0 {
+		rest := msg[i:]
+		if end := strings.IndexAny(rest, ": \n"); end > 0 {
+			code = rest[:end]
+		} else {
+			code = rest
+		}
+	}
+	switch code {
+	case "AADSTS7000215", "AADSTS7000222":
+		return "client_secret 无效或已过期，请在 Azure 门户重新生成后填入"
+	case "AADSTS700016", "AADSTS500011":
+		return "client_id 对应的应用不存在，请检查 client_id"
+	case "AADSTS90002":
+		return "tenant_id 不存在，请检查租户 ID"
+	case "AADSTS70008", "AADSTS700082", "AADSTS50173":
+		return "登录授权已过期，请重新获取 refresh_token"
+	case "AADSTS65001":
+		return "该应用尚未获得授权，请重新完成一次授权"
+	case "AADSTS9002313":
+		return "凭据格式有误，请检查 client_id / client_secret / refresh_token"
+	}
+	// 未知码：截掉 Trace ID 起的诊断噪音，保留可读首句
+	for _, cut := range []string{"Trace ID:", "Correlation ID:", "Timestamp:", "\n"} {
+		if i := strings.Index(msg, cut); i > 0 {
+			msg = msg[:i]
+		}
+	}
+	msg = strings.TrimSpace(msg)
+	if msg == "" {
+		return "获取访问令牌失败，请检查存储配置"
+	}
+	return "获取访问令牌失败：" + msg
 }

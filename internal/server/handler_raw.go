@@ -85,7 +85,7 @@ func (s *Server) rawHandler(c *gin.Context) {
 		return
 	}
 	if lk.Local == nil {
-		Fail(c, 500, "驱动未返回文件内容")
+		Fail(c, 500, "无法读取文件内容，请重试")
 		return
 	}
 	defer lk.Local.Close()

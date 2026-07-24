@@ -27,6 +27,12 @@ M12 Docker：✅ 2026-07-07 完成（本机 Docker Desktop 实测：构建/转�
 
 技术债务整改进度另见 `docs/REFACTOR-PROGRESS.md`。
 
+**上线后打磨（2026-07-25）另见 `docs/POLISH-PROGRESS.md`**：
+A. 报错人话化 + Apple 风文案已完成（`util.Humanize` + 三处异步任务 + 驱动前缀 +
+`aadMessage`/`oauthMessage` + ffmpeg stderr 收敛），全量测试与 13 个 e2e 脚本通过、
+二进制已重编、**未提交**（工作区另有 8 个别会话的 `copy_file_workers` WIP 文件，勿混提交）。
+B. UX 反人类/不一致清单 28 项已查清（含真 bug：管理员能停用/降级自己致自锁死），**待用户决策后再改**。
+
 ## 如何启动预览
 ```
 cd E:\桌面\newlist

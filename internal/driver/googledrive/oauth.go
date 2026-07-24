@@ -49,7 +49,7 @@ func Exchange(ctx context.Context, clientID, clientSecret, code, redirectURI str
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	var tr tokenResp
 	if err := json.Unmarshal(body, &tr); err != nil {
-		return "", fmt.Errorf("googledrive: 授权响应解析失败(HTTP %d)", resp.StatusCode)
+		return "", fmt.Errorf("Google Drive：授权响应解析失败(HTTP %d)", resp.StatusCode)
 	}
 	if resp.StatusCode != 200 || tr.RefreshToken == "" {
 		msg := tr.ErrorDesc
@@ -59,7 +59,7 @@ func Exchange(ctx context.Context, clientID, clientSecret, code, redirectURI str
 		if msg == "" && tr.RefreshToken == "" {
 			msg = "未返回 refresh_token（请确认 OAuth 应用已发布为『生产』，且是首次授权/已勾选离线访问）"
 		}
-		return "", fmt.Errorf("googledrive: 授权失败(HTTP %d): %s", resp.StatusCode, msg)
+		return "", fmt.Errorf("Google Drive：授权失败(HTTP %d): %s", resp.StatusCode, msg)
 	}
 	return tr.RefreshToken, nil
 }

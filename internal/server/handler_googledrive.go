@@ -12,6 +12,7 @@ import (
 
 	"newlist/internal/driver"
 	"newlist/internal/driver/googledrive"
+	"newlist/internal/util"
 )
 
 // gdStorageCfg 读取并校验 googledrive 存储行，返回其配置。
@@ -32,7 +33,7 @@ func (s *Server) gdStorageCfg(c *gin.Context) (int64, driver.Config, bool) {
 	}
 	cfg := driver.Config{}
 	if err := json.Unmarshal([]byte(cfgJSON), &cfg); err != nil {
-		Fail(c, 500, "存储配置损坏: "+err.Error())
+		Fail(c, 500, "存储配置已损坏，无法读取")
 		return 0, nil, false
 	}
 	return id, cfg, true
@@ -80,7 +81,7 @@ func (s *Server) gdAuthURL(c *gin.Context) {
 // Google 302 浏览器过来时不带我们的 JWT，故不能挂在 admin 组下。
 func (s *Server) gdCallback(c *gin.Context) {
 	if errStr := c.Query("error"); errStr != "" {
-		gdCallbackHTML(c, false, "授权被拒绝或取消："+errStr)
+		gdCallbackHTML(c, false, "授权未完成：你在 Google 页面取消或拒绝了授权，请回后台重新点「授权」")
 		return
 	}
 	id, redirectURI, ok := googledrive.OAuth.Take(c.Query("state"))
@@ -104,13 +105,13 @@ func (s *Server) gdCallback(c *gin.Context) {
 	refresh, err := googledrive.Exchange(c.Request.Context(),
 		cfg["client_id"], cfg["client_secret"], code, redirectURI)
 	if err != nil {
-		gdCallbackHTML(c, false, err.Error())
+		gdCallbackHTML(c, false, util.Humanize(err))
 		return
 	}
 	cfg["refresh_token"] = refresh
 	b, _ := json.Marshal(cfg)
 	if _, err := s.db.Exec(`UPDATE storages SET config=? WHERE id=?`, string(b), id); err != nil {
-		gdCallbackHTML(c, false, "保存失败："+err.Error())
+		gdCallbackHTML(c, false, "授权成功，但保存失败，请回后台重试")
 		return
 	}
 	// 重载挂载让新 token 生效（失败不阻断，用户可回后台手动重载）。

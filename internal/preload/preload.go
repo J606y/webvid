@@ -17,6 +17,7 @@ import (
 	"newlist/internal/model"
 	"newlist/internal/thumb"
 	"newlist/internal/user"
+	"newlist/internal/util"
 )
 
 // workers 预载并发度：每个 worker 一次处理一个文件（探测/下载都是网络阻塞，
@@ -202,7 +203,8 @@ func (s *Service) finish(gen int, cerr error) {
 	s.running = false
 	s.current = ""
 	if cerr != nil && cerr != context.Canceled {
-		s.errMsg = cerr.Error()
+		s.errMsg = util.Humanize(cerr)
+		log.Printf("[preload] 预载失败: %v", cerr)
 	}
 	s.finishedAt = time.Now().UTC().Format(time.RFC3339)
 	s.cancel = nil

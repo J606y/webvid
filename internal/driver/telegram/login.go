@@ -14,6 +14,7 @@ import (
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/tg"
+	"github.com/gotd/td/tgerr"
 
 	"newlist/internal/driver"
 )
@@ -96,6 +97,32 @@ func describeSent(code *tg.AuthSentCode) *CodeSent {
 	return out
 }
 
+// tgAuthError 把 Telegram 发码/登录的 RPC 错误翻成给用户看的中文。
+// 已知错误码给出明确原因；其余保留原始错误，交由上层 util.Humanize 统一翻译
+// （网络中断、FLOOD_WAIT 频控等）。
+func tgAuthError(err error, sending bool) error {
+	switch {
+	case tgerr.Is(err, "PHONE_CODE_INVALID"):
+		return errors.New("验证码不正确，请重新输入")
+	case tgerr.Is(err, "PHONE_CODE_EXPIRED"):
+		return errors.New("验证码已过期，请点「重新发送」获取新验证码")
+	case tgerr.Is(err, "PHONE_CODE_EMPTY"):
+		return errors.New("请输入验证码")
+	case tgerr.Is(err, "PASSWORD_HASH_INVALID"):
+		return errors.New("两步验证密码不正确")
+	case tgerr.Is(err, "PHONE_NUMBER_INVALID"):
+		return errors.New("手机号格式不正确，请填写带国家区号的完整号码")
+	case tgerr.Is(err, "PHONE_NUMBER_BANNED"):
+		return errors.New("该手机号已被 Telegram 封禁，无法登录")
+	case tgerr.Is(err, "API_ID_INVALID"):
+		return errors.New("api_id 或 api_hash 无效，请检查后重试")
+	}
+	if sending {
+		return fmt.Errorf("发送验证码失败: %w", err)
+	}
+	return fmt.Errorf("登录失败: %w", err)
+}
+
 // loginTTL 登录会话保活时长：验证码经 App 通道投递偶有数分钟延迟，给足取码时间。
 const loginTTL = 10 * time.Minute
 
@@ -126,7 +153,7 @@ func (m *LoginManager) take(id int64, phone string) *pendingLogin {
 func (m *LoginManager) SendCode(ctx context.Context, id int64, cfg driver.Config) (*CodeSent, error) {
 	phone := strings.TrimSpace(cfg["phone"])
 	if phone == "" {
-		return nil, errors.New("telegram: 存储配置里手机号为空")
+		return nil, errors.New("请先在存储配置里填写手机号")
 	}
 	if p := m.take(id, phone); p != nil {
 		sent, err := p.client.API().AuthResendCode(ctx, &tg.AuthResendCodeRequest{
@@ -154,21 +181,21 @@ func (m *LoginManager) SendCode(ctx context.Context, id int64, cfg driver.Config
 	}
 	stop, err := bg.Connect(client, bg.WithStartupTimeout(loginStartupTimeout))
 	if err != nil {
-		return nil, fmt.Errorf("telegram: 连接失败（检查网络或 SOCKS5 代理）: %w", err)
+		return nil, fmt.Errorf("Telegram：连接失败，请检查网络或 SOCKS5 代理设置: %w", err)
 	}
 	sent, err := client.Auth().SendCode(ctx, phone, auth.SendCodeOptions{})
 	if err != nil {
 		_ = stop()
-		return nil, fmt.Errorf("telegram: 发送验证码失败: %w", err)
+		return nil, tgAuthError(err, true)
 	}
 	code, ok := sent.(*tg.AuthSentCode)
 	if !ok {
 		_ = stop()
-		return nil, fmt.Errorf("telegram: 未预期的发码响应 %T", sent)
+		return nil, errors.New("Telegram：发送验证码时收到未预期的响应，请重试")
 	}
 	if _, bad := code.Type.(*tg.AuthSentCodeTypeSetUpEmailRequired); bad {
 		_ = stop()
-		return nil, errors.New("telegram: Telegram 要求该账号先在官方客户端登录并设置登录邮箱，之后才能在第三方应用登录")
+		return nil, errors.New("该账号需先在官方 Telegram 客户端登录并设置登录邮箱，之后才能在第三方应用登录")
 	}
 	log.Printf("telegram: send_code 已发出 -> %T (next %v, timeout %ds)", code.Type, code.NextType, code.Timeout)
 	m.mu.Lock()
@@ -197,7 +224,7 @@ func (m *LoginManager) SignIn(ctx context.Context, id int64, code, password stri
 	}
 	m.mu.Unlock()
 	if p == nil {
-		return "", false, errors.New("telegram: 登录会话不存在或已过期，请重新发送验证码")
+		return "", false, errors.New("登录会话已过期，请重新发送验证码")
 	}
 	_, err = p.client.Auth().SignIn(ctx, p.phone, code, p.codeHash)
 	if errors.Is(err, auth.ErrPasswordAuthNeeded) {
@@ -207,12 +234,12 @@ func (m *LoginManager) SignIn(ctx context.Context, id int64, code, password stri
 		_, err = p.client.Auth().Password(ctx, password)
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("telegram: 登录失败: %w", err)
+		return "", false, tgAuthError(err, false)
 	}
 	// 登录成功即授权绑定到本连接的 auth key，gotd 已把会话写进 store
 	data := p.store.bytes()
 	if len(data) == 0 {
-		return "", false, errors.New("telegram: 登录成功但未取到会话数据")
+		return "", false, errors.New("Telegram：登录成功但未取到会话数据，请重试")
 	}
 	m.mu.Lock()
 	delete(m.pending, id)

@@ -122,14 +122,14 @@ func (d *PikPak) Init(ctx context.Context, cfg driver.Config) error {
 	hasAccount := cfg["username"] != "" && cfg["password"] != ""
 	// captcha_token 只是账密登录的辅助，单独给它无法登录；至少要有账密或 refresh_token。
 	if !hasAccount && cfg["refresh_token"] == "" {
-		return fmt.Errorf("pikpak: 请填写账号与密码，或填写「刷新令牌 + 设备 ID」")
+		return fmt.Errorf("PikPak：请填写账号与密码，或填写「刷新令牌 + 设备 ID」")
 	}
 
 	deviceID := strings.TrimSpace(cfg["device_id"])
 	if deviceID == "" {
 		// 现成的 refresh_token / captcha_token 都绑定其来源设备，device_id 必须一并提供，不能凭空生成。
 		if cfg["refresh_token"] != "" || cfg["captcha_token"] != "" {
-			return fmt.Errorf("pikpak: 使用现成的刷新令牌/验证码令牌时，必须一并填写其来源的设备 ID")
+			return fmt.Errorf("PikPak：使用现成的刷新令牌/验证码令牌时，必须一并填写其来源的设备 ID")
 		}
 		// 纯账密登录：按账密派生稳定 device_id（可复现）并保存。
 		sum := md5.Sum([]byte(cfg["username"] + cfg["password"]))

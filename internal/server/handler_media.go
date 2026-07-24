@@ -55,7 +55,7 @@ func (s *Server) mediaVisFilter(sql string, args []any, kind, col string) (strin
 func (s *Server) mediaList(c *gin.Context) {
 	kind := c.Query("kind")
 	if kind != "video" && kind != "image" {
-		Fail(c, 400, "kind 必须是 video 或 image")
+		Fail(c, 400, "媒体类型无效（应为视频或图片）")
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "60"))
@@ -124,7 +124,7 @@ func (s *Server) mediaPlayed(c *gin.Context) {
 		Duration float64 `json:"duration"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		Fail(c, 400, "参数错误")
+		Fail(c, 400, "请求参数有误")
 		return
 	}
 	p, err := fs.NormPath(req.Path)
@@ -190,7 +190,7 @@ type historyItem struct {
 func (s *Server) mediaHistory(c *gin.Context) {
 	kind := c.Query("kind")
 	if kind != "video" && kind != "image" {
-		Fail(c, 400, "kind 必须是 video 或 image")
+		Fail(c, 400, "媒体类型无效（应为视频或图片）")
 		return
 	}
 	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "12"))
@@ -237,7 +237,7 @@ type mediaGroup struct {
 func (s *Server) mediaGroups(c *gin.Context) {
 	kind := c.Query("kind")
 	if kind != "video" && kind != "image" {
-		Fail(c, 400, "kind 必须是 video 或 image")
+		Fail(c, 400, "媒体类型无效（应为视频或图片）")
 		return
 	}
 	base := getUser(c).BasePath

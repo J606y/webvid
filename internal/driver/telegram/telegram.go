@@ -65,7 +65,7 @@ func (d *Telegram) Init(ctx context.Context, cfg driver.Config) error {
 		d.cacheTTL = 2 * time.Minute
 	}
 	if strings.TrimSpace(cfg["phone"]) == "" {
-		return errors.New("telegram: 手机号必填")
+		return errors.New("Telegram：手机号必填")
 	}
 	store := &sessionStore{save: func(data []byte) {
 		cfg["session"] = base64.StdEncoding.EncodeToString(data)
@@ -80,7 +80,7 @@ func (d *Telegram) Init(ctx context.Context, cfg driver.Config) error {
 	st, err := c.client.Auth().Status(ctx)
 	if err != nil {
 		c.close()
-		return fmt.Errorf("telegram: 获取登录状态失败: %w", err)
+		return fmt.Errorf("Telegram：获取登录状态失败: %w", err)
 	}
 	if !st.Authorized {
 		c.close()
@@ -230,7 +230,7 @@ func (d *Telegram) getFile(ctx context.Context, dc int, loc *tg.InputDocumentFil
 	}
 	f, ok := r.(*tg.UploadFile)
 	if !ok {
-		return nil, fmt.Errorf("telegram: 未预期的下载响应 %T", r)
+		return nil, errors.New("Telegram：下载时收到未预期的响应，请重试")
 	}
 	return f.Bytes, nil
 }
@@ -244,7 +244,7 @@ func (d *Telegram) message(ctx context.Context, id int) (*tg.Message, *tg.Docume
 	r, err := c.client.API().MessagesGetMessages(ctx,
 		[]tg.InputMessageClass{&tg.InputMessageID{ID: id}})
 	if err != nil {
-		return nil, nil, fmt.Errorf("telegram: 读取消息失败: %w", err)
+		return nil, nil, fmt.Errorf("Telegram：读取消息失败: %w", err)
 	}
 	msgs, err := messagesOf(r)
 	if err != nil {
@@ -303,7 +303,7 @@ func listSaved(ctx context.Context, api history) (*savedTree, error) {
 			Limit:    pageSize,
 		})
 		if err != nil {
-			return nil, fmt.Errorf("telegram: 拉取收藏列表失败: %w", err)
+			return nil, fmt.Errorf("Telegram：拉取收藏列表失败: %w", err)
 		}
 		msgs, users, chats, err := pageOf(r)
 		if err != nil {
@@ -496,7 +496,7 @@ func pageOf(r tg.MessagesMessagesClass) ([]tg.MessageClass, []tg.UserClass, []tg
 	case *tg.MessagesChannelMessages:
 		return v.Messages, v.Users, v.Chats, nil
 	default:
-		return nil, nil, nil, fmt.Errorf("telegram: 未预期的消息响应 %T", r)
+		return nil, nil, nil, errors.New("Telegram：读取收藏列表时收到未预期的响应，请重试")
 	}
 }
 

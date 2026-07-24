@@ -118,7 +118,7 @@ func (s *Server) storageGet(c *gin.Context) {
 // afterStorageChange 增删改存储后：重载挂载树 + 重建索引。
 func (s *Server) afterStorageChange(c *gin.Context) {
 	if err := s.fs.Reload(c.Request.Context()); err != nil {
-		Fail(c, 500, "存储已保存，但重载失败: "+err.Error())
+		Fail(c, 500, "存储已保存，但挂载重载失败："+util.Humanize(err))
 		return
 	}
 	s.index.Rebuild()
@@ -129,11 +129,11 @@ func (s *Server) afterStorageChange(c *gin.Context) {
 func (s *Server) storageCreate(c *gin.Context) {
 	var req storageDTO
 	if err := c.ShouldBindJSON(&req); err != nil || req.MountPath == "" || req.Driver == "" {
-		Fail(c, 400, "mount_path/driver 不能为空")
+		Fail(c, 400, "挂载路径和驱动不能为空")
 		return
 	}
 	if _, ok := driver.Get(req.Driver); !ok {
-		Fail(c, 400, "未知驱动: "+req.Driver)
+		Fail(c, 400, "不支持的驱动类型："+req.Driver)
 		return
 	}
 	mp := normMount(req.MountPath)
@@ -165,11 +165,11 @@ func (s *Server) storageUpdate(c *gin.Context) {
 	}
 	var req storageDTO
 	if err := c.ShouldBindJSON(&req); err != nil || req.MountPath == "" || req.Driver == "" {
-		Fail(c, 400, "mount_path/driver 不能为空")
+		Fail(c, 400, "挂载路径和驱动不能为空")
 		return
 	}
 	if _, ok := driver.Get(req.Driver); !ok {
-		Fail(c, 400, "未知驱动: "+req.Driver)
+		Fail(c, 400, "不支持的驱动类型："+req.Driver)
 		return
 	}
 	var oldJSON string

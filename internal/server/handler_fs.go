@@ -42,7 +42,7 @@ func (s *Server) fsMkdir(c *gin.Context) {
 		Path string `json:"path"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Path == "" {
-		Fail(c, 400, "path 不能为空")
+		Fail(c, 400, "未指定文件路径")
 		return
 	}
 	p, err := fs.NormPath(req.Path)
@@ -65,7 +65,7 @@ func (s *Server) fsRename(c *gin.Context) {
 		Name string `json:"name"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Path == "" || req.Name == "" {
-		Fail(c, 400, "path/name 不能为空")
+		Fail(c, 400, "缺少路径或名称")
 		return
 	}
 	p, err := fs.NormPath(req.Path)
@@ -87,7 +87,7 @@ func (s *Server) fsRemove(c *gin.Context) {
 		Paths []string `json:"paths"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || len(req.Paths) == 0 {
-		Fail(c, 400, "paths 不能为空")
+		Fail(c, 400, "未选择任何文件")
 		return
 	}
 	for _, raw := range req.Paths {
@@ -118,7 +118,7 @@ func (s *Server) fsMoveCopy(isMove bool) gin.HandlerFunc {
 			DstDir string   `json:"dst_dir"`
 		}
 		if err := c.ShouldBindJSON(&req); err != nil || len(req.Paths) == 0 || req.DstDir == "" {
-			Fail(c, 400, "paths/dst_dir 不能为空")
+			Fail(c, 400, "未选择文件或目标目录")
 			return
 		}
 		dst, err := fs.NormPath(req.DstDir)
@@ -184,7 +184,7 @@ func (s *Server) fsUpload(c *gin.Context) {
 		return
 	}
 	if p == "/" {
-		Fail(c, 400, "path 必须是文件路径")
+		Fail(c, 400, "该路径不是文件")
 		return
 	}
 	dir, name := path.Dir(p), path.Base(p)

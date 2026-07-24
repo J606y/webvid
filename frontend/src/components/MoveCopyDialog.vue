@@ -69,7 +69,7 @@ async function submit() {
       : api.fs.copy(props.paths, selected.value))
     const taskIDs = d?.task_ids || []
     const errs = d?.errors || []
-    if (errs.length) ElMessage.warning(errs.join('；'))
+    if (errs.length) ElMessage.warning('部分项目未完成：' + errs.join('；'))
     if (taskIDs.length) {
       ElMessage.success(`已创建 ${taskIDs.length} 个转存任务`)
       emit('tasks')

@@ -119,10 +119,10 @@ func (d *GDrive) Init(ctx context.Context, cfg driver.Config) error {
 	clientSecret := strings.TrimSpace(cfg["client_secret"])
 	refreshToken := strings.TrimSpace(cfg["refresh_token"])
 	if clientID == "" || clientSecret == "" {
-		return errors.New("googledrive: client_id 与 client_secret 必填")
+		return errors.New("Google Drive：client_id 与 client_secret 必填")
 	}
 	if refreshToken == "" {
-		return errors.New("googledrive: 尚未授权，请在后台点「授权」完成 Google 登录")
+		return errors.New("Google Drive：尚未授权，请在后台点「授权」完成 Google 登录")
 	}
 	d.cli = &client{
 		clientID:     clientID,
@@ -635,7 +635,7 @@ func (d *GDrive) putResumable(ctx context.Context, parentID, existingID, name st
 		return mapDriveError(resp.StatusCode, &ge)
 	}
 	if sessionURL == "" {
-		return errors.New("googledrive: 未获得上传会话 URL")
+		return errors.New("Google Drive：未获得上传会话 URL")
 	}
 
 	buf := make([]byte, d.chunk)
@@ -660,7 +660,7 @@ func (d *GDrive) putResumable(ctx context.Context, parentID, existingID, name st
 			}
 		}
 		if lastErr != nil {
-			return fmt.Errorf("googledrive: 分块上传失败(offset=%d): %w", off, lastErr)
+			return fmt.Errorf("Google Drive：分块上传失败(offset=%d): %w", off, lastErr)
 		}
 		off += int64(n)
 	}

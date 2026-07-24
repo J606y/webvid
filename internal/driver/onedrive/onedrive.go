@@ -142,12 +142,12 @@ func (d *OneDrive) Init(ctx context.Context, cfg driver.Config) error {
 	switch d.mode {
 	case modeApp:
 		if c.tenantID == "" || c.clientID == "" || c.clientSecret == "" || cfg["user_email"] == "" {
-			return errors.New("onedrive_app: tenant_id/client_id/client_secret/user_email 均必填")
+			return errors.New("OneDrive（应用授权）：tenant_id/client_id/client_secret/user_email 均必填")
 		}
 		c.driveBase = ep.graph + "/users/" + escapeSeg(cfg["user_email"]) + "/drive"
 	default:
 		if c.clientID == "" || c.refreshToken == "" {
-			return errors.New("onedrive: client_id 与 refresh_token 必填")
+			return errors.New("OneDrive：client_id 与 refresh_token 必填")
 		}
 		c.driveBase = ep.graph + "/me/drive"
 	}
@@ -411,7 +411,7 @@ func waitMonitor(ctx context.Context, u string) error {
 			if resp.StatusCode >= 200 && resp.StatusCode < 400 {
 				return nil
 			}
-			return fmt.Errorf("onedrive: 复制监控解析失败(HTTP %d)", resp.StatusCode)
+			return fmt.Errorf("OneDrive：复制监控解析失败(HTTP %d)", resp.StatusCode)
 		}
 		switch mr.Status {
 		case "completed":
@@ -421,7 +421,7 @@ func waitMonitor(ctx context.Context, u string) error {
 			if mr.Error != nil {
 				msg = mr.Error.Message
 			}
-			return errors.New("onedrive: 复制失败: " + msg)
+			return errors.New("OneDrive：复制失败: " + msg)
 		}
 	}
 }
@@ -499,7 +499,7 @@ func (d *OneDrive) putSession(ctx context.Context, targetRel string, r io.Reader
 		return err
 	}
 	if sr.UploadURL == "" {
-		return errors.New("onedrive: 未获得上传会话 URL")
+		return errors.New("OneDrive：未获得上传会话 URL")
 	}
 
 	buf := make([]byte, d.chunk)
@@ -524,7 +524,7 @@ func (d *OneDrive) putSession(ctx context.Context, targetRel string, r io.Reader
 			}
 		}
 		if lastErr != nil {
-			return fmt.Errorf("onedrive: 分块上传失败(offset=%d): %w", off, lastErr)
+			return fmt.Errorf("OneDrive：分块上传失败(offset=%d): %w", off, lastErr)
 		}
 		off += int64(n)
 	}
@@ -563,7 +563,7 @@ func min64(a, b int64) int64 {
 // jsonUnmarshal 小工具：空数据视为错误，避免误判成功。
 func jsonUnmarshal(data []byte, v any) error {
 	if len(data) == 0 {
-		return errors.New("empty body")
+		return errors.New("OneDrive：返回了空响应，请重试")
 	}
 	return json.Unmarshal(data, v)
 }

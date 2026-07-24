@@ -69,10 +69,10 @@ func (r *tgReader) Seek(offset int64, whence int) (int64, error) {
 	case io.SeekEnd:
 		abs = r.size + offset
 	default:
-		return 0, errors.New("telegram: 非法 whence")
+		return 0, errors.New("内部读取错误（seek 参数非法）")
 	}
 	if abs < 0 {
-		return 0, errors.New("telegram: 偏移为负")
+		return 0, errors.New("内部读取错误（偏移为负）")
 	}
 	r.pos = abs
 	return abs, nil

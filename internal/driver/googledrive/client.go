@@ -66,7 +66,7 @@ var (
 type transientTokenError struct{ err error }
 
 func (e *transientTokenError) Error() string { return e.err.Error() }
-func (e *transientTokenError) Unwrap() error  { return e.err }
+func (e *transientTokenError) Unwrap() error { return e.err }
 
 // token 返回有效 access_token；提前 5 分钟过期。瞬时失败带退避重试。
 func (c *client) token(ctx context.Context) (string, error) {
@@ -133,7 +133,7 @@ func (c *client) refreshLocked(ctx context.Context) error {
 	}
 	var tr tokenResp
 	if err := json.Unmarshal(body, &tr); err != nil {
-		perr := fmt.Errorf("googledrive: token 响应解析失败(HTTP %d)", resp.StatusCode)
+		perr := fmt.Errorf("Google Drive：token 响应解析失败(HTTP %d)", resp.StatusCode)
 		if resp.StatusCode >= 500 {
 			return &transientTokenError{perr}
 		}
@@ -144,8 +144,7 @@ func (c *client) refreshLocked(ctx context.Context) error {
 		if msg == "" {
 			msg = tr.Error
 		}
-		// invalid_grant 常见于：refresh_token 失效/被撤销，或 OAuth 应用仍是「测试」状态令 token 7 天过期。
-		ferr := fmt.Errorf("googledrive: 获取 token 失败(HTTP %d): %s", resp.StatusCode, msg)
+		ferr := fmt.Errorf("Google Drive：%s", oauthMessage(tr.Error, msg))
 		if resp.StatusCode >= 500 {
 			return &transientTokenError{ferr}
 		}
@@ -283,4 +282,22 @@ func (c *client) req(ctx context.Context, method, rawURL string, q url.Values, b
 		}
 		return mapDriveError(resp.StatusCode, &ge)
 	}
+}
+
+// oauthMessage 把 Google OAuth 的机器码错误转成一句人话；未知码回落到原始描述。
+func oauthMessage(code, desc string) string {
+	switch code {
+	case "invalid_grant":
+		return "授权已失效，请重新授权。若 OAuth 应用仍是「测试」状态，令牌约 7 天过期，建议在 Google Cloud 发布为「生产」"
+	case "invalid_client":
+		return "client_id 或 client_secret 不正确，请检查后重新授权"
+	case "unauthorized_client":
+		return "该 OAuth 应用未获授权，请检查 Google Cloud 中的应用配置"
+	case "invalid_scope":
+		return "授权范围无效，请重新授权并确认已勾选 Drive 权限"
+	}
+	if desc = strings.TrimSpace(desc); desc != "" {
+		return "获取访问令牌失败：" + desc
+	}
+	return "获取访问令牌失败，请检查存储配置"
 }

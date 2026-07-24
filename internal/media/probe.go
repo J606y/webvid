@@ -92,11 +92,11 @@ func runProbe(ctx context.Context, ffprobe, input, internalToken string) (*probe
 	cmd := exec.CommandContext(cctx, ffprobe, args...)
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("ffprobe 探测失败: %w", err)
+		return nil, fmt.Errorf("读取视频信息失败: %w", err)
 	}
 	po := &probeOut{}
 	if err := json.Unmarshal(out, po); err != nil {
-		return nil, fmt.Errorf("ffprobe 输出解析失败: %w", err)
+		return nil, fmt.Errorf("解析视频信息失败: %w", err)
 	}
 	return po, nil
 }

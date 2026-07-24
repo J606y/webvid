@@ -62,7 +62,7 @@ async function load() {
       if (codeRef.value) hljs.highlightElement(codeRef.value)
     }
   } catch (e) {
-    text.value = '加载失败: ' + (e.message || '')
+    text.value = '文件加载失败，请稍后重试，或点下方「下载」保存到本地查看'
   } finally {
     loading.value = false
   }

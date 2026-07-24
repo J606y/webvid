@@ -104,10 +104,10 @@ func (c *client) refreshLocked(ctx context.Context) error {
 		if c.username != "" && c.password != "" {
 			return c.loginLocked(ctx)
 		}
-		return fmt.Errorf("pikpak: refresh_token 已失效，请重新填写或补充账密")
+		return fmt.Errorf("PikPak：refresh_token 已失效，请重新填写或补充账密")
 	}
 	if tr.Code != 0 || tr.AccessToken == "" {
-		return fmt.Errorf("pikpak: 刷新 token 失败(%d): %s", tr.Code, tr.message())
+		return fmt.Errorf("PikPak：刷新 token 失败(%d): %s", tr.Code, tr.message())
 	}
 	c.applyTokensLocked(&tr)
 	return nil
@@ -117,7 +117,7 @@ func (c *client) refreshLocked(ctx context.Context) error {
 // 若用户已贴入验证过的 captcha_token，则直接用它（绕过人机验证墙），用后作废。
 func (c *client) loginLocked(ctx context.Context) error {
 	if c.username == "" || c.password == "" {
-		return fmt.Errorf("pikpak: 未配置账密且无有效 refresh_token，无法登录")
+		return fmt.Errorf("PikPak：未配置账密且无有效 refresh_token，无法登录")
 	}
 	captchaTok := c.initialCaptcha
 	if captchaTok != "" {
@@ -140,7 +140,7 @@ func (c *client) loginLocked(ctx context.Context) error {
 		return err
 	}
 	if tr.Code != 0 || tr.AccessToken == "" {
-		return fmt.Errorf("pikpak: 登录失败(%d): %s", tr.Code, tr.message())
+		return fmt.Errorf("PikPak：登录失败(%d): %s", tr.Code, tr.message())
 	}
 	c.applyTokensLocked(&tr)
 	return nil
@@ -185,10 +185,10 @@ func (c *client) captchaInitLocked(ctx context.Context, action string, meta map[
 		return err
 	}
 	if out.URL != "" {
-		return fmt.Errorf("pikpak: 触发人机验证，请先在官方客户端登录一次后重试")
+		return fmt.Errorf("PikPak：触发人机验证，请先在官方客户端登录一次后重试")
 	}
 	if out.Code != 0 || out.CaptchaToken == "" {
-		return fmt.Errorf("pikpak: 获取 captcha_token 失败(%d): %s", out.Code, out.message())
+		return fmt.Errorf("PikPak：获取 captcha_token 失败(%d): %s", out.Code, out.message())
 	}
 	c.captchaToken = out.CaptchaToken
 	return nil
@@ -238,7 +238,7 @@ func (c *client) postJSON(ctx context.Context, u string, body any, out any) erro
 		return err
 	}
 	if err := json.Unmarshal(data, out); err != nil {
-		return fmt.Errorf("pikpak: 响应解析失败(HTTP %d)", resp.StatusCode)
+		return fmt.Errorf("PikPak：响应解析失败(HTTP %d)", resp.StatusCode)
 	}
 	return nil
 }
@@ -308,12 +308,12 @@ func (c *client) req(ctx context.Context, method, u string, query url.Values, bo
 			}
 			continue
 		case ae.Code == 10:
-			return fmt.Errorf("pikpak: 操作频繁，请稍后再试")
+			return fmt.Errorf("PikPak：操作频繁，请稍后再试")
 		}
 		if resp.StatusCode == 404 || strings.Contains(ae.Err, "not_found") {
 			return driver.ErrNotFound
 		}
-		return fmt.Errorf("pikpak: 请求失败(HTTP %d, code %d): %s", resp.StatusCode, ae.Code, ae.message())
+		return fmt.Errorf("PikPak：请求失败(HTTP %d, code %d): %s", resp.StatusCode, ae.Code, ae.message())
 	}
 }
 

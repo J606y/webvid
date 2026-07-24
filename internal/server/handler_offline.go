@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"mime"
 	"net/http"
 	"net/url"
@@ -35,7 +36,7 @@ func (s *Server) fsOffline(c *gin.Context) {
 		Name   string   `json:"name"` // 可选：自定义文件名，仅单链接时生效
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.DstDir == "" {
-		Fail(c, 400, "urls/dst_dir 不能为空")
+		Fail(c, 400, "缺少下载链接或目标目录")
 		return
 	}
 	dst, err := fs.NormPath(req.DstDir)
@@ -64,7 +65,7 @@ func (s *Server) fsOffline(c *gin.Context) {
 		valid = append(valid, raw)
 	}
 	if len(valid) == 0 {
-		Fail(c, 400, "urls 不能为空")
+		Fail(c, 400, "请填写下载链接")
 		return
 	}
 	// 自定义文件名仅单链接时生效，多链接忽略（防同名互相覆盖）。
@@ -275,7 +276,8 @@ func (s *Server) offlineFetchHLS(ctx context.Context, u *user.User, t *task.Task
 		}
 	}
 	if err := cmd.Wait(); err != nil {
-		return fmt.Errorf("ffmpeg 拉取 HLS 失败: %v: %s", err, strings.TrimSpace(stderr.String()))
+		log.Printf("[offline] ffmpeg 合并失败: %v: %s", err, strings.TrimSpace(stderr.String()))
+		return fmt.Errorf("合并视频失败：源地址可能已失效或格式不受支持")
 	}
 
 	// 落地：临时 mp4 → fs.Put（本地与云盘驱动共用同一路径）。

@@ -79,7 +79,7 @@ func (b *Builder) finish(err error) {
 	b.prog.Current = ""
 	b.prog.Err = ""
 	if err != nil {
-		b.prog.Err = err.Error()
+		b.prog.Err = util.Humanize(err)
 	}
 	b.mu.Unlock()
 	if err != nil {
@@ -299,4 +299,3 @@ func (b *Builder) ScanSubtree(logical string) {
 		}
 	}()
 }
-
