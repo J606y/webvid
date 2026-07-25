@@ -1,136 +1,152 @@
 # WebVid
 
-自用轻量网盘挂载 + Infuse 风格媒体库：单二进制、SQLite、液态玻璃 UI。
+自建的网盘与媒体库。把本地目录和各家网盘挂成同一棵目录树，用视频库的方式浏览和播放。
 
-- **多存储挂载**：本地目录 / OneDrive（refresh_token 或应用凭据）/ PikPak，统一逻辑路径树
-- **媒体库**：Apple TV / Infuse 风格视频库与照片墙（随机推荐、最近添加、播放历史、滚动加载），
-  每个存储可单独控制是否进视频库/照片墙/搜索
-- **转码播放**：mp4/webm 直连秒开；mkv/avi/wmv/flv/rmvb、DTS/AC3 音轨等经 ffmpeg 转 HLS——
-  能 remux 绝不重编码（`-c copy` 零 CPU 秒开），必要时才 libx264；全片进度条可拖
-- **多线程加速**：云盘存储可开代理模式，服务器↔云盘并发 Range 分块拉流（播放/下载/转存共用）
-- **任务系统**：跨存储转存（如 PikPak → OneDrive 服务器端搬运）带进度/取消/重试
-- **权限**：必须登录；子用户可限定可见目录（base_path）与只读
-- **全局搜索**：SQLite 索引，后台一键重建
-- 空闲内存 < 50MB；无常驻扫描，索引/缩略图/转码全部按需触发
+单个可执行文件，一个 SQLite 数据库，装完即用。
 
-## 一键安装（Linux 服务器 / systemd）
+## 功能
+
+**多个存储，一棵目录树**
+本地目录、OneDrive、Google 云端硬盘、PikPak、Telegram 收藏夹挂载在同一个路径下浏览。
+跨存储复制和移动由服务器直接完成，不经过你的设备，有进度、可取消、可重试，中断后按文件续传。
+
+**媒体库**
+视频和照片自动成库，有推荐位、最近添加和继续观看。
+每个存储可以单独决定要不要进视频库、照片墙和搜索。
+
+**随点随播**
+mp4 一类直接播放。mkv、avi、DTS 音轨等在服务端实时转换后播放，能换封装就不重新编码，
+进度条全片可拖。云盘上的文件也可以边下边播。
+
+**离线下载**
+给一个链接就下载到指定目录，m3u8 会自动合并成 mp4。
+
+**全局搜索**
+按名称搜索整棵目录树，后台可随时重建索引。
+
+**多用户**
+必须登录才能访问。子账号可以限定可见目录和只读权限。
+
+空闲内存不到 50MB。没有常驻扫描，索引、封面和转码都按需触发。
+
+## 安装
+
+### Linux（推荐）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/J606y/webvid/main/install.sh -o install.sh \
   && sudo bash install.sh install
 ```
 
-脚本会自动检测 CPU 架构、安装 ffmpeg、从 GitHub Release 下载对应二进制到 `/opt/webvid`、
-注册并启动 `webvid` systemd 服务（开机自启），最后打印初始管理员账号密码与访问地址。
-装完后用 `webvid` 命令管理（脚本即 `install.sh`，可 `sudo cp install.sh /usr/local/bin/webvid`）：
+脚本会检测 CPU 架构、安装 ffmpeg、下载对应版本到 `/opt/webvid`，注册服务并开机自启，
+最后打印初始管理员账号和访问地址。支持 systemd 与 Docker 两种后端，安装时可选。
+
+装完后直接输入 `webvid` 进入管理菜单，也可以用子命令：
 
 ```bash
-sudo bash install.sh            # 无参数进入交互菜单
-sudo bash install.sh update     # 升级到最新版（保留 data/、files/）
-sudo bash install.sh status     # 查看运行状态
-sudo bash install.sh log        # 跟随日志
-sudo bash install.sh password   # 再次查看初始密码
-sudo bash install.sh uninstall  # 卸载（询问是否删数据）
+webvid update            # 升级到最新版（保留数据与文件）
+webvid status            # 查看运行状态
+webvid log               # 跟随日志
+webvid password          # 打印初始管理员密码
+webvid reset-password    # 重设管理员密码（省略参数则随机生成）
+webvid uninstall         # 卸载（会询问是否删除数据）
 ```
 
-默认监听 `5243`，数据在 `/opt/webvid/data`、本地存储在 `/opt/webvid/files`；
-可用环境变量覆盖：`WEBVID_PORT`、`WEBVID_DIR`（安装目录）。
-公网访问务必置于 HTTPS 反向代理之后（本服务不内置 TLS，见下「部署与安全」）。
+默认监听 `5243`，数据在 `/opt/webvid/data`，本地存储在 `/opt/webvid/files`。
+可用 `WEBVID_PORT`、`WEBVID_DIR` 覆盖。
 
-> 需先在仓库打过版本标签（`git tag v1.0.0 && git push --tags`）触发 GitHub Actions 构建出
-> Release 产物，脚本才能下载安装。
-
-## 快速开始（Docker）
+### Docker
 
 ```bash
 docker compose up -d --build
-docker logs webvid        # 首次启动在日志里打印随机管理员密码
+docker logs webvid        # 首次启动会在日志里打印随机管理员密码
 ```
 
-打开 `http://localhost:5243`，用日志中的 `admin` 账号登录。
-`./files` 会自动挂载为「/本地存储」；数据（数据库/缩略图/转码缓存）都在 `./data`。
+打开 `http://localhost:5243` 登录。`./files` 会自动挂载为「/本地存储」，
+数据库、封面和转码缓存都在 `./data`。
+想固定首启密码，在 `docker-compose.yml` 里取消 `NL_ADMIN_PASSWORD` 的注释（仅建库时生效）。
 
-想固定首启密码：在 `docker-compose.yml` 里取消 `NL_ADMIN_PASSWORD` 注释（仅数据库初建时生效）。
-
-### 直接跑二进制（Windows/Linux）
+### 从源码构建
 
 ```bash
-cd frontend && npm ci && npm run build && cd ..   # 前端产物嵌入二进制
+cd frontend && npm ci && npm run build && cd ..   # 前端产物会嵌入二进制
 go build -o webvid .
 NL_ADMIN_PASSWORD=admin123 ./webvid
 ```
 
-需要 ffmpeg/ffprobe 在 PATH（或用 `NL_FFMPEG` / `NL_FFPROBE` 指定路径），
-缺失时程序正常运行，仅视频缩略图与转码播放降级不可用。
+需要 ffmpeg 和 ffprobe 在 PATH 上，或用 `NL_FFMPEG` / `NL_FFPROBE` 指定路径。
+缺少时程序照常运行，只是视频封面和转码播放不可用。
 
 ## 挂载存储
 
-后台管理 → 存储 → 添加，选择驱动填写动态表单：
+后台管理 → 存储 → 添加，选择驱动后填写表单。
 
 | 驱动 | 必填 | 说明 |
 |---|---|---|
-| local | root_path | 宿主机绝对路径（容器内路径，如 `/files/media`） |
-| onedrive | client_id、client_secret、refresh_token | 个人/企业账号 OAuth。refresh_token 可用任意 OneDrive 授权工具获取（权限需含 Files.ReadWrite.All + offline_access），token 轮换会自动回写配置 |
-| onedrive_app | tenant_id、client_id、client_secret、drive_id | 应用专用凭据（client_credentials），Azure 门户注册应用并授 Sites/Files 应用权限 |
-| pikpak | username、password（或 refresh_token） | 账密自动登录并维护 token；官方风控严时可能触发人机验证，稍后重试 |
-| telegram | api_id、api_hash、phone | **只读**驱动：把 TG 消息转发到本人「收藏夹」，本站平铺读取；api_id/api_hash 在 my.telegram.org 申请，添加存储后在后台该行「🔑」按钮走手机验证码登录（session 自动保存，无需重复登录）；网络受限可填 socks5 代理；只读故无法从本站直接写入，常配合任务系统「转存」到其他可写存储 |
+| 本地目录 | 根目录路径 | 宿主机绝对路径；容器内填容器里的路径，如 `/files/media` |
+| OneDrive | 客户端 ID、客户端密钥、刷新令牌 | 个人或企业账号。刷新令牌权限需含 Files.ReadWrite.All 与 offline_access，轮换后自动回写 |
+| OneDrive（应用授权） | 租户 ID、客户端 ID、客户端密钥、用户邮箱 | 用应用专用凭据访问，需在 Azure 门户注册应用并授予 Sites/Files 应用权限 |
+| Google 云端硬盘 | 客户端 ID、客户端密钥 | 填好后在该行点「授权」按钮，在 Google 页面同意即可，令牌自动写回。OAuth 应用需发布为「生产」，否则令牌约七天过期 |
+| PikPak | 用户名、密码 | 自动登录并维护令牌。风控严格时可能要求人机验证，稍后重试 |
+| Telegram | API ID、API Hash、手机号 | **只读**。把消息转发到本人收藏夹后在这里平铺读取。凭据在 my.telegram.org 申请，添加后点该行钥匙按钮用验证码登录，会话自动保存。常配合转存功能搬到可写的存储 |
 
-远端驱动通用字段：
+远端存储的通用选项：
 
-- `proxy`：开启后下载/播放经服务器中转（配合多线程加速；关闭则 302 直链，服务器零流量）
-- `threads` / `chunk_mb`：代理模式并发 Range 连接数（默认 4）与分块大小（默认 4MB）
-- `show_video` / `show_photo` / `show_search`：该存储内容是否进视频库/照片墙/搜索
+- **代理模式**：下载和播放经服务器中转。关闭时返回直链，服务器不消耗流量
+- **并发连接数 / 分块大小**：代理模式下从云盘取数据的并发度，默认 4 线程、4MB 分块
+- **展示开关**：该存储的内容是否进入视频库、照片墙和搜索
 
-存储保存后会自动重建索引；重建完成后自动开始**媒体预载**——把勾选了视频库/照片墙展示的
-文件封面下载/生成落盘（`data/thumbs/`），并对非原生格式视频预探测播放策略与时长写入
-数据库，之后浏览媒体库即刻出图、打开视频详情/播放免现场探测。进度与手动重跑入口
-见后台「索引管理」页签；预载幂等，已缓存内容跳过，云端单文件失败下轮自动重试。
+保存后会自动重建索引，随后在后台开始预载封面与视频信息，之后浏览媒体库即刻出图、
+打开视频不必现场探测。进度和手动重跑入口在后台「索引管理」。
 
-## 转码与加速说明
+## 播放
 
-- 播放策略由 `ffprobe` 探测自动决定：**direct**（mp4/webm 家族直连原文件，不起 ffmpeg）→
-  **remux**（编码可播但容器不认，如 mkv 里的 h264+aac，`-c copy` 换封装，CPU 几乎为零）→
-  **transcode**（h265/wmv/rv40 等重编码 libx264 veryfast；视频可播仅音轨不可播时只转音频）
-- 转码分片缓存在 `data/transcode/`，会话空闲 5 分钟自动回收，并发限 2 路，重启自动清空
-- 软转 1080p h265 大约需要 4 核 CPU；remux 与 direct 几乎不耗 CPU
-- 云盘文件转码时输入走服务器回环拉流，直链过期自动换链；配合 `proxy + threads` 可解决慢源
+播放方式由文件本身决定，无需设置：
 
-## 常用环境变量
+- mp4、webm 一类直接播放原文件，不启动转码
+- 编码能播但容器不认的（例如 mkv 里的 H.264 + AAC）只更换封装，几乎不占 CPU
+- H.265、WMV 等需要重新编码；如果只有音轨不兼容，则仅转换音轨
+
+转码分片缓存在 `data/transcode/`，会话闲置五分钟自动回收，同时最多两路，重启清空。
+软解 1080p H.265 大约需要四核 CPU。
+
+## 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
 | NL_PORT | 5243 | 监听端口 |
 | NL_DATA_DIR | ./data（镜像内 /data） | 数据库与缓存目录 |
-| NL_FILES_DIR | ./files（镜像内 /files） | 首启自动挂载的本地存储 |
-| NL_ADMIN_USER / NL_ADMIN_PASSWORD | admin / 随机 | 仅首次建库生效 |
-| NL_FFMPEG / NL_FFPROBE | 自动探测 | ffmpeg/ffprobe 路径 |
-| NL_TRUSTED_PROXIES | 回环 + 内网网段 | 逗号分隔 CIDR，声明可信任的反向代理来源（见下「部署与安全」） |
+| NL_FILES_DIR | ./files（镜像内 /files） | 首次启动自动挂载的本地存储 |
+| NL_ADMIN_USER / NL_ADMIN_PASSWORD | admin / 随机 | 仅首次建库时生效 |
+| NL_FFMPEG / NL_FFPROBE | 自动探测 | ffmpeg 与 ffprobe 的路径 |
+| NL_TRUSTED_PROXIES | 回环与内网网段 | 逗号分隔的 CIDR，声明可信的反向代理来源 |
 
 ## 部署与安全
 
-公网部署前请务必确认以下几点：
+公网部署前请确认以下三点。
 
-1. **`data/newlist.db` 是最高机密文件**：里面存着云盘驱动的 client_secret/refresh_token、
-   管理员与所有用户的密码哈希、自动生成并落库的 `jwt_secret`。**该文件与整个 `data/` 目录绝不能
-   提交进代码仓库、上传到公开位置或以明文方式分享**（`.gitignore`/`.dockerignore` 已排除 `data/`，
-   但这只防止误提交，不代表磁盘上是安全的）。建议额外收紧宿主机 `data/` 目录权限（如
-   `chmod 700 data`，仅运行服务的账号可读写）；确需备份时，请对备份文件加密后再落盘或外传。
-2. **本项目不内置 TLS**：只提供裸 HTTP 服务，不做证书申请/续期。公网访问必须放在支持 HTTPS
-   的反向代理（Nginx / Caddy / Traefik 等）之后，由反代终止 TLS 并转发到 `NL_PORT`；不要把
-   服务端口直接暴露给公网。
-3. **反代之后要让服务拿到真实客户端 IP**：反代默认会让所有请求看起来都来自反代自身
-   （如 `127.0.0.1`），登录失败限流与访问日志会因此把不同来源的用户误判为同一个人/同一次攻击。
-   反代需设置 `X-Forwarded-For`/`X-Real-IP` 等头，服务端用环境变量 `NL_TRUSTED_PROXIES`
-   （逗号分隔的 CIDR 列表，缺省仅信任回环地址与常见内网网段）声明"这些地址发来的连接可信、
-   其转发头可以采信"——只有命中该列表的连接，其转发头里的客户端 IP 才会被采用；未在列表内的
-   来源即使伪造该头也不会被信任，从而避免公网直接绕过登录限流。反代的出口 IP（或所在网段）
-   必须包含在这个列表里，否则限流/日志会一直显示成反代自己的 IP。
+**`data/newlist.db` 是最高机密文件。** 里面存着各存储的密钥与刷新令牌、所有用户的密码哈希，
+以及自动生成的 JWT 密钥。该文件与整个 `data/` 目录不能提交进代码仓库、上传到公开位置或明文分享。
+`.gitignore` 与 `.dockerignore` 已排除 `data/`，但这只防误提交，不代表磁盘上是安全的。
+建议收紧目录权限（如 `chmod 700 data`），备份时先加密。
+
+**本服务不内置 TLS。** 只提供 HTTP，不做证书申请与续期。公网访问必须放在 Nginx、Caddy、
+Traefik 一类反向代理之后，由反代终止 TLS 后转发，不要把端口直接暴露到公网。
+
+**反代之后要让服务拿到真实客户端 IP。** 否则所有请求看起来都来自反代自身，
+登录限流会把不同来源误判成同一个人。反代需设置 `X-Forwarded-For` 或 `X-Real-IP`，
+并把反代的出口地址或网段写进 `NL_TRUSTED_PROXIES`——只有来自该列表的连接，
+其转发头才会被采信，其他来源即使伪造也不生效。
 
 ## 忘记密码
 
-停止服务后删除 `data/newlist.db`（索引/用户/存储配置会一并清空，存储需重新挂载），
-重启后按首启流程重新生成管理员账号；或用有管理员权限的账号在后台重置他人密码。
+```bash
+webvid reset-password            # 随机生成新密码并打印
+webvid reset-password 你的新密码   # 指定新密码
+```
+
+只改密码，不动存储配置和其他用户。源码运行时用 `./webvid reset-password` 同样有效。
 
 ## 许可证
 
-AGPL-3.0。自用项目，闭源分发或提供网络服务须遵循 AGPL 开源义务。
+AGPL-3.0。自用项目；闭源分发或对外提供网络服务须遵循 AGPL 的开源义务。
