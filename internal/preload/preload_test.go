@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"newlist/internal/conf"
 	"newlist/internal/db"
 	_ "newlist/internal/driver/local" // 注册 local 驱动
 	"newlist/internal/fs"
@@ -49,6 +50,16 @@ func mount(t *testing.T, root string, cfg map[string]string) (*sql.DB, *fs.FS) {
 		d.Close()
 	})
 	return d, f
+}
+
+// store 打开 settings 表读写封装（预载用它持久化「不是现在」的推迟到点）。
+func store(t *testing.T, d *sql.DB) *conf.Store {
+	t.Helper()
+	cf, err := conf.New(d)
+	if err != nil {
+		t.Fatalf("conf.New: %v", err)
+	}
+	return cf
 }
 
 func setCfg(t *testing.T, d *sql.DB, f *fs.FS, root string, cfg map[string]string) {
@@ -131,7 +142,7 @@ func TestCollectVisibility(t *testing.T) {
 	d, f := mount(t, root, map[string]string{})
 	rebuild(t, d, f)
 
-	pl := New(d, f, nil, nil) // collect 不用 thumb/media
+	pl := New(d, store(t, d), f, nil, nil) // collect 不用 thumb/media
 	if got := len(pl.collect()); got != 2 {
 		t.Fatalf("默认全展示应收 2 项, got %d", got)
 	}
@@ -158,7 +169,7 @@ func TestPreloadWarmsCovers(t *testing.T) {
 
 	th := thumb.New(f, t.TempDir())
 	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
-	pl := New(d, f, th, md)
+	pl := New(d, store(t, d), f, th, md)
 	pl.Run()
 	prog := waitPreload(t, pl)
 
@@ -188,7 +199,7 @@ func TestPreloadProbesVideos(t *testing.T) {
 
 	th := thumb.New(f, t.TempDir())
 	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
-	pl := New(d, f, th, md)
+	pl := New(d, store(t, d), f, th, md)
 	pl.Run()
 	prog := waitPreload(t, pl)
 
@@ -203,6 +214,111 @@ func TestPreloadProbesVideos(t *testing.T) {
 	}
 	if mp4 != 0 {
 		t.Fatalf("direct 视频(mp4)不应探测入库, got %d", mp4)
+	}
+}
+
+// TestSnoozeSkipsAutoRun：点「不是现在」后自动预载跳过、状态落库，「继续」立刻接着跑。
+func TestSnoozeSkipsAutoRun(t *testing.T) {
+	root := t.TempDir()
+	writeImage(t, filepath.Join(root, "a.png"))
+	writeImage(t, filepath.Join(root, "b.jpg"))
+	d, f := mount(t, root, map[string]string{})
+	rebuild(t, d, f)
+
+	cf := store(t, d)
+	th := thumb.New(f, t.TempDir())
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
+	pl := New(d, cf, f, th, md)
+
+	until := pl.Snooze()
+	if dur := time.Until(until); dur < 23*time.Hour || dur > SnoozeFor {
+		t.Fatalf("应推迟约一天, got %v", dur)
+	}
+	pl.AutoRun()
+	prog := pl.Progress()
+	if prog.Running || prog.Done != 0 {
+		t.Fatalf("推迟中不应自动预载: %+v", prog)
+	}
+	if !prog.Snoozed || prog.ResumeAt == "" {
+		t.Fatalf("应处于推迟中: %+v", prog)
+	}
+	if cf.Get(snoozeKey, "") == "" {
+		t.Fatal("推迟到点应落库")
+	}
+
+	pl.Resume()
+	prog = waitPreload(t, pl)
+	if prog.Snoozed {
+		t.Fatalf("继续后不应仍在推迟: %+v", prog)
+	}
+	if prog.Covers < 2 {
+		t.Fatalf("继续后应预热 ≥2 张封面, got %d", prog.Covers)
+	}
+	if v := cf.Get(snoozeKey, ""); v != "" {
+		t.Fatalf("继续后应清除推迟状态, got %q", v)
+	}
+}
+
+// TestResumeContinuesPending：「继续」接着推迟时剩下的清单跑，已有计数不清零。
+func TestResumeContinuesPending(t *testing.T) {
+	root := t.TempDir()
+	writeImage(t, filepath.Join(root, "a.png"))
+	writeImage(t, filepath.Join(root, "b.jpg"))
+	d, f := mount(t, root, map[string]string{})
+	rebuild(t, d, f)
+
+	th := thumb.New(f, t.TempDir())
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
+	pl := New(d, store(t, d), f, th, md)
+
+	// 造出「推迟时手头 1 项已跑完、还剩 1 项」的现场
+	files := pl.collect()
+	if len(files) != 2 {
+		t.Fatalf("应收 2 项, got %d", len(files))
+	}
+	pl.Snooze()
+	pl.mu.Lock()
+	pl.total = 2
+	pl.pending = files[1:]
+	pl.mu.Unlock()
+	pl.done.Store(1)
+	pl.covers.Store(1)
+	if got := pl.Progress().Pending; got != 1 {
+		t.Fatalf("应剩 1 项待继续, got %d", got)
+	}
+
+	pl.Resume()
+	prog := waitPreload(t, pl)
+	if prog.Total != 2 || prog.Done != 2 {
+		t.Fatalf("继续应接着已有计数跑完: %+v", prog)
+	}
+	if prog.Covers != 2 {
+		t.Fatalf("封面计数应累加到 2, got %d", prog.Covers)
+	}
+}
+
+// TestSnoozeSurvivesRestart：推迟跨重启仍生效；到点（含关机期间到点）则自动作废。
+func TestSnoozeSurvivesRestart(t *testing.T) {
+	root := t.TempDir()
+	writeImage(t, filepath.Join(root, "a.png"))
+	d, f := mount(t, root, map[string]string{})
+	cf := store(t, d)
+
+	if err := cf.Set(snoozeKey, time.Now().Add(2*time.Hour).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("写推迟状态: %v", err)
+	}
+	if !New(d, cf, f, nil, nil).Progress().Snoozed {
+		t.Fatal("未到点的推迟应在重启后恢复")
+	}
+
+	if err := cf.Set(snoozeKey, time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)); err != nil {
+		t.Fatalf("写推迟状态: %v", err)
+	}
+	if New(d, cf, f, nil, nil).Progress().Snoozed {
+		t.Fatal("已到点的推迟应在重启后清除")
+	}
+	if v := cf.Get(snoozeKey, ""); v != "" {
+		t.Fatalf("已到点应清库, got %q", v)
 	}
 }
 

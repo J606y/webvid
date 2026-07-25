@@ -128,8 +128,9 @@ func main() {
 	idx := index.New(d, f)
 	// 索引就绪后后台预载：下载/生成封面 + 探测视频源信息写入 media_info。
 	// 存储变更（含新挂载/勾选展示开关）→ Reload 重建索引 → 完成即触发本轮预载。
-	pl := preload.New(d, f, th, md)
-	idx.OnComplete(pl.Run)
+	// 用户点过「不是现在」则推迟一天，期间自动预载跳过（AutoRun 判定），到点自动继续。
+	pl := preload.New(d, cf, f, th, md)
+	idx.OnComplete(pl.AutoRun)
 
 	// 线程数/限速均来自 settings（后台可热调整）；离线下载组与限速器在 server.New 内接线
 	srv := server.New(d, cf, users, f, th, md, idx, pl, task.New(cf.CopyWorkers()), secret)
@@ -164,7 +165,7 @@ func main() {
 		if fileCount == 0 {
 			idx.Rebuild()
 		} else {
-			pl.Run()
+			pl.AutoRun()
 		}
 	}
 

@@ -83,6 +83,8 @@ func (s *Server) Router() *gin.Engine {
 	admin.POST("/index/rebuild", s.indexRebuild)
 	admin.GET("/preload/progress", s.preloadProgress)
 	admin.POST("/preload/run", s.preloadRun)
+	admin.POST("/preload/snooze", s.preloadSnooze)
+	admin.POST("/preload/resume", s.preloadResume)
 
 	s.registerStatic(r)
 	return r

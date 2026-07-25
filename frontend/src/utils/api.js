@@ -85,6 +85,8 @@ export const api = {
     preload: {
       progress: () => http.get('/admin/preload/progress'),
       run: () => http.post('/admin/preload/run'),
+      snooze: () => http.post('/admin/preload/snooze'),
+      resume: () => http.post('/admin/preload/resume'),
     },
   },
 }

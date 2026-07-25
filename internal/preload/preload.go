@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"newlist/internal/conf"
 	"newlist/internal/fs"
 	"newlist/internal/media"
 	"newlist/internal/model"
@@ -23,6 +24,12 @@ import (
 // workers 预载并发度：每个 worker 一次处理一个文件（探测/下载都是网络阻塞，
 // thumb 与 media 内部还各有自己的并发闸，这里保守取 4）。
 const workers = 4
+
+// SnoozeFor 是「不是现在」的推迟时长，到点自动继续。
+const SnoozeFor = 24 * time.Hour
+
+// snoozeKey 是推迟到点时刻在 settings 里的键，重启后据此恢复计时。
+const snoozeKey = "preload_snooze_until"
 
 // admin 全视野身份（预载扫全部可见媒体，权限过滤由挂载可见性开关承担）。
 var admin = &user.User{Role: "admin", BasePath: "/"}
@@ -37,43 +44,118 @@ type Progress struct {
 	Current    string `json:"current"` // 当前处理路径
 	Err        string `json:"err"`
 	FinishedAt string `json:"finished_at"`
+	Snoozed    bool   `json:"snoozed"`   // 已点「不是现在」，推迟中
+	ResumeAt   string `json:"resume_at"` // 推迟到点、自动继续的时刻（RFC3339）
+	Pending    int64  `json:"pending"`   // 推迟时剩下多少项没预载
 }
 
 type Service struct {
 	db     *sql.DB
+	conf   *conf.Store
 	fs     *fs.FS
 	thumbs *thumb.Service
 	media  *media.Service
 
-	mu         sync.Mutex
-	running    bool
-	total      int64
-	current    string
-	errMsg     string
-	finishedAt string
-	gen        int // 轮次代际：新一轮取代旧轮，旧 goroutine 靠比对 gen 停手
-	cancel     context.CancelFunc
+	mu          sync.Mutex
+	running     bool
+	total       int64
+	current     string
+	errMsg      string
+	finishedAt  string
+	gen         int // 轮次代际：新一轮取代旧轮，旧 goroutine 靠比对 gen 停手
+	cancel      context.CancelFunc
+	snoozeUntil time.Time   // 非零 = 推迟中，到点自动继续
+	timer       *time.Timer // 到点自动继续的定时器
+	pending     []fileRow   // 推迟时未派发的剩余项，「继续」从这里接着跑
 
 	done, covers, probes atomic.Int64
 }
 
-func New(db *sql.DB, f *fs.FS, th *thumb.Service, md *media.Service) *Service {
-	return &Service{db: db, fs: f, thumbs: th, media: md}
+func New(db *sql.DB, cf *conf.Store, f *fs.FS, th *thumb.Service, md *media.Service) *Service {
+	s := &Service{db: db, conf: cf, fs: f, thumbs: th, media: md}
+	s.restoreSnooze()
+	return s
 }
 
 func (s *Service) Progress() Progress {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return Progress{
+	p := Progress{
 		Running: s.running, Total: s.total,
 		Done: s.done.Load(), Covers: s.covers.Load(), Probes: s.probes.Load(),
 		Current: s.current, Err: s.errMsg, FinishedAt: s.finishedAt,
 	}
+	if !s.snoozeUntil.IsZero() {
+		p.Snoozed = true
+		p.ResumeAt = s.snoozeUntil.UTC().Format(time.RFC3339)
+		p.Pending = int64(len(s.pending))
+	}
+	return p
 }
 
-// Run 启动一轮后台预载，取代正在进行的旧轮（幂等：已缓存的封面/探测会快速跳过，
-// 只有新增或变更的文件才真正下载/探测）。立即返回，进度经 Progress 观察。
+// Run 手动跑一轮后台预载：解除推迟，从头收集并取代正在进行的旧轮（幂等：已缓存的
+// 封面/探测会快速跳过，只有新增或变更的文件才真正下载/探测）。立即返回。
 func (s *Service) Run() {
+	s.clearSnooze()
+	s.start(nil, false)
+}
+
+// AutoRun 是自动预载入口（启动时、索引重建完成后）：推迟期内直接跳过，
+// 并作废旧的剩余清单（索引已变），到点自动继续时从头跑一轮。
+func (s *Service) AutoRun() {
+	s.mu.Lock()
+	until := s.snoozeUntil
+	if !until.IsZero() {
+		s.pending = nil
+	}
+	s.mu.Unlock()
+	if !until.IsZero() {
+		log.Printf("[preload] 预载推迟中，跳过本次自动预载（%s 后继续）",
+			until.Local().Format("2006-01-02 15:04"))
+		return
+	}
+	s.start(nil, false)
+}
+
+// Snooze 推迟预载：不再派发新文件（手头在跑的几项跑完即止），SnoozeFor 后自动继续；
+// 期间自动触发的预载一律跳过。返回自动继续的时刻。
+func (s *Service) Snooze() time.Time {
+	until := time.Now().Add(SnoozeFor)
+	s.mu.Lock()
+	s.snoozeUntil = until
+	s.armLocked(SnoozeFor)
+	s.mu.Unlock()
+	s.saveSnooze(until)
+	log.Printf("[preload] 预载已推迟到 %s", until.Local().Format("2006-01-02 15:04"))
+	return until
+}
+
+// Resume 结束推迟并接着跑：留有剩余清单就从那里继续，否则重跑整轮。
+// 到点由定时器调用，用户点「继续」也走这里；未在推迟中则为空操作。
+func (s *Service) Resume() {
+	s.mu.Lock()
+	if s.snoozeUntil.IsZero() {
+		s.mu.Unlock()
+		return // 已经继续过了（用户抢在定时器前点了继续，或反之）
+	}
+	s.snoozeUntil = time.Time{}
+	s.disarmLocked()
+	left := s.pending
+	s.pending = nil
+	draining := s.running // 上一轮还在排空，剩余清单尚未落定 → 重跑整轮
+	s.mu.Unlock()
+	s.saveSnooze(time.Time{})
+	if draining || len(left) == 0 {
+		s.start(nil, false)
+		return
+	}
+	log.Printf("[preload] 继续预载：剩余 %d 项", len(left))
+	s.start(left, true)
+}
+
+// start 启动一轮预载并取代旧轮。resume=true 表示接着推迟时的剩余清单跑（沿用已有
+// 计数），false 则全量重新收集并清零计数。立即返回，进度经 Progress 观察。
+func (s *Service) start(files []fileRow, resume bool) {
 	s.mu.Lock()
 	s.gen++
 	gen := s.gen
@@ -83,36 +165,43 @@ func (s *Service) Run() {
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
 	s.running = true
-	s.total = 0
 	s.current = ""
 	s.errMsg = ""
-	s.done.Store(0)
-	s.covers.Store(0)
-	s.probes.Store(0)
+	s.pending = nil
+	if !resume {
+		s.total = 0
+		s.done.Store(0)
+		s.covers.Store(0)
+		s.probes.Store(0)
+	}
 	s.mu.Unlock()
-	go s.run(ctx, gen)
+	go s.run(ctx, gen, files, resume)
 }
 
-func (s *Service) run(ctx context.Context, gen int) {
+func (s *Service) run(ctx context.Context, gen int, files []fileRow, resume bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[preload] 预载 panic: %v", r)
-			s.finish(gen, nil)
+			s.finish(gen, nil, nil)
 		}
 	}()
-	files := s.collect()
-	s.mu.Lock()
-	if s.gen != gen {
+	if !resume {
+		files = s.collect()
+		s.mu.Lock()
+		if s.gen != gen {
+			s.mu.Unlock()
+			return
+		}
+		s.total = int64(len(files))
 		s.mu.Unlock()
-		return
 	}
-	s.total = int64(len(files))
-	s.mu.Unlock()
 
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
-	for _, fr := range files {
-		if ctx.Err() != nil || !s.isCurrent(gen) {
+	i := 0
+	for ; i < len(files); i++ {
+		// 推迟不打断在途下载：只停止派发，手头几项跑完，files[i:] 留给「继续」
+		if ctx.Err() != nil || !s.isCurrent(gen) || s.snoozed() {
 			break
 		}
 		select {
@@ -134,10 +223,10 @@ func (s *Service) run(ctx context.Context, gen int) {
 			s.setCurrent(gen, fr.path)
 			s.process(ctx, fr)
 			s.done.Add(1)
-		}(fr)
+		}(files[i])
 	}
 	wg.Wait()
-	s.finish(gen, ctx.Err())
+	s.finish(gen, ctx.Err(), files[i:])
 }
 
 type fileRow struct {
@@ -194,7 +283,8 @@ func (s *Service) process(ctx context.Context, fr fileRow) {
 	}
 }
 
-func (s *Service) finish(gen int, cerr error) {
+// finish 收尾本轮。left 非空 = 因推迟提前收手，把剩余清单交给「继续」，不记完成时间。
+func (s *Service) finish(gen int, cerr error, left []fileRow) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.gen != gen {
@@ -202,12 +292,20 @@ func (s *Service) finish(gen int, cerr error) {
 	}
 	s.running = false
 	s.current = ""
+	if s.cancel != nil {
+		s.cancel()
+		s.cancel = nil
+	}
 	if cerr != nil && cerr != context.Canceled {
 		s.errMsg = util.Humanize(cerr)
 		log.Printf("[preload] 预载失败: %v", cerr)
 	}
+	if len(left) > 0 {
+		s.pending = left
+		log.Printf("[preload] 预载已停下：剩余 %d 项待继续", len(left))
+		return
+	}
 	s.finishedAt = time.Now().UTC().Format(time.RFC3339)
-	s.cancel = nil
 	log.Printf("[preload] 预载完成：封面 %d / 探测 %d / 共 %d 项",
 		s.covers.Load(), s.probes.Load(), s.total)
 }
@@ -216,6 +314,73 @@ func (s *Service) isCurrent(gen int) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.gen == gen
+}
+
+func (s *Service) snoozed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.snoozeUntil.IsZero()
+}
+
+// clearSnooze 解除推迟且不接着跑（手动「重新预载」走这条：整轮重来，剩余清单作废）。
+func (s *Service) clearSnooze() {
+	s.mu.Lock()
+	if s.snoozeUntil.IsZero() {
+		s.mu.Unlock()
+		return
+	}
+	s.snoozeUntil = time.Time{}
+	s.disarmLocked()
+	s.pending = nil
+	s.mu.Unlock()
+	s.saveSnooze(time.Time{})
+}
+
+// armLocked / disarmLocked 管到点自动继续的定时器，调用方须持 s.mu。
+func (s *Service) armLocked(d time.Duration) {
+	s.disarmLocked()
+	s.timer = time.AfterFunc(d, s.Resume)
+}
+
+func (s *Service) disarmLocked() {
+	if s.timer != nil {
+		s.timer.Stop()
+		s.timer = nil
+	}
+}
+
+// saveSnooze 持久化推迟到点（零值 = 清除），让推迟跨重启仍然有效。
+func (s *Service) saveSnooze(t time.Time) {
+	if s.conf == nil {
+		return
+	}
+	v := ""
+	if !t.IsZero() {
+		v = t.UTC().Format(time.RFC3339)
+	}
+	if err := s.conf.Set(snoozeKey, v); err != nil {
+		log.Printf("[preload] 保存推迟状态失败: %v", err)
+	}
+}
+
+// restoreSnooze 恢复重启前的推迟：未到点则接着计时，已到点（含关机期间到点）则清除，
+// 启动时的自动预载照常跑。仅 New 内调用，此时 Service 尚未共享，无需加锁。
+func (s *Service) restoreSnooze() {
+	if s.conf == nil {
+		return
+	}
+	v := s.conf.Get(snoozeKey, "")
+	if v == "" {
+		return
+	}
+	t, err := time.Parse(time.RFC3339, v)
+	if err != nil || !t.After(time.Now()) {
+		s.saveSnooze(time.Time{})
+		return
+	}
+	s.snoozeUntil = t
+	s.armLocked(time.Until(t))
+	log.Printf("[preload] 预载推迟中，%s 后继续", t.Local().Format("2006-01-02 15:04"))
 }
 
 func (s *Service) setCurrent(gen int, p string) {

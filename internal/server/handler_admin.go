@@ -120,3 +120,23 @@ func (s *Server) preloadRun(c *gin.Context) {
 	s.preload.Run()
 	OK(c, nil)
 }
+
+// POST /api/admin/preload/snooze —— 「不是现在」：停下预载，一天后自动继续。
+func (s *Server) preloadSnooze(c *gin.Context) {
+	if s.preload == nil {
+		Fail(c, 501, "预载不可用")
+		return
+	}
+	s.preload.Snooze()
+	OK(c, s.preload.Progress())
+}
+
+// POST /api/admin/preload/resume —— 「继续」：提前结束推迟，接着剩下的预载。
+func (s *Server) preloadResume(c *gin.Context) {
+	if s.preload == nil {
+		Fail(c, 501, "预载不可用")
+		return
+	}
+	s.preload.Resume()
+	OK(c, s.preload.Progress())
+}
