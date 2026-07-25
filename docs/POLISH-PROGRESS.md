@@ -12,6 +12,8 @@
 | A. 报错人话化 + Apple 风文案 | ✅ 已提交 `38c6402` |
 | B. UX 反人类/不一致清单（28 项） | ✅ **26 项修完并验证**；#19 用户明确不修；#20 按用户要求改成后台开关 |
 | 提交与发布 | ✅ **已随 v2.0.0 发布（当前 Latest）**，README 与仓库 topics 一并更新（见文末） |
+| C. 预载「不是现在」（2026-07-26 新需求） | ✅ 前后端完成、测试与 e2e 通过、二进制已重嵌；**未提交** |
+| D. 后台「传输任务」+ 文件夹内逐文件清单（2026-07-26 新需求） | ✅ 同上，**未提交** |
 
 用户对清单的决策原话：「播放入口不统一…这个不修是故意设置的；『所有视频/所有照片』实为随机
 200 条…这个也是故意设置的但是可以在后台加一个切换按钮…其他的条目全按照标准要求来修」。
@@ -176,6 +178,89 @@
 仓库描述已设置，topics 17 个：`self-hosted` `personal-cloud` `cloud-storage` `media-server`
 `video-streaming` `file-manager` `onedrive` `google-drive` `pikpak` `telegram` `ffmpeg`
 `hls` `transcoding` `golang` `vue3` `sqlite` `nas`。
+
+---
+
+# C. 预载「不是现在」（2026-07-26，未提交）
+
+> 用户：「封面与源信息预载里面增加一个不是现在的按钮，点击后默认延迟 1 天，
+> 然后按钮变成继续按钮，点击后可以继续预载工作」。
+> 确认过的两点：**到点自动继续**（「继续」只是提前恢复）、**时长固定 1 天不做选择器**。
+
+预载是后台批量下封面 + 探测源信息，几万条时会长时间占带宽。原来只能眼看着它跑完
+或反复「重新预载」，没有「现在别跑」的出路。
+
+- `internal/preload/preload.go`
+  - `Snooze()`：**只停止派发，不打断在途下载**——手头 ≤4 项跑完即止，未派发的
+    `files[i:]` 存进 `pending` 交给「继续」。这样计数不会重复累加（取消在途再重跑会
+    把 covers/probes 多加一遍），代价只是停下要等几张缩略图，可接受。
+  - `Resume()`：有 `pending` 就接着跑（`start(files, resume=true)` 沿用已有计数），
+    否则整轮重来。定时器到点与用户点击共用这一个入口，先在锁内判 `snoozeUntil` 是否
+    已清空，谁先到谁生效，不会起两轮。
+  - 旧轮还在排空时点「继续」：剩余清单尚未落定 → 直接重跑整轮（幂等，已缓存的快速
+    跳过），`gen++` 让排空中的旧轮收尾时自动认输，不写脏状态。
+  - `Run()`（手动「重新预载」）清推迟；新增 `AutoRun()` 供索引完成/启动时调用，
+    推迟期内跳过并作废旧清单（索引已变）。`main.go` 两处自动入口改 `AutoRun`。
+  - 推迟到点写 settings 键 `preload_snooze_until`（RFC3339），`New()` 里恢复：
+    未到点接着计时，关机期间已到点则清除，启动照常预载。故 `preload.New` 多收一个
+    `*conf.Store`。
+  - `Progress` 加 `snoozed` / `resume_at` / `pending` 三个字段。
+- `handler_admin.go` + `router.go`：`POST /api/admin/preload/{snooze,resume}`，返回最新进度。
+- `AdminIndex.vue`：卡片三态——推迟态（「已推迟，明天 6:53 自动继续。」+ 已缓存计数 +
+  剩余项数 + 「继续」）、运行中（进度条 + 「重新预载」「不是现在」）、常态。
+  「不是现在」**只在运行中出现**（没在跑就没什么可推迟的）；推迟态只留「继续」一个按钮。
+  排空中（已推迟但 worker 还没跑完）单独给一句「正在停下手头的几项…」，不装成已停。
+- 验证
+  - `internal/preload/preload_test.go` 新增三例：推迟后 `AutoRun` 跳过且状态落库、
+    「继续」接着剩余清单跑且计数不清零（total/done/covers 累加到 2）、推迟跨重启恢复
+    与到点作废。全包测试通过。
+  - 真实服务（隔离实例 5299）：snooze→progress→resume→progress 四连正确；重启后日志
+    「预载推迟中，2026-07-27 04:45 后继续」且自动预载被跳过。
+  - `frontend/preload-snooze-check.mjs`（新增留库）11/11、零控制台错误，截图复核两态。
+    进度接口用桩驱动状态（真实预载几毫秒跑完，稳不住 running），两个 POST 打真后端。
+
+---
+
+# D. 后台「传输任务」+ 文件夹内逐文件清单（2026-07-26，未提交）
+
+> 用户：「在后台管理中增加一个传输任务的界面，比主页的传输任务界面要多个能看到
+> 文件夹内的情况的功能」。确认过：任务表格 + 文件清单抽屉（非内嵌展开行）、
+> 清单要全量状态（含断点续传的「已跳过」）。
+
+原来一个文件夹转存只上报「总字节 + 在途文件名」，文件夹里到底哪些传完了、哪些还没轮到、
+哪个失败了，界面上看不出来。这次在任务层建了文件级模型。
+
+- `internal/task/task.go`
+  - 新增 `FileProgress`（路径/大小/已传/状态/原因）与 `FileCounts`（分状态计数）。
+    状态：`pending → running → done / skipped / error`。
+  - 计数**增量维护**而不是每次数一遍：任务列表 1.5 秒轮询一次，几万条的清单不能全表扫。
+    同理 `snapshot()` **不拷清单**（那是每轮几万次拷贝），清单走 `Manager.Files` 分页取。
+  - `Files(id, owner, isAdmin, FilesQuery)`：按状态筛 + 路径子串搜 + 分页（默认 200，上限 1000），
+    返回的 `Counts` 是不受过滤影响的全量计数。
+  - 取消 → 在途文件回落 `pending` 且进度清零（重试要重传，标成失败是谎报）；
+    重试 → 清空清单由任务体重新规划；任务结束还挂着 running 的行按结局归位（兜底不留僵尸行）。
+- `internal/fs/transfer.go`：`Progress` 接口从「名字」改为「下标」——规划一出来
+  `SetFiles(items)` 交出全量清单，之后 `FileStart(i)/AddFile(i,n)/FileSkip(i)/FileDone(i,err)`。
+  两包只共用 `model.TransferFile` 一个 DTO，仍不互相 import。
+  `relTo` 把源路径压成相对转存根的展示路径（「第一季/蓝星球 S01E01.mkv」）。
+  断点续传命中改走 `FileSkip`，界面因此能区分「真传了」和「跳过了」。
+- `GET /api/tasks/:id/files?state=&q=&offset=&limit=`（owner 或 admin 可查）。
+  `state` 传非法值当「全部」——筛出个空列表会让人以为文件没了。
+- `frontend/src/pages/admin/AdminTasks.vue` + Admin.vue 新增「传输任务」Tab：
+  全站任务表格（任务/发起人/状态/进度/文件数/操作）→「查看文件」开抽屉（搜索 + 状态筛选 +
+  分页 + 单文件进度）。**主页顶栏抽屉不动**，仍是轻量视图。
+- 验证
+  - Go：`TestFileStates`（四种结局与计数）、`TestFilesQuery`（筛/搜/分页/越权）、
+    原 `TestFileTrackingStable` 改索引版并锁住「展示只给文件名」；fs 侧断言清单与跳过上报。
+    全包测试 + vet 通过。
+  - `frontend/admin-tasks-check.mjs`（新增留库）15/15、零控制台错误：真实跨存储转存 41 个文件
+    （限速 512KB/s 造出稳定的「在传」态），看到「传输中/等待」共存、子目录层级路径、
+    搜索与筛选、跑完全绿，再转一轮全部「已跳过」。
+  - 踩坑：① el-table 会渲染隐藏的测量行，Playwright 定位必须 `:visible` 或限定表格类名；
+    ② 焦点在筛选控件里时 Escape 不一定关得掉抽屉，点 `.el-drawer__close-btn` 才稳；
+    ③ el-select 的空串当「没选」会掉回灰色占位文字，「全部」要用 `'all'` 这种真值；
+    ④ **Git Bash 里用 curl 传中文 JSON 会乱码**（存储挂载点建成了 `/�洢A`），
+    起测试数据一律走 node 的 fetch，路径也要 `cygpath -w` 转 Windows 形式。
 
 ---
 
