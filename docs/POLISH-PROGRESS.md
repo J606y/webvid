@@ -9,9 +9,9 @@
 
 | 批次 | 状态 |
 |---|---|
-| A. 报错人话化 + Apple 风文案 | ✅ **已提交 `38c6402`** |
-| B. UX 反人类/不一致清单（28 项） | ✅ **26 项已修完并验证**；#19 用户明确不修；#20 按用户要求改成后台开关 |
-| 提交 | ⚠️ **B 尚未提交**——4 个文件与另一会话的 WIP 混在一起，需用户拍板（见文末） |
+| A. 报错人话化 + Apple 风文案 | ✅ 已提交 `38c6402` |
+| B. UX 反人类/不一致清单（28 项） | ✅ **26 项修完并验证**；#19 用户明确不修；#20 按用户要求改成后台开关 |
+| 提交与发布 | ✅ **已随 v2.0.0 发布（当前 Latest）**，README 与仓库 topics 一并更新（见文末） |
 
 用户对清单的决策原话：「播放入口不统一…这个不修是故意设置的；『所有视频/所有照片』实为随机
 200 条…这个也是故意设置的但是可以在后台加一个切换按钮…其他的条目全按照标准要求来修」。
@@ -114,35 +114,57 @@
 
 ---
 
-# ⚠️ 待用户拍板：提交怎么切
+# 提交与发布
 
-工作区里有 **8 个文件属于另一会话未完成的 `copy_file_workers`（文件级并发转存）**：
+## 提交链
 
-```
-go.mod  internal/conf/conf.go  internal/fs/fs.go  internal/fs/transfer.go
-internal/fs/transfer_test.go  internal/server/handler_admin.go
-internal/server/server.go  frontend/src/pages/Admin.vue
-```
-
-A 批次当时能干净分开，是因为改动完全没碰这 8 个。**这次碰了 4 个**：
-
-| 文件 | 里面同时有 |
+| 提交 | 内容 |
 |---|---|
-| `internal/conf/conf.go` | 别人的 `CopyFileWorkers()` + 我的 `MediaHomeSort()` |
-| `internal/server/handler_admin.go` | 别人的 `copy_file_workers` 三处 + 我的 `settingsMap` 重构、`media_home_sort`、钳位回传 |
-| `frontend/src/pages/Admin.vue` | 别人的「文件夹内并发」表单项 + 我的限速 `:max`、媒体库首页下拉、`saveSite` 回填 |
-| `internal/fs/fs.go` | 别人的 import/struct/New 三处 + 我的 `accessOK`/`navOK` 走 `VisibleBase` |
+| `38c6402` | A 批次：报错人话化 |
+| `f4c2ab1` | B 批次：UX 打磨 26 项 + 另一会话的 `copy_file_workers` |
+| `f5de724` | `conf.Version` → 2.0.0 |
+| `993f8c6` | README 重写 + 仓库描述与 topics |
 
-而且这 4 个与另外 4 个（`transfer.go` / `transfer_test.go` / `server.go` / `go.mod`）**互相依赖**
-（`handler_admin.go` 调 `s.fs.SetCopyFileWorkers`），拆开提交会直接编译不过。
+## 关于「一起提交」这个决定
 
-三个选项：
-1. **一起提交**（含别人的 `copy_file_workers`）——最省事，但把别人未完成的功能带进历史。
-2. **只提交不冲突的 37 个文件**——但 #20（后台开关）依赖 `conf.go`/`handler_admin.go`，
-   得连 `handler_auth.go` 一起排除；#24 的 fs 层旁路也会缺一半，功能半截。
-3. **手工拆 hunk** 分两次提交——干净，但要逐块核对，出错风险最高。
+本轮改动碰到了另一会话 `copy_file_workers`（文件级并发转存）的 4 个文件——
+`conf.go`（`CopyFileWorkers` vs `MediaHomeSort`）、`handler_admin.go`、`Admin.vue`、`fs.go`——
+而这 4 个又与 `transfer.go` / `transfer_test.go` / `server.go` / `go.mod` 互相依赖
+（`handler_admin.go` 调 `s.fs.SetCopyFileWorkers`），**拆开提交会直接编译不过**。
 
-**尚未执行任何提交。** 当前 HEAD = `38c6402`（A 批次）。
+用户决定一起提交，并要求先审 `copy_file_workers` 是否达标。**审查结论：达标**——
+- 共享状态全部加锁：`task.Task` 的 `SetTotal`/`SetFile`/`Add`、`limiter.Limiter`
+  （本就为多流共享设计）、测试里的 `fakeProgress`。
+- errgroup 的失败语义与原串行一致：首个错误取消 gctx、整任务失败，移动因此不删源。
+- 断点续传（目标同名同大小则跳过）在并发路径里保留。
+- 有针对性测试 `TestTransferParallelFiles`：验证 workers=4 时并发峰值 >1、workers=1 时恒 =1。
+
+两点如实记录：
+- **本机跑不了 `go test -race`**（需 cgo + gcc，未安装），并发安全是逐处核对共享状态得出的。
+- **未修的小瑕疵**：并发传输时任务抽屉的「当前文件」会在多个文件间跳（`copyOne` 里每个
+  文件都 `pr.SetFile`）。要修得动 `copyOne` 签名，会和那个会话的后续工作撞车，留待决定。
+
+## 发布
+
+**v2.0.0 已发布，当前 Latest**：tag `v2.0.0`，CI run `30143620030` success，
+资产 = 3 个 Linux 架构 tar.gz + checksums.txt，更新日志按 Apple 口径手写覆盖
+（新增 / 优化 / 修复 / 升级）。大版本号因改动面覆盖全站交互。
+
+发版踩到的两点：
+- `gh release view --json isLatest` 这个字段不存在，查 Latest 用
+  `gh api repos/J606y/webvid/releases/latest --jq .tag_name`。
+- notes 文件在 Bash 里用 heredoc 写（沿用既有教训：子代理 Write 的 `/tmp` 与 Bash 的不是同一处）。
+
+## README 与仓库元信息（`993f8c6`）
+
+按面向用户的口径重写：讲能做什么，不堆实现细节。同时修正两处过时内容——
+补上 **Google 云端硬盘**驱动与一键授权（1.9.0 就有，README 一直没写）；
+「忘记密码」原文写的是**删掉 `data/newlist.db`**（会连用户和存储配置一起清空），
+改为 `webvid reset-password`。
+
+仓库描述已设置，topics 17 个：`self-hosted` `personal-cloud` `cloud-storage` `media-server`
+`video-streaming` `file-manager` `onedrive` `google-drive` `pikpak` `telegram` `ffmpeg`
+`hls` `transcoding` `golang` `vue3` `sqlite` `nas`。
 
 ---
 
