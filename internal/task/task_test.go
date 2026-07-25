@@ -38,8 +38,57 @@ func TestSubmitDone(t *testing.T) {
 	if snap.Total != 100 || snap.Done != 100 {
 		t.Fatalf("Done/Total 不符: %+v", snap)
 	}
-	if snap.CurFile != "a.txt" {
-		t.Fatalf("CurFile 不符: %q", snap.CurFile)
+	// 终态无在途文件，CurFile 随之清空
+	if snap.CurFile != "" || snap.Active != 0 {
+		t.Fatalf("终态在途应清空: CurFile=%q Active=%d", snap.CurFile, snap.Active)
+	}
+}
+
+// TestFileTrackingStable 锁住展示语义：并发在途时取最早开始的文件，
+// 后开始的顶不掉它，只有它自己完成才前进——抽屉里的文件名因此不会跳。
+func TestFileTrackingStable(t *testing.T) {
+	tk := &Task{}
+	tk.FileStart("a.mp4")
+	tk.FileStart("b.mp4")
+	tk.FileStart("c.mp4")
+	if s := tk.snapshot(); s.CurFile != "a.mp4" || s.Active != 3 {
+		t.Fatalf("三个在途应展示最早的 a.mp4/3，实际 %q/%d", s.CurFile, s.Active)
+	}
+	tk.FileDone("b.mp4") // 后开始的先完成，展示不受影响
+	if s := tk.snapshot(); s.CurFile != "a.mp4" || s.Active != 2 {
+		t.Fatalf("b 完成后应仍展示 a.mp4/2，实际 %q/%d", s.CurFile, s.Active)
+	}
+	tk.FileDone("a.mp4") // 展示的那个完成了，才前进到剩下最早的
+	if s := tk.snapshot(); s.CurFile != "c.mp4" || s.Active != 1 {
+		t.Fatalf("a 完成后应前进到 c.mp4/1，实际 %q/%d", s.CurFile, s.Active)
+	}
+	tk.FileDone("c.mp4")
+	if s := tk.snapshot(); s.CurFile != "" || s.Active != 0 {
+		t.Fatalf("全部完成应清空，实际 %q/%d", s.CurFile, s.Active)
+	}
+	tk.FileDone("ghost.mp4") // 空集合上误删不应 panic
+	tk.SetFile("only.mp4")   // 单文件语义（离线下载）
+	if s := tk.snapshot(); s.CurFile != "only.mp4" || s.Active != 1 {
+		t.Fatalf("SetFile 应置为唯一在途，实际 %q/%d", s.CurFile, s.Active)
+	}
+	tk.FileDone("ghost.mp4") // 名字不匹配不应动别人
+	if s := tk.snapshot(); s.CurFile != "only.mp4" || s.Active != 1 {
+		t.Fatalf("FileDone 不匹配时集合不应改动，实际 %q/%d", s.CurFile, s.Active)
+	}
+}
+
+// TestFileTrackingSameName 不同目录下的同名文件同时在途：按名删首个，计数仍准。
+func TestFileTrackingSameName(t *testing.T) {
+	tk := &Task{}
+	tk.FileStart("cover.jpg")
+	tk.FileStart("cover.jpg")
+	tk.FileDone("cover.jpg")
+	if s := tk.snapshot(); s.CurFile != "cover.jpg" || s.Active != 1 {
+		t.Fatalf("同名两个走完一个应剩 cover.jpg/1，实际 %q/%d", s.CurFile, s.Active)
+	}
+	tk.FileDone("cover.jpg")
+	if s := tk.snapshot(); s.Active != 0 {
+		t.Fatalf("同名全部完成应清空，实际 %d", s.Active)
 	}
 }
 

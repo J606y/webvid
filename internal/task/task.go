@@ -53,8 +53,9 @@ type Task struct {
 	State     State  `json:"state"`
 	Total     int64  `json:"total"`
 	Done      int64  `json:"done"`
-	Speed     int64  `json:"speed"` // B/s
-	CurFile   string `json:"cur_file"`
+	Speed     int64  `json:"speed"`        // B/s
+	CurFile   string `json:"cur_file"`     // 在途最早的文件；与 Active 均由 active 派生，仅 snapshot 填充
+	Active    int    `json:"active_files"` // 同时在途的文件数，>1 即并发复制中
 	Err       string `json:"error"`
 	CreatedAt string `json:"created_at"`
 
@@ -63,9 +64,10 @@ type Task struct {
 	fn       Func
 	lastT    time.Time
 	lastDone int64
+	active   []string // 在途文件名，按开始先后排列；派生 CurFile 与 Active
 }
 
-// SetTotal / SetFile / Add 结构化满足 fs.Progress 接口（鸭子类型，无需包间 import）。
+// SetTotal / FileStart / FileDone / Add 结构化满足 fs.Progress 接口（鸭子类型，无需包间 import）。
 
 func (t *Task) SetTotal(n int64) {
 	t.mu.Lock()
@@ -73,9 +75,32 @@ func (t *Task) SetTotal(n int64) {
 	t.mu.Unlock()
 }
 
+// FileStart / FileDone 标记单个文件进出在途集合。并发复制时多个文件同时在途，
+// 展示取 active[0]——最早开始且仍未完成的那个：它只在自己完成时前进，
+// 不会因别的文件开始而被顶掉，所以抽屉里的文件名单调推进、不跳动。
+func (t *Task) FileStart(name string) {
+	t.mu.Lock()
+	t.active = append(t.active, name)
+	t.mu.Unlock()
+}
+
+// FileDone 移除一个同名在途项（不同目录可有同名文件，按名删首个即可，
+// 计数与展示都只关心「还有几个在传、最早那个叫什么」）。
+func (t *Task) FileDone(name string) {
+	t.mu.Lock()
+	for i, n := range t.active {
+		if n == name {
+			t.active = append(t.active[:i], t.active[i+1:]...)
+			break
+		}
+	}
+	t.mu.Unlock()
+}
+
+// SetFile 把在途集合置为唯一一个文件——离线下载等全程单文件的任务用。
 func (t *Task) SetFile(name string) {
 	t.mu.Lock()
-	t.CurFile = name
+	t.active = []string{name}
 	t.mu.Unlock()
 }
 
@@ -97,10 +122,14 @@ func (t *Task) Add(n int64) {
 func (t *Task) snapshot() *Task {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	cur := ""
+	if len(t.active) > 0 {
+		cur = t.active[0]
+	}
 	return &Task{
 		ID: t.ID, Name: t.Name, Group: t.Group, Owner: t.Owner, State: t.State,
 		Total: t.Total, Done: t.Done, Speed: t.Speed,
-		CurFile: t.CurFile, Err: t.Err, CreatedAt: t.CreatedAt,
+		CurFile: cur, Active: len(t.active), Err: t.Err, CreatedAt: t.CreatedAt,
 	}
 }
 
@@ -202,6 +231,7 @@ func (m *Manager) run(t *Task) {
 	t.mu.Lock()
 	t.cancel = nil
 	t.Speed = 0
+	t.active = nil // 终态无在途文件；失败/取消时残留文件名对用户没有意义
 	switch {
 	case err == nil:
 		t.State = StateDone
@@ -351,7 +381,7 @@ func (m *Manager) Retry(id string, owner int64, isAdmin bool) error {
 	}
 	t.State = StatePending
 	t.Done, t.Speed, t.Total = 0, 0, 0
-	t.Err, t.CurFile = "", ""
+	t.Err, t.active = "", nil
 	t.lastT, t.lastDone = time.Time{}, 0
 	t.mu.Unlock()
 	m.mu.Lock()

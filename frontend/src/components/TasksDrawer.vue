@@ -22,7 +22,9 @@
           <template v-if="t.state === 'running'">
             {{ formatSize(t.done) }} / {{ t.total ? formatSize(t.total) : '…' }}
             <template v-if="t.speed"> · {{ formatSize(t.speed) }}/s</template>
+            <!-- cur_file 是最早开始且仍在传的文件；并发时补上同时在传的总数 -->
             <template v-if="t.cur_file"> · {{ t.cur_file }}</template>
+            <template v-if="t.active_files > 1"> 等 {{ t.active_files }} 个</template>
           </template>
           <template v-else-if="t.state === 'error'">{{ t.error }}</template>
         </span>

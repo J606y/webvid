@@ -21,15 +21,24 @@ import (
 
 // fakeProgress 记录进度回调（测试断言用）。
 type fakeProgress struct {
-	mu    sync.Mutex
-	total int64
-	done  int64
-	files []string
+	mu     sync.Mutex
+	total  int64
+	done   int64
+	files  []string // 曾开始复制的文件，按开始先后
+	active int      // 当前在途数，任务收尾必须归零
 }
 
 func (p *fakeProgress) SetTotal(n int64) { p.mu.Lock(); p.total = n; p.mu.Unlock() }
-func (p *fakeProgress) SetFile(s string) { p.mu.Lock(); p.files = append(p.files, s); p.mu.Unlock() }
-func (p *fakeProgress) Add(n int64)      { p.mu.Lock(); p.done += n; p.mu.Unlock() }
+
+func (p *fakeProgress) FileStart(s string) {
+	p.mu.Lock()
+	p.files = append(p.files, s)
+	p.active++
+	p.mu.Unlock()
+}
+
+func (p *fakeProgress) FileDone(string) { p.mu.Lock(); p.active--; p.mu.Unlock() }
+func (p *fakeProgress) Add(n int64)     { p.mu.Lock(); p.done += n; p.mu.Unlock() }
 
 func adminUser() *user.User {
 	return &user.User{ID: 1, Username: "admin", Role: "admin", BasePath: "/", CanWrite: true, Enabled: true}
@@ -173,9 +182,13 @@ func TestTransferResumeSkipsExisting(t *testing.T) {
 	if pr.total != 12 || pr.done != 12 {
 		t.Fatalf("进度不符: total=%d done=%d（应 12/12）", pr.total, pr.done)
 	}
-	// 只有 b、c 真正走复制（SetFile 上报），a 被跳过不上报
+	// 只有 b、c 真正走复制（FileStart 上报），a 被跳过不上报
 	if len(pr.files) != 2 {
-		t.Fatalf("应仅 2 个文件走复制(b/c)，SetFile 次数=%d: %v", len(pr.files), pr.files)
+		t.Fatalf("应仅 2 个文件走复制(b/c)，FileStart 次数=%d: %v", len(pr.files), pr.files)
+	}
+	// 每个 FileStart 都有配对的 FileDone，收尾不留在途项
+	if pr.active != 0 {
+		t.Fatalf("收尾在途文件数应为 0，实际 %d", pr.active)
 	}
 }
 
@@ -504,5 +517,85 @@ func TestTransferParallelFiles(t *testing.T) {
 	}
 	if peak := src2.peak.Load(); peak != 1 {
 		t.Fatalf("SetCopyFileWorkers(1) 下并发峰值应=1，实际 %d", peak)
+	}
+}
+
+// stableProgress 按任务层的展示规则（取最早在途的文件）记录展示值的变化序列。
+type stableProgress struct {
+	mu     sync.Mutex
+	active []string
+	seq    []string // 展示值每次变化后的取值，连续相同只记一次
+	peak   int
+}
+
+func (p *stableProgress) SetTotal(int64) {}
+func (p *stableProgress) Add(int64)      {}
+
+func (p *stableProgress) FileStart(name string) {
+	p.mu.Lock()
+	p.active = append(p.active, name)
+	p.record()
+	p.mu.Unlock()
+}
+
+func (p *stableProgress) FileDone(name string) {
+	p.mu.Lock()
+	for i, n := range p.active {
+		if n == name {
+			p.active = append(p.active[:i], p.active[i+1:]...)
+			break
+		}
+	}
+	p.record()
+	p.mu.Unlock()
+}
+
+// record 调用方须持锁。
+func (p *stableProgress) record() {
+	if len(p.active) > p.peak {
+		p.peak = len(p.active)
+	}
+	cur := ""
+	if len(p.active) > 0 {
+		cur = p.active[0]
+	}
+	if len(p.seq) == 0 || p.seq[len(p.seq)-1] != cur {
+		p.seq = append(p.seq, cur)
+	}
+}
+
+// TestTransferParallelCurFileStable 真实并发路径下的展示稳定性：
+// 每个文件名在展示序列里最多出现一次——出现两次即意味着展示曾被别的文件顶掉又切回来，
+// 也就是抽屉里看到的「文件名在几个文件之间跳」。
+func TestTransferParallelCurFileStable(t *testing.T) {
+	dirB := t.TempDir()
+	src := &concProbeDriver{n: 6}
+	f := newTestFS(
+		&Mount{ID: 1, Path: "/并发源", Driver: "probe", Enabled: true, drv: src},
+		newLocalMount(t, 2, "/存储B", dirB),
+	)
+	f.SetCopyFileWorkers(4)
+	pr := &stableProgress{}
+	if err := f.Transfer(context.Background(), adminUser(), "/并发源/d", "/存储B", false, pr); err != nil {
+		t.Fatalf("Transfer 并发: %v", err)
+	}
+	if pr.peak < 2 {
+		t.Fatalf("在途峰值应 >1（否则没测到并发），实际 %d", pr.peak)
+	}
+	if len(pr.active) != 0 {
+		t.Fatalf("收尾在途应为空，实际 %v", pr.active)
+	}
+	seen := map[string]bool{}
+	for _, name := range pr.seq {
+		if name == "" { // 在途短暂清空是正常的
+			continue
+		}
+		if seen[name] {
+			t.Fatalf("%s 在展示序列里出现两次（展示被顶掉又切回=跳动）: %v", name, pr.seq)
+		}
+		seen[name] = true
+	}
+	if len(seen) == 0 {
+		t.Fatalf("展示序列没有任何文件名: %v", pr.seq)
 	}
 }

@@ -17,9 +17,12 @@ import (
 )
 
 // Progress 由任务层实现（task.Task 结构化满足），Transfer 通过它上报进度。
+// FileStart/FileDone 成对上报而非「设置当前文件」：文件级并发时多个文件同时在途，
+// 单值语义会被后开始的文件不断顶掉，展示就在几个名字之间跳。
 type Progress interface {
 	SetTotal(n int64)
-	SetFile(name string)
+	FileStart(name string)
+	FileDone(name string)
 	Add(n int64)
 }
 
@@ -158,7 +161,8 @@ func (f *FS) planDir(ctx context.Context, sm *Mount, srcRel, dstRel string, file
 
 // copyOne 复制单个文件，文件级重试 2 次（共 3 次尝试）；失败重试前回退已计进度。
 func (f *FS) copyOne(ctx context.Context, sm *Mount, up driver.Uploader, fj fileJob, pr Progress) error {
-	pr.SetFile(fj.name)
+	pr.FileStart(fj.name)
+	defer pr.FileDone(fj.name) // 含重试耗尽、ctx 取消等所有出口，不留悬空在途项
 	var lastErr error
 	for attempt := 0; attempt < 3; attempt++ {
 		if err := ctx.Err(); err != nil {
