@@ -7,24 +7,30 @@ import (
 	"io"
 	"net/http"
 	"path"
+	"strings"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 
 	"newlist/internal/driver"
+	"newlist/internal/model"
 	"newlist/internal/stream"
 	"newlist/internal/user"
 	"newlist/internal/util"
 )
 
 // Progress 由任务层实现（task.Task 结构化满足），Transfer 通过它上报进度。
+// 规划一出来就把完整清单交上去（SetFiles），之后一律按下标上报——后台要看的
+// 「文件夹内的情况」就是这份清单的状态迁移：等待 → 传输中 → 完成/跳过/失败。
 // FileStart/FileDone 成对上报而非「设置当前文件」：文件级并发时多个文件同时在途，
 // 单值语义会被后开始的文件不断顶掉，展示就在几个名字之间跳。
 type Progress interface {
 	SetTotal(n int64)
-	FileStart(name string)
-	FileDone(name string)
-	Add(n int64)
+	SetFiles(items []model.TransferFile)
+	FileStart(i int)
+	FileSkip(i int)
+	FileDone(i int, err error)
+	AddFile(i int, n int64)
 }
 
 // SameStorage 判断 src 与 dstDir 是否落在同一存储，并给出目标是否可上传。
@@ -43,6 +49,7 @@ func (f *FS) SameStorage(u *user.User, src, dstDir string) (same bool, dstUpload
 }
 
 type fileJob struct {
+	idx       int    // 在任务清单里的下标，进度按它上报
 	srcRel    string // 源条目相对路径
 	dstDirRel string // 目标所在目录相对路径
 	name      string
@@ -83,10 +90,15 @@ func (f *FS) Transfer(ctx context.Context, u *user.User, src, dstDir string, isM
 		files = []fileJob{{srcRel: srcRel, dstDirRel: dstRel, name: base, size: sfi.Size}}
 	}
 
+	// 清单先交给任务层：后台据此展示文件夹内每个文件的状态，含还没轮到的那些。
 	var total int64
-	for _, fj := range files {
-		total += fj.size
+	items := make([]model.TransferFile, len(files))
+	for i := range files {
+		files[i].idx = i
+		items[i] = model.TransferFile{Path: relTo(srcRel, files[i].srcRel), Size: files[i].size}
+		total += files[i].size
 	}
+	pr.SetFiles(items)
 	pr.SetTotal(total)
 
 	for _, dir := range dirs {
@@ -139,13 +151,16 @@ func (f *FS) Transfer(ctx context.Context, u *user.User, src, dstDir string, isM
 			// 故同名同大小即视为已完成，安全。existing/scanned 在起 goroutine 前建好，只读。
 			target := util.JoinRel(fj.dstDirRel, fj.name)
 			if fj.size > 0 {
+				skip := false
 				if scanned[fj.dstDirRel] {
-					if sz, ok := existing[target]; ok && sz == fj.size {
-						pr.Add(fj.size)
-						return nil
-					}
+					sz, ok := existing[target]
+					skip = ok && sz == fj.size
 				} else if fi, err := dm.drv.Stat(gctx, target); err == nil && !fi.IsDir && fi.Size == fj.size {
-					pr.Add(fj.size)
+					skip = true
+				}
+				if skip {
+					pr.AddFile(fj.idx, fj.size)
+					pr.FileSkip(fj.idx)
 					return nil
 				}
 			}
@@ -180,6 +195,18 @@ func dstDirsOf(files []fileJob) []string {
 		}
 	}
 	return out
+}
+
+// relTo 把源文件路径压成相对转存根的展示路径：转整个文件夹时保留子目录层级
+//（「纪录片/第 1 集.mkv」），转单个文件时就是文件名。
+func relTo(root, p string) string {
+	if root == "" {
+		return p // 转整个挂载根，路径本身就是相对的
+	}
+	if r := strings.TrimPrefix(p, root+"/"); r != p {
+		return r
+	}
+	return path.Base(p)
 }
 
 // planDir 递归枚举源目录：目标目录入 dirs（先父后子），文件入 files。
@@ -226,16 +253,17 @@ func (f *FS) copyRetryWait(attempt int, err error) time.Duration {
 
 // copyOne 复制单个文件，文件级重试 2 次（共 3 次尝试）；失败重试前回退已计进度。
 // 重试之间会退避——撞限流时立刻重连只会把配额烧得更快，本来能自愈的也救不回来。
-func (f *FS) copyOne(ctx context.Context, sm *Mount, up driver.Uploader, fj fileJob, pr Progress) error {
-	pr.FileStart(fj.name)
-	defer pr.FileDone(fj.name) // 含重试耗尽、ctx 取消等所有出口，不留悬空在途项
+func (f *FS) copyOne(ctx context.Context, sm *Mount, up driver.Uploader, fj fileJob, pr Progress) (retErr error) {
+	pr.FileStart(fj.idx)
+	// 含重试耗尽、ctx 取消等所有出口，不留悬空在途项；错误一并落到清单那一行
+	defer func() { pr.FileDone(fj.idx, retErr) }()
 	var lastErr error
 	stage := stageSource
 	for attempt := 1; attempt <= 3; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		cr := &countingReader{ctx: ctx, pr: pr}
+		cr := &countingReader{ctx: ctx, pr: pr, idx: fj.idx}
 		stage = stageSource
 		err := func() error {
 			lk, err := sm.drv.Link(ctx, fj.srcRel)
@@ -293,7 +321,7 @@ func (f *FS) copyOne(ctx context.Context, sm *Mount, up driver.Uploader, fj file
 			stage = stageSource
 		}
 		lastErr = err
-		pr.Add(-cr.n) // 回退本次已计字节
+		pr.AddFile(fj.idx, -cr.n) // 回退本次已计字节
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -328,6 +356,7 @@ type countingReader struct {
 	ctx     context.Context
 	r       io.Reader
 	pr      Progress
+	idx     int // 所属文件在清单里的下标
 	n       int64
 	readErr error // 源端读取错误：上传中途挂了时用来判断锅在哪一侧
 }
@@ -339,7 +368,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	n, err := c.r.Read(p)
 	if n > 0 {
 		c.n += int64(n)
-		c.pr.Add(int64(n))
+		c.pr.AddFile(c.idx, int64(n))
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
 		c.readErr = err

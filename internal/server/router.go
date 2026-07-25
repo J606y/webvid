@@ -45,6 +45,7 @@ func (s *Server) Router() *gin.Engine {
 	authed.GET("/raw/*path", s.rawHandler)
 	authed.HEAD("/raw/*path", s.rawHandler)
 	authed.GET("/tasks", s.taskList)
+	authed.GET("/tasks/:id/files", s.taskFiles)
 	authed.POST("/tasks/:id/cancel", s.taskCancel)
 	authed.POST("/tasks/:id/retry", s.taskRetry)
 	authed.POST("/tasks/:id/remove", s.taskRemove)

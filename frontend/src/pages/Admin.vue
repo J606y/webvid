@@ -77,6 +77,11 @@
       </el-tab-pane>
 
       <!-- 索引管理（文件索引 + 封面/源信息预载） -->
+      <!-- 传输任务（比顶栏抽屉多一层：能看文件夹内的逐文件状态） -->
+      <el-tab-pane label="传输任务" name="tasks">
+        <AdminTasks :active="tab === 'tasks'" />
+      </el-tab-pane>
+
       <el-tab-pane label="索引管理" name="index">
         <AdminIndex :active="tab === 'index'" />
       </el-tab-pane>
@@ -92,6 +97,7 @@ import { api } from '../utils/api'
 import { useApp } from '../stores/app'
 import AdminStorage from './admin/AdminStorage.vue'
 import AdminUsers from './admin/AdminUsers.vue'
+import AdminTasks from './admin/AdminTasks.vue'
 import AdminIndex from './admin/AdminIndex.vue'
 
 const app = useApp()

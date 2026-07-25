@@ -2,6 +2,8 @@ package server
 
 import (
 	"errors"
+	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 
@@ -25,6 +27,35 @@ func taskError(c *gin.Context, err error) {
 func (s *Server) taskList(c *gin.Context) {
 	u := getUser(c)
 	OK(c, s.tasks.List(u.ID, u.IsAdmin()))
+}
+
+// fileStates 是清单允许的筛选值；传别的（含手滑的错别字）一律当「全部」，
+// 免得筛出个空列表让人以为文件没了。
+var fileStates = map[task.FileState]bool{
+	task.FilePending: true, task.FileRunning: true, task.FileDone: true,
+	task.FileSkipped: true, task.FileError: true,
+}
+
+// GET /api/tasks/:id/files —— 任务的文件清单：按状态筛、按路径搜、分页取。
+// 一个文件夹转存动辄几万条，只按需给一页。
+func (s *Server) taskFiles(c *gin.Context) {
+	u := getUser(c)
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "0"))
+	offset, _ := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	q := task.FilesQuery{
+		Q:      strings.TrimSpace(c.Query("q")),
+		Offset: offset,
+		Limit:  limit,
+	}
+	if st := task.FileState(c.Query("state")); fileStates[st] {
+		q.State = st
+	}
+	page, err := s.tasks.Files(c.Param("id"), u.ID, u.IsAdmin(), q)
+	if err != nil {
+		taskError(c, err)
+		return
+	}
+	OK(c, page)
 }
 
 // POST /api/tasks/:id/cancel

@@ -14,6 +14,13 @@ type FileInfo struct {
 	Modified time.Time `json:"modified"`
 }
 
+// TransferFile 是转存任务规划出的一个待传文件（清单项）。
+// 由 fs 规划、task 记录进度，放在 model 里让两边共用而不互相 import。
+type TransferFile struct {
+	Path string // 相对转存根的展示路径，如「纪录片/第 1 集.mkv」
+	Size int64
+}
+
 var videoExts = map[string]bool{
 	"mp4": true, "mkv": true, "avi": true, "mov": true, "wmv": true,
 	"flv": true, "webm": true, "m4v": true, "ts": true, "m2ts": true,

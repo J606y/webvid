@@ -20,26 +20,57 @@ import (
 	"newlist/internal/util"
 )
 
-// fakeProgress 记录进度回调（测试断言用）。
+// fakeProgress 记录进度回调（测试断言用）。plan 是规划清单，下标即上报用的 i。
 type fakeProgress struct {
-	mu     sync.Mutex
-	total  int64
-	done   int64
-	files  []string // 曾开始复制的文件，按开始先后
-	active int      // 当前在途数，任务收尾必须归零
+	mu      sync.Mutex
+	total   int64
+	done    int64
+	plan    []model.TransferFile
+	files   []string // 曾开始复制的文件（展示路径），按开始先后
+	skipped []string // 断点续传跳过的文件
+	errs    []string // 上报失败的文件
+	active  int      // 当前在途数，任务收尾必须归零
 }
 
 func (p *fakeProgress) SetTotal(n int64) { p.mu.Lock(); p.total = n; p.mu.Unlock() }
 
-func (p *fakeProgress) FileStart(s string) {
+func (p *fakeProgress) SetFiles(items []model.TransferFile) {
 	p.mu.Lock()
-	p.files = append(p.files, s)
+	p.plan = items
+	p.mu.Unlock()
+}
+
+// path 取第 i 项的展示路径，须持锁。
+func (p *fakeProgress) path(i int) string {
+	if i < 0 || i >= len(p.plan) {
+		return ""
+	}
+	return p.plan[i].Path
+}
+
+func (p *fakeProgress) FileStart(i int) {
+	p.mu.Lock()
+	p.files = append(p.files, p.path(i))
 	p.active++
 	p.mu.Unlock()
 }
 
-func (p *fakeProgress) FileDone(string) { p.mu.Lock(); p.active--; p.mu.Unlock() }
-func (p *fakeProgress) Add(n int64)     { p.mu.Lock(); p.done += n; p.mu.Unlock() }
+func (p *fakeProgress) FileSkip(i int) {
+	p.mu.Lock()
+	p.skipped = append(p.skipped, p.path(i))
+	p.mu.Unlock()
+}
+
+func (p *fakeProgress) FileDone(i int, err error) {
+	p.mu.Lock()
+	p.active--
+	if err != nil {
+		p.errs = append(p.errs, p.path(i))
+	}
+	p.mu.Unlock()
+}
+
+func (p *fakeProgress) AddFile(_ int, n int64) { p.mu.Lock(); p.done += n; p.mu.Unlock() }
 
 // countingLocal 包装 local 驱动统计 Stat/List 次数，用来盯住断点续传的请求量——
 // 云盘上每次 Stat 都可能是一整轮目录列举，回归时必须能看出请求数没被打回原形。
@@ -281,6 +312,13 @@ func TestTransferResumeScansOncePerDir(t *testing.T) {
 	}
 	if pr.done != int64(n*size) {
 		t.Fatalf("跳过的文件也要计进度: done=%d 应为 %d", pr.done, n*size)
+	}
+	// 清单要如实标出「跳过」，后台才能看出这一轮哪些是真传了、哪些是命中断点续传
+	if len(pr.skipped) != n {
+		t.Fatalf("应上报 %d 个跳过，实际 %d: %v", n, len(pr.skipped), pr.skipped)
+	}
+	if len(pr.plan) != n || pr.plan[0].Path != "p00.jpg" || pr.plan[0].Size != size {
+		t.Fatalf("清单应含 %d 项且带路径与大小，实际 %d: %+v", n, len(pr.plan), pr.plan)
 	}
 	if stats := cnt.stats.Load() - baseStats; stats != 0 {
 		t.Fatalf("预扫描后不应再逐文件 Stat，实际 %d 次（每文件一次=打回旧实现）", stats)
@@ -682,26 +720,43 @@ func TestTransferParallelFiles(t *testing.T) {
 // stableProgress 按任务层的展示规则（取最早在途的文件）记录展示值的变化序列。
 type stableProgress struct {
 	mu     sync.Mutex
+	plan   []model.TransferFile
 	active []string
 	seq    []string // 展示值每次变化后的取值，连续相同只记一次
 	peak   int
 }
 
-func (p *stableProgress) SetTotal(int64) {}
-func (p *stableProgress) Add(int64)      {}
+func (p *stableProgress) SetTotal(int64)     {}
+func (p *stableProgress) AddFile(int, int64) {}
+func (p *stableProgress) FileSkip(int)       {}
 
-func (p *stableProgress) FileStart(name string) {
+func (p *stableProgress) SetFiles(items []model.TransferFile) {
 	p.mu.Lock()
-	p.active = append(p.active, name)
+	p.plan = items
+	p.mu.Unlock()
+}
+
+// path 取第 i 项的展示路径，须持锁。
+func (p *stableProgress) path(i int) string {
+	if i < 0 || i >= len(p.plan) {
+		return ""
+	}
+	return p.plan[i].Path
+}
+
+func (p *stableProgress) FileStart(i int) {
+	p.mu.Lock()
+	p.active = append(p.active, p.path(i))
 	p.record()
 	p.mu.Unlock()
 }
 
-func (p *stableProgress) FileDone(name string) {
+func (p *stableProgress) FileDone(i int, _ error) {
 	p.mu.Lock()
-	for i, n := range p.active {
+	name := p.path(i)
+	for k, n := range p.active {
 		if n == name {
-			p.active = append(p.active[:i], p.active[i+1:]...)
+			p.active = append(p.active[:k], p.active[k+1:]...)
 			break
 		}
 	}

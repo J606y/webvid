@@ -41,6 +41,8 @@ export const api = {
 
   tasks: {
     list: () => http.get('/tasks'),
+    // 文件清单：params 支持 state/q/offset/limit（后台「查看文件」用）
+    files: (id, params) => http.get(`/tasks/${id}/files`, { params }),
     cancel: (id) => http.post(`/tasks/${id}/cancel`),
     retry: (id) => http.post(`/tasks/${id}/retry`),
     remove: (id) => http.post(`/tasks/${id}/remove`),

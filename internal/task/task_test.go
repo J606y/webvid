@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"newlist/internal/model"
 )
 
 // waitState 轮询等待任务进入期望状态，超时报错。
@@ -44,51 +46,112 @@ func TestSubmitDone(t *testing.T) {
 	}
 }
 
+// plan 建一份清单（下标即上报用的 i）。
+func plan(tk *Task, paths ...string) {
+	items := make([]model.TransferFile, len(paths))
+	for i, p := range paths {
+		items[i] = model.TransferFile{Path: p, Size: 10}
+	}
+	tk.SetFiles(items)
+}
+
 // TestFileTrackingStable 锁住展示语义：并发在途时取最早开始的文件，
 // 后开始的顶不掉它，只有它自己完成才前进——抽屉里的文件名因此不会跳。
 func TestFileTrackingStable(t *testing.T) {
 	tk := &Task{}
-	tk.FileStart("a.mp4")
-	tk.FileStart("b.mp4")
-	tk.FileStart("c.mp4")
+	plan(tk, "剧集/a.mp4", "剧集/b.mp4", "剧集/c.mp4")
+	tk.FileStart(0)
+	tk.FileStart(1)
+	tk.FileStart(2)
+	// 展示只给文件名，不给整条子路径——抽屉窄，路径会被截断成看不出是哪个文件
 	if s := tk.snapshot(); s.CurFile != "a.mp4" || s.Active != 3 {
 		t.Fatalf("三个在途应展示最早的 a.mp4/3，实际 %q/%d", s.CurFile, s.Active)
 	}
-	tk.FileDone("b.mp4") // 后开始的先完成，展示不受影响
+	tk.FileDone(1, nil) // 后开始的先完成，展示不受影响
 	if s := tk.snapshot(); s.CurFile != "a.mp4" || s.Active != 2 {
 		t.Fatalf("b 完成后应仍展示 a.mp4/2，实际 %q/%d", s.CurFile, s.Active)
 	}
-	tk.FileDone("a.mp4") // 展示的那个完成了，才前进到剩下最早的
+	tk.FileDone(0, nil) // 展示的那个完成了，才前进到剩下最早的
 	if s := tk.snapshot(); s.CurFile != "c.mp4" || s.Active != 1 {
 		t.Fatalf("a 完成后应前进到 c.mp4/1，实际 %q/%d", s.CurFile, s.Active)
 	}
-	tk.FileDone("c.mp4")
+	tk.FileDone(2, nil)
 	if s := tk.snapshot(); s.CurFile != "" || s.Active != 0 {
 		t.Fatalf("全部完成应清空，实际 %q/%d", s.CurFile, s.Active)
 	}
-	tk.FileDone("ghost.mp4") // 空集合上误删不应 panic
-	tk.SetFile("only.mp4")   // 单文件语义（离线下载）
+	tk.FileDone(99, nil)   // 越界下标不应 panic
+	tk.FileStart(-1)       // 同上
+	tk.SetFile("only.mp4") // 单文件语义（离线下载）
 	if s := tk.snapshot(); s.CurFile != "only.mp4" || s.Active != 1 {
 		t.Fatalf("SetFile 应置为唯一在途，实际 %q/%d", s.CurFile, s.Active)
 	}
-	tk.FileDone("ghost.mp4") // 名字不匹配不应动别人
-	if s := tk.snapshot(); s.CurFile != "only.mp4" || s.Active != 1 {
-		t.Fatalf("FileDone 不匹配时集合不应改动，实际 %q/%d", s.CurFile, s.Active)
+}
+
+// TestFileStates 锁住清单的状态与计数：完成/跳过/失败/取消各自归位，计数增量维护要对得上。
+func TestFileStates(t *testing.T) {
+	tk := &Task{}
+	plan(tk, "a.mkv", "b.mkv", "c.mkv", "d.mkv")
+	if c := tk.snapshot().Files; c.Total != 4 || c.Pending != 4 {
+		t.Fatalf("规划后应 4 项全等待，实际 %+v", c)
+	}
+	tk.FileStart(0)
+	tk.AddFile(0, 4)
+	tk.FileDone(0, nil)
+	tk.AddFile(1, 10)
+	tk.FileSkip(1)
+	tk.FileStart(2)
+	tk.FileDone(2, errors.New("boom"))
+	tk.FileStart(3)
+	tk.FileDone(3, context.Canceled)
+
+	c := tk.snapshot().Files
+	if c.Done != 1 || c.Skipped != 1 || c.Error != 1 || c.Pending != 1 || c.Running != 0 {
+		t.Fatalf("四种结局计数不符: %+v", c)
+	}
+	page, err := (&Manager{tasks: map[string]*Task{"x": tk}}).Files("x", 0, true, FilesQuery{})
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	if len(page.Items) != 4 || page.Total != 4 {
+		t.Fatalf("应取回 4 项，实际 %d/%d", len(page.Items), page.Total)
+	}
+	// 完成的按整个文件大小记满；失败的留人话原因；取消的回落等待且进度作废
+	if f := page.Items[0]; f.State != FileDone || f.Done != f.Size {
+		t.Fatalf("完成项不符: %+v", f)
+	}
+	if f := page.Items[1]; f.State != FileSkipped || f.Done != f.Size {
+		t.Fatalf("跳过项应记满进度: %+v", f)
+	}
+	if f := page.Items[2]; f.State != FileError || !strings.Contains(f.Err, "boom") {
+		t.Fatalf("失败项应带原因: %+v", f)
+	}
+	if f := page.Items[3]; f.State != FilePending || f.Done != 0 {
+		t.Fatalf("取消项应回落等待且进度归零: %+v", f)
 	}
 }
 
-// TestFileTrackingSameName 不同目录下的同名文件同时在途：按名删首个，计数仍准。
-func TestFileTrackingSameName(t *testing.T) {
+// TestFilesQuery：按状态筛、按路径搜、分页——几万条清单只按需给一页。
+func TestFilesQuery(t *testing.T) {
 	tk := &Task{}
-	tk.FileStart("cover.jpg")
-	tk.FileStart("cover.jpg")
-	tk.FileDone("cover.jpg")
-	if s := tk.snapshot(); s.CurFile != "cover.jpg" || s.Active != 1 {
-		t.Fatalf("同名两个走完一个应剩 cover.jpg/1，实际 %q/%d", s.CurFile, s.Active)
+	plan(tk, "剧集/S01E01.mkv", "剧集/S01E02.mkv", "花絮/预告.mp4", "封面.jpg")
+	tk.FileStart(0)
+	tk.FileDone(0, nil)
+	m := &Manager{tasks: map[string]*Task{"x": tk}}
+
+	page, _ := m.Files("x", 0, true, FilesQuery{State: FilePending})
+	if page.Total != 3 || page.Counts.Total != 4 {
+		t.Fatalf("状态筛选应剩 3 项、计数仍为全量 4: total=%d counts=%+v", page.Total, page.Counts)
 	}
-	tk.FileDone("cover.jpg")
-	if s := tk.snapshot(); s.Active != 0 {
-		t.Fatalf("同名全部完成应清空，实际 %d", s.Active)
+	page, _ = m.Files("x", 0, true, FilesQuery{Q: "s01e"})
+	if page.Total != 2 {
+		t.Fatalf("路径搜索应命中 2 项（不区分大小写），实际 %d", page.Total)
+	}
+	page, _ = m.Files("x", 0, true, FilesQuery{Offset: 1, Limit: 2})
+	if len(page.Items) != 2 || page.Total != 4 || page.Items[0].Path != "剧集/S01E02.mkv" {
+		t.Fatalf("分页不符: items=%d total=%d first=%q", len(page.Items), page.Total, page.Items[0].Path)
+	}
+	if _, err := m.Files("x", 9, false, FilesQuery{}); !errors.Is(err, ErrForbidden) {
+		t.Fatal("非所有者且非 admin 应被拒")
 	}
 }
 
