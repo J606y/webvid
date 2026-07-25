@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-const Version = "1.9.1"
+const Version = "2.0.0"
 
 // Store 是 settings 表的带缓存读写封装。
 type Store struct {
