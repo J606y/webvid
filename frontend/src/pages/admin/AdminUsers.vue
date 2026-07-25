@@ -48,21 +48,28 @@
             autocomplete="new-password" name="new-user-password"
             :placeholder="editingUser?.id ? '留空则不修改' : '留空则自动生成'" />
         </el-form-item>
+        <!-- 编辑自己时角色与启用锁定：降级或停用当前账号会当场自锁（保存即 401 被踢，
+             且再登不进）。后端有同样的拦截，这里只是不让用户走到那一步。 -->
         <el-form-item label="角色">
-          <el-select v-model="userForm.role" style="width: 100%">
+          <el-select v-model="userForm.role" :disabled="isSelf" style="width: 100%">
             <el-option label="用户" value="user" />
             <el-option label="管理员" value="admin" />
           </el-select>
         </el-form-item>
+        <!-- 管理员不受可见根路径限制（同「允许写入」对管理员恒开），控件一并禁用，
+             免得填了个值却毫无作用 -->
         <el-form-item label="可见根路径">
-          <el-input v-model="userForm.base_path" placeholder="/，或 /某目录 限定视野" />
+          <el-input v-model="userForm.base_path" :disabled="userForm.role === 'admin'"
+            placeholder="/，或 /某目录 限定视野" />
+          <div v-if="userForm.role === 'admin'" class="dim field-help">管理员可见全部内容，不受此项限制。</div>
         </el-form-item>
         <el-form-item label="允许写入">
           <el-switch v-model="userForm.can_write" :disabled="userForm.role === 'admin'" />
         </el-form-item>
         <el-form-item v-if="editingUser?.id" label="启用">
-          <el-switch v-model="userForm.enabled" />
+          <el-switch v-model="userForm.enabled" :disabled="isSelf" />
         </el-form-item>
+        <p v-if="isSelf" class="self-hint">这是你当前登录的账号，不能停用或取消管理员权限。</p>
       </el-form>
       <template #footer>
         <el-button @click="userHero.animatedClose()">取消</el-button>
@@ -73,7 +80,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import 'element-plus/es/components/message-box/style/css'
 import { Plus, EditPen, Delete } from '@element-plus/icons-vue'
@@ -90,6 +97,8 @@ const userDlg = ref(false)
 const userHero = useHeroDialog('.admin-hero-user .el-dialog', () => { userDlg.value = false })
 const editingUser = ref(null)
 const userForm = ref(emptyUser())
+// 正在编辑的是不是当前登录的账号（新建时恒 false）
+const isSelf = computed(() => !!editingUser.value?.id && editingUser.value.id === auth.user?.id)
 
 function emptyUser() {
   return { username: '', password: '', role: 'user', base_path: '/', can_write: false, enabled: true }
@@ -145,6 +154,11 @@ onMounted(loadUsers)
 
 <style scoped>
 .pane-head { display: flex; justify-content: flex-end; margin-bottom: 10px; }
+.field-help { font-size: 12px; line-height: 1.5; margin-top: 3px; }
+.self-hint {
+  margin: -6px 0 0 110px; /* 110px = el-form label-width，与输入列左缘对齐 */
+  font-size: 12px; line-height: 1.5; color: var(--el-text-color-secondary);
+}
 
 /* ---- 移动端：表格单元格收紧，让状态/操作列留在屏内不必横向滑动（#29） ---- */
 @media (max-width: 768px) {

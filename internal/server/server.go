@@ -45,6 +45,7 @@ func New(db *sql.DB, cf *conf.Store, us *user.Store, f *fs.FS,
 	s.limDown.SetKBps(cf.DownloadSpeedKB())
 	s.limCopy.SetKBps(cf.CopySpeedKB())
 	f.SetCopyLimiter(s.limCopy)
+	f.SetCopyFileWorkers(cf.CopyFileWorkers())
 	tasks.SetWorkers(task.GroupOffline, cf.OfflineWorkers())
 	return s
 }

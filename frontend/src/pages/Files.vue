@@ -40,7 +40,8 @@
       <el-button v-if="caps.upload" size="small" :icon="Link" @click="offlineVisible = true">离线下载</el-button>
       <el-button v-if="caps.upload" size="small" type="primary" :icon="Upload"
         @click="uploadVisible = true">上传</el-button>
-      <el-badge :value="activeTasks" :hidden="!activeTasks" :offset="[-4, 4]">
+      <!-- 徽标合并后台传输与网页上传：上传的进度只在上传抽屉里，关掉后全局就再无指示 -->
+      <el-badge :value="busyCount" :hidden="!busyCount" :offset="[-4, 4]">
         <el-button size="small" circle :icon="Van" title="传输任务" @click="tasksVisible = true" />
       </el-badge>
     </div>
@@ -75,6 +76,9 @@
               @click.stop="openRename(row)" />
             <el-button v-if="!row.is_dir" link size="small" :icon="Download"
               @click.stop="download(row)" />
+            <!-- 单项删除也放在行内：同为单项操作，没道理重命名/下载在这、删除却要先勾选再去工具栏 -->
+            <el-button v-if="caps.write" link size="small" type="danger" :icon="Delete"
+              @click.stop="removeOne(row)" />
           </template>
         </el-table-column>
         <template #empty>
@@ -84,12 +88,15 @@
       </el-table>
     </div>
 
-    <!-- 网格视图 -->
+    <!-- 网格视图：选择框与操作菜单挂在卡片上，管理操作不再是列表视图专有 -->
     <div v-else class="poster-grid">
       <MediaGridCard v-for="row in sorted" :key="row.name"
         :thumb-path="join(current, row.name)" :label="row.name"
         :icon-key="typeIcon(row)" :has-thumb="hasThumb(row)" :is-dir="row.is_dir"
-        @open="dispatch(row)" />
+        selectable :selected="selection.includes(row)" :actions="cardActions(row)"
+        @open="dispatch(row)"
+        @update:selected="(on) => toggleSelect(row, on)"
+        @command="(cmd) => onCardCommand(cmd, row)" />
       <div v-if="!loaded" class="dim empty-tip loading-tip"><el-icon class="is-loading"><Loading /></el-icon>加载中…</div>
       <div v-else-if="!items.length" class="dim empty-tip">空目录</div>
     </div>
@@ -99,9 +106,10 @@
     <NameDialog v-model="renameVisible" title="重命名" :initial="renameTarget?.name || ''" @confirm="doRename" />
     <MoveCopyDialog v-model="mcVisible" :mode="mcMode" :paths="mcPaths" @done="load"
       @tasks="tasksVisible = true" />
-    <UploadDrawer ref="uploader" v-model="uploadVisible" :dir="current" @uploaded="load" />
+    <UploadDrawer ref="uploader" v-model="uploadVisible" :dir="current" @uploaded="load"
+      @count="activeUploads = $event" @tasks="tasksVisible = true" />
     <TextDrawer v-model="textVisible" :path="textPath" :kind="textKind" />
-    <TasksDrawer v-model="tasksVisible" @count="onTaskCount" />
+    <TasksDrawer v-model="tasksVisible" @count="onTaskCount" @uploads="uploadVisible = true" />
 
     <!-- 离线下载：URL 拉取到当前目录，进度在传输任务抽屉查看 -->
     <el-dialog v-model="offlineVisible" title="离线下载" width="480px" append-to-body class="offline-dlg">
@@ -128,9 +136,9 @@ import {
   FolderAdd, Upload, UploadFilled, HomeFilled, EditPen, Download, Van, Link, Loading,
 } from '@element-plus/icons-vue'
 import { api } from '../utils/api'
-import { join, filesRoute, playRoute, fromParams, rawUrl } from '../utils/path'
+import { join, filesRoute, fromParams } from '../utils/path'
 import { extType, typeIcon, formatSize, formatTime, hasThumb } from '../utils/file'
-import { openLightbox } from '../utils/lightbox'
+import { useFileOpen } from '../composables/useFileOpen'
 import { isMobile } from '../utils/viewport'
 import { useApp } from '../stores/app'
 import NameDialog from '../components/NameDialog.vue'
@@ -165,17 +173,23 @@ const mcMode = ref('move')
 const mcPaths = ref([])
 const uploadVisible = ref(false)
 const uploader = ref(null)
-const textVisible = ref(false)
-const textPath = ref('')
-const textKind = ref('text')
+// 文本/Markdown 抽屉状态与「点开一个文件」的派发逻辑与搜索页共用
+const { textVisible, textPath, textKind, openFile, downloadFile } = useFileOpen()
 const tasksVisible = ref(false)
-const activeTasks = ref(0)
+const activeTasks = ref(0)   // 后台传输任务（转存/离线下载）
+const activeUploads = ref(0) // 网页上传队列
+const busyCount = computed(() => activeTasks.value + activeUploads.value)
 const offlineVisible = ref(false)
 const offlineUrls = ref('')
 const offlineName = ref('')
 const offlineSubmitting = ref(false)
 
-function onTaskCount(n) { activeTasks.value = n }
+// 传输任务数变化。跨存储转存与离线下载都是后台任务，建任务时刷新只会看到空目录，
+// 得等任务真正跑完文件才落到目标目录 —— 由「进行中」归零时补一次刷新。
+function onTaskCount(n) {
+  if (activeTasks.value > 0 && n === 0) load()
+  activeTasks.value = n
+}
 
 async function submitOffline() {
   const urls = offlineUrls.value.split('\n').map((s) => s.trim()).filter(Boolean)
@@ -183,6 +197,14 @@ async function submitOffline() {
   offlineSubmitting.value = true
   try {
     const d = await api.fs.offline(urls, current.value || '/', offlineName.value.trim())
+    const skipped = d?.skipped || []
+    if (skipped.length) {
+      // 无效链接留在输入框里，用户一眼看到是哪几条、改完直接再提交；
+      // 有效的那些已经在下载，不必把整批重新粘一遍
+      offlineUrls.value = skipped.join('\n')
+      ElMessage.warning(`已创建 ${d.task_ids.length} 个任务；${skipped.length} 条链接无效，已留在输入框中`)
+      return
+    }
     ElMessage.success(`已创建 ${d.task_ids.length} 个离线下载任务`)
     offlineVisible.value = false
     offlineUrls.value = ''
@@ -284,35 +306,11 @@ function dispatch(row) {
     router.push(filesRoute(p)).then((failure) => { if (failure) navigating = false })
     return
   }
-  switch (extType(row.name)) {
-    case 'image': {
-      const imgs = sorted.value.filter((x) => !x.is_dir && extType(x.name) === 'image')
-      openLightbox(imgs.map((x) => fullPath(x)), imgs.findIndex((x) => x.name === row.name))
-      break
-    }
-    case 'video':
-      router.push(playRoute(p))
-      break
-    case 'markdown':
-      textPath.value = p; textKind.value = 'markdown'; textVisible.value = true
-      break
-    case 'text':
-      textPath.value = p; textKind.value = 'text'; textVisible.value = true
-      break
-    case 'pdf':
-      window.open(rawUrl(p), '_blank')
-      break
-    default:
-      download(row)
-  }
+  // 非目录的打开方式与搜索结果共用一套（见 composables/useFileOpen）
+  openFile(p, row.name, sorted.value.filter((x) => !x.is_dir && extType(x.name) === 'image').map(fullPath))
 }
 
-function download(row) {
-  const a = document.createElement('a')
-  a.href = rawUrl(fullPath(row), true)
-  a.download = row.name
-  a.click()
-}
+function download(row) { downloadFile(fullPath(row), row.name) }
 
 async function doMkdir(name) {
   await api.fs.mkdir(join(current.value, name))
@@ -332,13 +330,55 @@ async function doRename(name) {
   load()
 }
 
-async function removeSelected() {
-  const paths = selection.value.map(fullPath)
-  await ElMessageBox.confirm(`确定删除选中的 ${paths.length} 项？此操作不可恢复。`, '删除确认',
+// removePaths 删除给定路径，单项与批量共用。后端逐项执行、逐项回报，
+// 所以无论成败都要刷新：中途失败时前面几项已经删掉了，不刷新会继续显示已不存在的文件。
+async function removePaths(paths, question) {
+  const ok = await ElMessageBox.confirm(question, '删除确认',
     { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
-  await api.fs.remove(paths)
-  ElMessage.success('已删除')
-  load()
+    .then(() => true).catch(() => false)
+  if (!ok) return
+  try {
+    const d = await api.fs.remove(paths)
+    const errs = d?.errors || []
+    if (errs.length) ElMessage.warning('部分项目未删除：' + errs.join('；'))
+    else ElMessage.success('已删除')
+  } finally {
+    load()
+  }
+}
+
+function removeSelected() {
+  return removePaths(selection.value.map(fullPath),
+    `确定删除选中的 ${selection.value.length} 项？此操作不可恢复。`)
+}
+
+function removeOne(row) {
+  return removePaths([fullPath(row)], `确定删除「${row.name}」？此操作不可恢复。`)
+}
+
+// 方格卡片的操作菜单项：写权限决定重命名与删除，目录没有下载
+function cardActions(row) {
+  const a = []
+  if (caps.value.write) a.push('rename')
+  if (!row.is_dir) a.push('download')
+  if (caps.value.write) a.push('remove')
+  return a
+}
+
+function onCardCommand(cmd, row) {
+  if (cmd === 'rename') openRename(row)
+  else if (cmd === 'download') download(row)
+  else if (cmd === 'remove') removeOne(row)
+}
+
+// 方格视图的选中集直接写 selection（列表视图由 el-table 的 selection-change 写入），
+// 两种视图共用工具栏那一排批量删除/移动/复制。
+function toggleSelect(row, on) {
+  if (on) {
+    if (!selection.value.includes(row)) selection.value = [...selection.value, row]
+  } else {
+    selection.value = selection.value.filter((x) => x !== row)
+  }
 }
 
 function openMoveCopy(mode) {
@@ -384,6 +424,11 @@ onDeactivated(() => {
 })
 
 watch(current, load, { immediate: true })
+
+// 切换列表/方格时清空选中：列表的勾选态由 el-table 内部维护、方格的在 selection 上，
+// 两边无法互相映射。不清的话工具栏仍显示「已选 N 项」，用户却看不见是哪些，
+// 等于对一个不可见的集合执行删除。
+watch(() => app.viewMode, () => { selection.value = [] })
 
 // keep-alive 驻留：TasksDrawer teleport 在 body 上，不随组件树隐藏。
 // 用离开守卫（在 keep-alive 冻结组件前触发）关掉，覆盖浏览器后退等所有导航。

@@ -101,8 +101,19 @@ func (s *Store) SetInt(key string, v, lo, hi int) (int, error) {
 // 任务线程数与全站限速设置（AList 风格）。限速单位 KB/s，0 = 不限速。
 // 线程数上限与 task.maxWorkers 一致；上传并发是浏览器端同传文件数，不宜过大。
 func (s *Store) CopyWorkers() int     { return s.intIn("copy_workers", 2, 1, 32) }
+func (s *Store) CopyFileWorkers() int { return s.intIn("copy_file_workers", 4, 1, 32) }
 func (s *Store) OfflineWorkers() int  { return s.intIn("offline_workers", 2, 1, 32) }
 func (s *Store) UploadWorkers() int   { return s.intIn("upload_workers", 2, 1, 8) }
 func (s *Store) CopySpeedKB() int     { return s.intIn("copy_speed_kb", 0, 0, 1<<20) }
 func (s *Store) UploadSpeedKB() int   { return s.intIn("upload_speed_kb", 0, 0, 1<<20) }
 func (s *Store) DownloadSpeedKB() int { return s.intIn("download_speed_kb", 0, 0, 1<<20) }
+
+// MediaHomeSort 媒体库首页「所有视频 / 所有照片」那一屏的取法：
+// random = 每次进入随机抽一批（默认，偏发现）；modified = 最新在前（偏找东西）。
+// 完整列表始终在「查看全部」里，不受此项影响。取值非法时回落 random。
+func (s *Store) MediaHomeSort() string {
+	if s.Get("media_home_sort", "random") == "modified" {
+		return "modified"
+	}
+	return "random"
+}

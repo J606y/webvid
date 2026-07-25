@@ -1,11 +1,11 @@
 <template>
   <el-dialog :model-value="modelValue" :title="title" width="400px"
     @update:model-value="$emit('update:modelValue', $event)" @open="onOpen">
-    <el-input ref="inputRef" v-model="name" :placeholder="placeholder" @keyup.enter="submit" />
+    <el-input ref="inputRef" v-model="name" :placeholder="placeholder" :disabled="saving" @keyup.enter="submit" />
     <div v-if="error" class="err">{{ error }}</div>
     <template #footer>
-      <el-button @click="$emit('update:modelValue', false)">取消</el-button>
-      <el-button type="primary" @click="submit">确定</el-button>
+      <el-button :disabled="saving" @click="$emit('update:modelValue', false)">取消</el-button>
+      <el-button type="primary" :loading="saving" @click="submit">确定</el-button>
     </template>
   </el-dialog>
 </template>
@@ -18,12 +18,16 @@ const props = defineProps({
   title: { type: String, default: '名称' },
   placeholder: { type: String, default: '请输入名称' },
   initial: { type: String, default: '' },
+  // 回调 prop 而非 emit：submit() 要等它返回的 Promise 决定请求是否成功才关弹窗；
+  // emit() 不会把监听函数的返回值带回来，只有 props 上的函数才能被直接 await。
+  onConfirm: { type: Function, default: null },
 })
-const emit = defineEmits(['update:modelValue', 'confirm'])
+const emit = defineEmits(['update:modelValue'])
 
 const name = ref('')
 const error = ref('')
 const inputRef = ref(null)
+const saving = ref(false)
 
 // 与后端 checkName 一致的校验
 const reserved = new Set(['CON', 'PRN', 'AUX', 'NUL',
@@ -44,6 +48,7 @@ function validate(n) {
 async function onOpen() {
   name.value = props.initial
   error.value = ''
+  saving.value = false
   await nextTick()
   inputRef.value?.focus()
   // 重命名场景：默认选中主文件名部分
@@ -54,12 +59,20 @@ async function onOpen() {
   }
 }
 
-function submit() {
+// 请求成功才关弹窗、失败留住弹窗和输入内容，让用户能直接改了重试（比如重名 409）；
+// 请求本身在父组件里（mkdir/rename 各走各的接口），这里只能拿父级传入的回调函数等它的结果。
+async function submit() {
+  if (saving.value) return
   const n = name.value.trim()
   error.value = validate(n)
   if (error.value) return
-  emit('confirm', n)
-  emit('update:modelValue', false)
+  saving.value = true
+  try {
+    await props.onConfirm?.(n)
+    emit('update:modelValue', false)
+  } finally {
+    saving.value = false
+  }
 }
 </script>
 

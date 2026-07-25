@@ -68,6 +68,8 @@ export const api = {
       remove: (id) => http.delete(`/admin/users/${id}`),
     },
     telegram: {
+      // status：该存储在服务端有没有未过期的登录会话（决定按钮该说「发送」还是「重新发送」）
+      status: (id) => http.get(`/admin/telegram/${id}/status`),
       // send_code：后端 MTProto 握手 60s 预算，请求超时须大于它（见 AdminStorage 注释）
       sendCode: (id) => http.post(`/admin/telegram/${id}/send_code`, null, { timeout: 90000 }),
       signIn: (id, body) => http.post(`/admin/telegram/${id}/sign_in`, body),

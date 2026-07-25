@@ -35,8 +35,20 @@ func (s *Server) tgStorageCfg(c *gin.Context) (int64, driver.Config, bool) {
 	return id, cfg, true
 }
 
+// GET /api/admin/telegram/:id/status —— 该存储当前有没有未过期的登录会话。
+// 登录弹窗打开时先问一次：会话活着的话，「发送验证码」按的其实是换通道重发，
+// 按钮就该那么写。只靠前端本地状态判断的话，换个标签页打开就又说谎了。
+func (s *Server) tgStatus(c *gin.Context) {
+	id, _, ok := s.tgStorageCfg(c)
+	if !ok {
+		return
+	}
+	OK(c, telegram.Logins.Pending(id))
+}
+
 // POST /api/admin/telegram/:id/send_code —— 向配置的手机号发送登录验证码。
-// 返回验证码实际投递通道（App 内消息/短信/电话），重复调用会切换通道。
+// 返回验证码实际投递通道（App 内消息/短信/电话）；resumed=true 表示本次复用了此前
+// 未过期的登录会话（换通道重发），并非一次全新验证——前端据此把按钮文案与真实行为对齐。
 func (s *Server) tgSendCode(c *gin.Context) {
 	id, cfg, ok := s.tgStorageCfg(c)
 	if !ok {

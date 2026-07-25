@@ -1,7 +1,8 @@
 // 存储 secret 明文回显验证：列表接口脱敏 ***，编辑弹窗取单条明文，
 // 密码框默认圆点、点「眼睛」显示完整原文。
-// 用法: node secret-echo-check.mjs （需服务在跑，admin/admin123；
-//       需存在一个 onedrive 存储且 client_secret 非空，可用 NL_BASE 指定实例）
+// 用法: node secret-echo-check.mjs （需服务在跑，admin/admin123，可用 NL_BASE 指定实例）
+// 前置条件：实例里有任意一个带密钥字段的存储（OneDrive / Telegram / Google Drive / PikPak 均可）。
+// 一个都没有时跳过而非报错——密钥字段名与标签从 /api/admin/drivers 现取，不写死驱动。
 import { chromium } from 'playwright-core'
 
 const BASE = process.env.NL_BASE || 'http://localhost:5243'
@@ -26,25 +27,33 @@ await page.fill('input[placeholder="密码"]', 'admin123')
 await page.click('button:has-text("登 录")')
 await page.waitForURL((u) => !u.pathname.startsWith('/login'))
 
+const authGet = (path) => page.evaluate(async (p) => {
+  const r = await fetch(p, { headers: { Authorization: 'Bearer ' + localStorage.getItem('nl_token') } })
+  return (await r.json()).data
+}, path)
+
+// 各驱动的第一个密钥字段（名称 + 表单标签）
+const secretOf = {}
+for (const d of (await authGet('/api/admin/drivers')) || []) {
+  const f = (d.fields || []).find((x) => x.secret)
+  if (f) secretOf[d.name] = { name: f.name, label: f.label }
+}
+
 // 列表接口仍脱敏
-const list = await page.evaluate(async () => {
-  const r = await fetch('/api/admin/storages', {
-    headers: { Authorization: 'Bearer ' + localStorage.getItem('nl_token') },
-  })
-  return (await r.json()).data || []
-})
-const od = list.find((s) => s.driver === 'onedrive' && s.config.client_secret)
-ok('存在 onedrive 存储（前置条件）', !!od)
-ok('列表接口 client_secret 脱敏为 ***', od?.config.client_secret === '***')
+const list = (await authGet('/api/admin/storages')) || []
+const od = list.find((s) => secretOf[s.driver] && s.config[secretOf[s.driver].name])
+if (!od) {
+  console.log('跳过：当前实例没有任何带密钥字段的存储，无从验证脱敏与明文回显')
+  await browser.close()
+  process.exit(0)
+}
+const sec = secretOf[od.driver]
+console.log(`目标存储：${od.mount_path}（${od.driver}） 密钥字段：${sec.label}`)
+ok(`列表接口 ${sec.name} 脱敏为 ***`, od.config[sec.name] === '***')
 
 // 单条接口返回原文
-const one = await page.evaluate(async (id) => {
-  const r = await fetch(`/api/admin/storages/${id}`, {
-    headers: { Authorization: 'Bearer ' + localStorage.getItem('nl_token') },
-  })
-  return (await r.json()).data
-}, od.id)
-const realSecret = one?.config?.client_secret
+const one = await authGet(`/api/admin/storages/${od.id}`)
+const realSecret = one?.config?.[sec.name]
 ok('单条接口返回明文（非 ***、非空）', !!realSecret && realSecret !== '***')
 
 // 编辑弹窗：密码框回显明文值，默认圆点，点眼睛可见原文
@@ -52,11 +61,13 @@ await page.goto(`${BASE}/@admin?tab=storage`).catch(() => {})
 await page.goto(`${BASE}/@admin`)
 await page.click('.el-tabs__item:has-text("存储管理")')
 const row = page.locator('.el-table__row', { hasText: od.mount_path })
-await row.locator('.el-button').first().click()
+// 编辑按钮 = 该行第一个不带 title 的按钮：telegram/googledrive 行前面还有
+// 「验证码登录」「授权 Google」两个带 title 的图标钮，直接取 .first() 会点错。
+await row.locator('.el-button:not([title])').first().click()
 const dlg = page.locator('.el-dialog:visible')
 await dlg.waitFor()
-// 客户端密码所在表单项
-const item = dlg.locator('.el-form-item', { has: page.locator('label:has-text("客户端密码")') })
+// 密钥字段所在表单项（标签取自驱动元数据，不写死某个驱动的叫法）
+const item = dlg.locator('.el-form-item', { has: page.locator(`label:has-text("${sec.label}")`) })
 const input = item.locator('input')
 await page.waitForFunction(
   (el) => el && el.value && el.value !== '***',

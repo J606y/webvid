@@ -50,24 +50,32 @@
           @open="open(it)" />
       </div>
     </template>
+
+    <TextDrawer v-model="textVisible" :path="textPath" :kind="textKind" />
   </div>
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, computed, defineAsyncComponent } from 'vue'
 import { useRouter } from 'vue-router'
 import { Search as SearchIcon, Expand, Grid } from '@element-plus/icons-vue'
 import { iconMap as icons } from '../utils/icons'
 import { api } from '../utils/api'
-import { filesRoute, playRoute, parent } from '../utils/path'
+import { filesRoute } from '../utils/path'
 import { extType, typeIcon, formatSize, formatTime, hasThumb } from '../utils/file'
+import { useFileOpen } from '../composables/useFileOpen'
 import { useApp } from '../stores/app'
 import MediaGridCard from '../components/MediaGridCard.vue'
+
+// 同 Files.vue：TextDrawer 静态引入 highlight.js/marked/dompurify（体积不小），按需加载
+const TextDrawer = defineAsyncComponent(() => import('../components/TextDrawer.vue'))
 
 defineOptions({ name: 'Search' }) // App.vue keep-alive include 按此名匹配
 
 const app = useApp() // 复用全站列表/方格视图偏好（与文件管理共享、持久化到 localStorage）
 const router = useRouter()
+// 打开文件的派发与文本抽屉状态，与文件管理共用同一套
+const { textVisible, textPath, textKind, openFile } = useFileOpen()
 const q = ref('')
 const kind = ref('')
 const items = ref([])
@@ -91,13 +99,16 @@ async function doSearch() {
   }
 }
 
+// 结果里的图片全路径，供灯箱在搜索结果内左右翻页
+const images = computed(() =>
+  items.value.filter((x) => !x.is_dir && extType(x.name) === 'image').map((x) => x.path))
+
+// 点结果的行为与文件管理完全一致（见 composables/useFileOpen）：图片开灯箱、
+// 文本/Markdown 开抽屉、PDF 新标签打开。早先这里一律只跳到所在文件夹，
+// 同一个文件在两个页面点出两种结果。
 function open(it) {
   if (it.is_dir) return router.push(filesRoute(it.path))
-  switch (extType(it.name)) {
-    case 'video': return router.push(playRoute(it.path))
-    case 'image': return router.push({ path: '/library/photos', query: { dir: parent(it.path) } })
-    default: return router.push(filesRoute(parent(it.path)))
-  }
+  openFile(it.path, it.name, images.value)
 }
 
 // 方格视图：仅图片/视频有缩略图，其余回退到类型图标

@@ -46,6 +46,23 @@ func maskSecrets(drv string, cfg map[string]string) map[string]string {
 	return out
 }
 
+// missingRequired 返回该驱动缺填的必填字段标签。
+// 表单上的红星此前只是装饰：留空照样"保存成功"，直到挂载时才失败并显示成一条红色状态。
+// 调用方须在 "***" 还原成旧值之后再调，否则编辑时会把"不修改"误判为缺填。
+func missingRequired(drv string, cfg map[string]string) []string {
+	meta, ok := driver.MetaOf(drv)
+	if !ok {
+		return nil
+	}
+	var miss []string
+	for _, f := range meta.Fields {
+		if f.Required && strings.TrimSpace(cfg[f.Name]) == "" {
+			miss = append(miss, f.Label)
+		}
+	}
+	return miss
+}
+
 // GET /api/admin/drivers
 func (s *Server) driverList(c *gin.Context) {
 	OK(c, driver.Metas())
@@ -140,6 +157,10 @@ func (s *Server) storageCreate(c *gin.Context) {
 	if req.Config == nil {
 		req.Config = map[string]string{}
 	}
+	if miss := missingRequired(req.Driver, req.Config); len(miss) > 0 {
+		Fail(c, 400, "请填写："+strings.Join(miss, "、"))
+		return
+	}
 	cfgJSON, _ := json.Marshal(req.Config)
 	_, err := s.db.Exec(
 		`INSERT INTO storages(mount_path, driver, config, ord, enabled, status, created_at)
@@ -187,6 +208,10 @@ func (s *Server) storageUpdate(c *gin.Context) {
 			req.Config[k] = oldCfg[k]
 		}
 	}
+	if miss := missingRequired(req.Driver, req.Config); len(miss) > 0 {
+		Fail(c, 400, "请填写："+strings.Join(miss, "、"))
+		return
+	}
 	cfgJSON, _ := json.Marshal(req.Config)
 	_, err := s.db.Exec(
 		`UPDATE storages SET mount_path=?, driver=?, config=?, ord=?, enabled=? WHERE id=?`,
@@ -220,11 +245,9 @@ func (s *Server) storageDelete(c *gin.Context) {
 	s.afterStorageChange(c)
 }
 
-// POST /api/admin/storages/:id/reload —— 重载全部挂载（驱动 Init 是全量重建）。
+// POST /api/admin/storages/:id/reload —— 重载全部挂载（驱动 Init 是全量重建）并重建索引。
+// 走与保存/删除同一条路径：重载的典型场景是"刚修好一个失败的挂载"，此时只 Reload 不 Rebuild
+// 的话挂载确实好了，索引里却仍然没有它的文件——搜索和媒体库依旧空着，看起来像没修好。
 func (s *Server) storageReload(c *gin.Context) {
-	if err := s.fs.Reload(c.Request.Context()); err != nil {
-		Fail500(c, err)
-		return
-	}
-	OK(c, nil)
+	s.afterStorageChange(c)
 }

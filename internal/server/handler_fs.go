@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -81,7 +82,9 @@ func (s *Server) fsRename(c *gin.Context) {
 	OK(c, nil)
 }
 
-// POST /api/fs/remove {paths[]}
+// POST /api/fs/remove {paths[]} → {removed, errors[]}
+// 逐项执行、逐项收集结果：首个出错就整体中断的话，前面几项已经删掉、索引也改了，
+// 前端却只收到一个失败，列表不刷新就会继续显示已经不存在的文件。
 func (s *Server) fsRemove(c *gin.Context) {
 	var req struct {
 		Paths []string `json:"paths"`
@@ -90,19 +93,23 @@ func (s *Server) fsRemove(c *gin.Context) {
 		Fail(c, 400, "未选择任何文件")
 		return
 	}
+	u := getUser(c)
+	removed := 0
+	errs := []string{}
 	for _, raw := range req.Paths {
 		p, err := fs.NormPath(raw)
 		if err != nil {
-			fsError(c, err)
-			return
+			errs = append(errs, path.Base(raw)+"："+util.Humanize(err))
+			continue
 		}
-		if err := s.fs.Remove(c.Request.Context(), getUser(c), p); err != nil {
-			fsError(c, err)
-			return
+		if err := s.fs.Remove(c.Request.Context(), u, p); err != nil {
+			errs = append(errs, path.Base(p)+"："+util.Humanize(err))
+			continue
 		}
 		s.index.DeletePrefix(p)
+		removed++
 	}
-	OK(c, nil)
+	OK(c, gin.H{"removed": removed, "errors": errs})
 }
 
 // POST /api/fs/move | /api/fs/copy {paths[], dst_dir}
@@ -134,6 +141,12 @@ func (s *Server) fsMoveCopy(isMove bool) gin.HandlerFunc {
 			if err != nil {
 				fsError(c, err)
 				return
+			}
+			// 目标不能是源自身或源的子目录：把文件夹搬进自己里面会无限递归。
+			// local 驱动自己挡了这一手，云盘驱动与跨存储转存都没有，这里统一拦在入口。
+			if dst == p || strings.HasPrefix(dst, p+"/") {
+				errs = append(errs, path.Base(p)+"：不能"+verb+"到它自己或它的子目录")
+				continue
 			}
 			same, upOK, err := s.fs.SameStorage(u, p, dst)
 			if err != nil {

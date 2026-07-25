@@ -32,18 +32,18 @@
     <el-dialog v-model="storageDlg" :title="editingStorage?.id ? '编辑存储' : '添加存储'" width="480px"
       append-to-body destroy-on-close modal-class="admin-hero admin-hero-storage"
       :before-close="storageHero.animatedClose">
-      <el-form label-width="130px">
-        <el-form-item label="挂载路径" required>
+      <el-form ref="storageFormRef" :model="storageForm" :rules="storageRules" label-width="130px">
+        <el-form-item label="挂载路径" prop="mount_path" required>
           <el-input v-model="storageForm.mount_path" placeholder="/网盘名" />
         </el-form-item>
-        <el-form-item label="驱动" required>
+        <el-form-item label="驱动" prop="driver" required>
           <el-select v-model="storageForm.driver" :disabled="!!editingStorage?.id" style="width: 100%"
             @change="onDriverChange">
             <el-option v-for="m in drivers" :key="m.name" :label="m.label" :value="m.name" />
           </el-select>
         </el-form-item>
         <template v-for="f in currentFields" :key="f.name">
-          <el-form-item :label="f.label" :required="f.required">
+          <el-form-item :label="f.label" :prop="'config.' + f.name" :required="f.required">
             <el-switch v-if="f.type === 'bool'"
               :model-value="storageForm.config[f.name] === 'true'"
               @update:model-value="storageForm.config[f.name] = $event ? 'true' : 'false'" />
@@ -122,6 +122,7 @@ const storageDlg = ref(false)
 const storageHero = useHeroDialog('.admin-hero-storage .el-dialog', () => { storageDlg.value = false })
 const editingStorage = ref(null)
 const storageForm = ref(emptyStorage())
+const storageFormRef = ref(null)
 
 function emptyStorage() {
   return { mount_path: '', driver: 'local', config: {}, ord: 0, enabled: true }
@@ -131,6 +132,22 @@ function driverLabel(name) {
 }
 const currentFields = computed(() =>
   drivers.value.find((d) => d.name === storageForm.value.driver)?.fields || [])
+
+// 校验规则随驱动变：必填项由驱动自己声明（fields[].required）。
+// 此前红星只是装饰——留空照样"保存成功"，直到挂载失败才在状态列看出问题。
+const storageRules = computed(() => {
+  const r = {
+    mount_path: [{ required: true, message: '请填写挂载路径', trigger: 'blur' }],
+    driver: [{ required: true, message: '请选择驱动', trigger: 'change' }],
+  }
+  for (const f of currentFields.value) {
+    if (!f.required) continue
+    // 编辑已有存储时，密钥类字段留空或 *** 表示沿用旧值，不算缺填
+    if (f.secret && editingStorage.value?.id) continue
+    r['config.' + f.name] = [{ required: true, message: `请填写${f.label}`, trigger: 'blur' }]
+  }
+  return r
+})
 
 async function loadStorages() {
   try {
@@ -177,6 +194,8 @@ async function openStorage(row, ev) {
   storageHero.open(originEl, () => { storageDlg.value = true })
 }
 async function saveStorage() {
+  const ok = await storageFormRef.value?.validate().then(() => true).catch(() => false)
+  if (!ok) return
   saving.value = true
   try {
     if (editingStorage.value?.id) {
@@ -226,29 +245,86 @@ const tgSentTo = ref('') // 验证码实际发到哪（App 内消息/短信/电�
 const tgResend = ref('')
 const tgTimeout = ref(0)
 
-function openTgLogin(row, ev) {
+// 「发送验证码」/「重新发送」这两个文案不能只凭本地是否点过按钮来定：后端 LoginManager
+// 的登录会话（pendingLogin）与本弹窗的生命周期是分开的——关掉弹窗再重开，会话在服务端
+// 10 分钟内仍然存活（见 internal/driver/telegram/login.go 的 loginTTL），此时再点
+// 「发送验证码」实际会命中 resendCode（切换投递通道），并非用户以为的"全新发一次"。
+// 会话是否还活着以服务端为准（GET /admin/telegram/:id/status），打开弹窗时问一次；
+// sessionStorage 只额外记住"上次发到了哪、下次可切到什么通道"这类服务端不便重放的文案，
+// 到期时间与后端 loginTTL 对齐。两者不一致时听服务端的。
+const TG_PENDING_TTL_MS = 10 * 60 * 1000
+const tgMemKey = (id) => `webvid:tg-pending:${id}`
+
+function tgLoadMemory(id) {
+  try {
+    const raw = sessionStorage.getItem(tgMemKey(id))
+    if (!raw) return null
+    const mem = JSON.parse(raw)
+    if (!mem?.expiresAt || Date.now() >= mem.expiresAt) {
+      sessionStorage.removeItem(tgMemKey(id))
+      return null
+    }
+    return mem
+  } catch {
+    return null // 隐私模式等禁用 sessionStorage 时静默退化为"每次都当作全新发送"
+  }
+}
+function tgSaveMemory(id, mem) {
+  try {
+    sessionStorage.setItem(tgMemKey(id), JSON.stringify(mem))
+  } catch { /* 存储被禁用：不影响本次登录，只是下次重开弹窗文案会退回默认 */ }
+}
+function tgClearMemory(id) {
+  try {
+    sessionStorage.removeItem(tgMemKey(id))
+  } catch { /* 同上 */ }
+}
+
+async function openTgLogin(row, ev) {
   const originEl = ev?.currentTarget
   tgStorage.value = row
   tgCode.value = ''
   tgPwd.value = ''
   tgNeedPwd.value = false
-  tgCodeSent.value = false
-  tgSentTo.value = ''
-  tgResend.value = ''
-  tgTimeout.value = 0
+  const mem = tgLoadMemory(row.id)
+  tgCodeSent.value = !!mem
+  tgSentTo.value = mem?.sentTo || ''
+  tgResend.value = mem?.resend || ''
+  tgTimeout.value = mem?.timeout || 0
   tgHero.open(originEl, () => { tgDlg.value = true })
+  // 弹窗已经开了，再向服务端核一次真实会话状态作补正——本地记忆看不见别的标签页
+  // 或别的设备发过的码。查询失败就沿用本地记忆，不挡发码。
+  try {
+    const st = await api.admin.telegram.status(row.id)
+    if (tgStorage.value?.id !== row.id) return // 期间换了存储，丢弃过期结果
+    tgCodeSent.value = !!st?.pending
+    if (!st?.pending) {
+      tgSentTo.value = ''
+      tgResend.value = ''
+      tgTimeout.value = 0
+      tgClearMemory(row.id)
+    }
+  } catch { /* 状态查不到不影响发码，按本地记忆显示 */ }
 }
 async function tgSendCode() {
   tgSending.value = true
   try {
-    // 首次=发码；再点「重新发送」后端走 resendCode 切换投递通道（App→短信→电话）。
-    // 后端给 MTProto 握手 60s 预算，请求超时须大于它，否则前端先断连带崩后端 ctx
+    // 首次=发码；若服务端识别到未过期的登录会话（本地记忆到期前重开弹窗、或本地记忆
+    // 丢失但会话仍活着）则走 resendCode 切换投递通道（App→短信→电话），响应里的
+    // resumed 如实告知是哪一种。后端给 MTProto 握手 60s 预算，请求超时须大于它，
+    // 否则前端先断连带崩后端 ctx
     const r = await api.admin.telegram.sendCode(tgStorage.value.id)
     tgCodeSent.value = true
     tgSentTo.value = r?.sent_to || '验证码已发送，优先查看 Telegram 客户端消息'
     tgResend.value = r?.resend || ''
     tgTimeout.value = r?.timeout || 0
-    ElMessage.success(tgSentTo.value)
+    tgSaveMemory(tgStorage.value.id, {
+      sentTo: tgSentTo.value, resend: tgResend.value, timeout: tgTimeout.value,
+      expiresAt: Date.now() + TG_PENDING_TTL_MS,
+    })
+    ElMessage.success(r?.resumed
+      ? `已复用此前未完成的登录会话，改走：${tgSentTo.value}`
+      : tgSentTo.value)
   } finally {
     tgSending.value = false
   }
@@ -265,6 +341,7 @@ async function tgSignIn() {
       return
     }
     ElMessage.success('登录成功，存储已重载')
+    tgClearMemory(tgStorage.value.id) // 会话已消费完毕，不能再让下次重开弹窗误判成"仍待续发"
     tgHero.animatedClose()
     loadStorages()
   } finally {
@@ -273,7 +350,31 @@ async function tgSignIn() {
 }
 
 // ---- Google Drive 一键授权 ----
-// 打开 Google 同意页新标签；回调在服务端换 refresh_token 并重载存储，回来刷新列表即可看到就绪。
+// 打开 Google 同意页新标签；回调在服务端换 refresh_token 并重载存储。
+//
+// 「授权是否真的完成」不能由用户点了「已完成」还是「关闭」来定——两者过去走的是同一条
+// 只会 loadStorages() 的路，用户没点同意、中途取消，回来点「已完成」也照样"看着像成功"。
+// 现在双保险都以服务端状态为准：
+//   1) 回调页（handler_googledrive.go 的 gdCallbackHTML）成功落盘后用同源 BroadcastChannel
+//      把 {id, ok, message} 广播出来，这里监听到后立即收起确认弹窗、给出准确提示；
+//   2) 万一用户中途直接关掉新标签、广播根本不会发生，点「已完成/关闭」任一按钮都会回查
+//      该存储此刻的真实 config（refresh_token 是否写入）与挂载 status，而不是无脑刷新。
+const GD_AUTH_CHANNEL = 'webvid-googledrive-auth'
+
+// 回查存储真实状态：refresh_token 已写入且挂载没有报错 status，才算授权真正生效。
+async function checkGoogleAuthDone(id) {
+  try {
+    const full = await api.admin.storages.get(id)
+    if (full?.status) return { ok: false, message: `尚未就绪：${full.status}` }
+    if (!full?.config?.refresh_token) {
+      return { ok: false, message: '尚未完成授权：请在新标签内走完 Google 同意页后再点「已完成」' }
+    }
+    return { ok: true, message: 'Google 授权已完成，存储已就绪' }
+  } catch (e) {
+    return { ok: false, message: '状态核对失败，请稍后重试或手动刷新列表确认' }
+  }
+}
+
 async function authGoogle(row) {
   let d
   try {
@@ -282,12 +383,34 @@ async function authGoogle(row) {
     return // 拦截器已弹错误（多为未填 client_id/secret）
   }
   window.open(d.auth_url, '_blank', 'noopener')
-  try {
-    await ElMessageBox.confirm(
-      '已在新标签打开 Google 授权页。请在其中完成授权（首次需选择账号并允许访问），成功后回到这里点「已完成」刷新存储状态。',
+
+  let settled = false
+  let bc = null
+  const result = await new Promise((resolve) => {
+    const finish = (r) => {
+      if (settled) return
+      settled = true
+      resolve(r)
+    }
+    if (typeof BroadcastChannel !== 'undefined') {
+      bc = new BroadcastChannel(GD_AUTH_CHANNEL)
+      bc.onmessage = (ev) => {
+        if (ev.data?.id && ev.data.id !== row.id) return // 不是这条存储的回调，忽略
+        finish({ ok: !!ev.data?.ok, message: ev.data?.message || '' })
+        ElMessageBox.close() // 服务端已给出真实结果，收起还在等待中的确认弹窗
+      }
+    }
+    ElMessageBox.confirm(
+      '已在新标签打开 Google 授权页。请在其中完成授权（首次需选择账号并允许访问），完成后回到这里点「已完成」核对状态。',
       'Google 授权',
       { confirmButtonText: '已完成', cancelButtonText: '关闭', type: 'info' })
-  } catch { /* 用户点关闭：仍刷新一下 */ }
+      .then(() => { if (!settled) checkGoogleAuthDone(row.id).then(finish) })
+      .catch(() => { if (!settled) checkGoogleAuthDone(row.id).then(finish) })
+  })
+  if (bc) bc.close()
+
+  if (result.ok) ElMessage.success(result.message)
+  else ElMessage.warning(result.message)
   loadStorages()
 }
 

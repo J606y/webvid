@@ -1,6 +1,7 @@
 // #6 上传同名冲突：改「按 HTTP 409 状态码分支」而非匹配错误文案 includes('已存在')。
 // 验证真实链路：后端 fsUpload → driver.ErrExist → fsError 返 409 → http.js 拦截器把
-// status 挂到 error（httpError）→ UploadDrawer 按 e.status===409 进入 conflict 态（出「覆盖上传」）。
+// status 挂到 error（httpError）→ UploadDrawer 按 e.status===409 进入 conflict 态
+//（给出「覆盖 / 保留两者 / 跳过」三条出路）。
 // 且上传请求 silent:true，冲突由队列行内呈现，不再弹全局 error toast。
 // 用法: NL_BASE=http://localhost:5299 node upload-conflict-check.mjs （需服务在跑）
 import { chromium } from 'playwright-core'
@@ -61,24 +62,30 @@ await page.waitForFunction(() => {
 ok('首传成功（任务显示「完成」）', true)
 ok('首传 HTTP 200', uploadStatuses.includes(200), `statuses=${uploadStatuses}`)
 
-// 再传同名（不覆盖）→ 应进 conflict 态：出现「覆盖上传」按钮
-console.log('2. 再传同名（应 409 → conflict，出「覆盖上传」）')
+// 再传同名（不覆盖）→ 应进 conflict 态：给出三条出路
+console.log('2. 再传同名（应 409 → conflict，出「覆盖 / 保留两者 / 跳过」）')
 const errToastsBefore = await page.locator('.el-message--error').count()
 await setFile()
-await page.waitForSelector('.el-drawer button:has-text("覆盖上传")', { timeout: 20000 })
-ok('冲突进入 conflict 态（出现「覆盖上传」按钮）', true)
+const overwriteBtn = page.getByRole('button', { name: '覆盖', exact: true })
+await overwriteBtn.waitFor({ timeout: 20000 })
+ok('冲突进入 conflict 态（出现「覆盖」按钮）', true)
+ok('同时给出「保留两者」',
+  (await page.getByRole('button', { name: '保留两者', exact: true }).count()) === 1)
+ok('同时给出「跳过」',
+  (await page.getByRole('button', { name: '跳过', exact: true }).count()) === 1)
 ok('第二次上传 HTTP 409', uploadStatuses.includes(409), `statuses=${uploadStatuses}`)
 ok('冲突任务不误判为 error（无「重试」按钮）',
-  (await page.locator('.el-drawer button:has-text("重试")').count()) === 0)
+  // 限定在上传队列抽屉内：传输任务抽屉里也有「重试」按钮
+  (await page.locator('.el-drawer[aria-label="上传队列"] button:has-text("重试")').count()) === 0)
 // silent:true → 冲突不弹全局 error toast（由队列行内呈现）
 await page.waitForTimeout(500)
 const errToastsAfter = await page.locator('.el-message--error').count()
 ok('冲突未弹全局 error toast（silent 生效）', errToastsAfter === errToastsBefore,
   `${errToastsBefore}→${errToastsAfter}`)
 
-// 点「覆盖上传」→ 应成功完成（overwrite=1 → 200）
-console.log('3. 点「覆盖上传」应成功')
-await page.click('.el-drawer button:has-text("覆盖上传")')
+// 点「覆盖」→ 应成功完成（overwrite=1 → 200）
+console.log('3. 点「覆盖」应成功')
+await overwriteBtn.click()
 await page.waitForFunction(() => {
   const done = [...document.querySelectorAll('.el-drawer .task .state')]
     .filter((e) => e.textContent.includes('完成'))
@@ -87,6 +94,34 @@ await page.waitForFunction(() => {
 ok('覆盖上传成功（第二条任务转「完成」）', true)
 ok('覆盖上传 HTTP 200（statuses 至少两个 200）',
   uploadStatuses.filter((s) => s === 200).length >= 2, `statuses=${uploadStatuses}`)
+
+// 再传同名 → 点「保留两者」→ 自动改名（扩展名前加序号）后上传成功
+console.log('4. 点「保留两者」应改名上传')
+await setFile()
+const keepBtn = page.getByRole('button', { name: '保留两者', exact: true })
+await keepBtn.waitFor({ timeout: 20000 })
+await keepBtn.click()
+await page.waitForFunction(() => {
+  const done = [...document.querySelectorAll('.el-drawer .task .state')]
+    .filter((e) => e.textContent.includes('完成'))
+  return done.length >= 3
+}, { timeout: 20000 })
+ok('保留两者上传成功（第三条任务转「完成」）', true)
+const queueNames = await page.locator('.el-drawer .task .name').allTextContents()
+ok('文件名加了「(1)」序号', queueNames.some((n) => n.includes('(1)')), queueNames.join(' | '))
+
+// 清理本次落盘的测试文件，免得每跑一次就在存储里留一份
+const keepName = FNAME.replace(/\.txt$/, ' (1).txt')
+await page.evaluate(async (paths) => {
+  await fetch('/api/fs/remove', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: 'Bearer ' + localStorage.getItem('nl_token'),
+    },
+    body: JSON.stringify({ paths }),
+  })
+}, [`/${DIR}/${FNAME}`, `/${DIR}/${keepName}`])
 
 await browser.close()
 console.log('\n==== 控制台错误 ====')

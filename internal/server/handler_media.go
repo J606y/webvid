@@ -15,11 +15,15 @@ type mediaItem struct {
 	Name     string `json:"name"`
 	Size     int64  `json:"size"`
 	Modified string `json:"modified"`
+	// 续播位置（秒）。列表接口 LEFT JOIN 播放历史带出，供卡片画进度条；
+	// 无历史/图片恒 0，omitempty 让这类响应不多出两个空字段。
+	Position float64 `json:"position,omitempty"`
+	Duration float64 `json:"duration,omitempty"`
 }
 
-// baseFilter 追加用户 base_path 视野过滤条件。
-func baseFilter(sql string, args []any, base string) (string, []any) {
-	sql += ` AND (?='/' OR path=? OR substr(path,1,length(?)+1)=?||'/')`
+// baseFilter 追加用户 base_path 视野过滤条件。col 为路径列名（JOIN 场景传 f.path）。
+func baseFilter(sql string, args []any, base, col string) (string, []any) {
+	sql += ` AND (?='/' OR ` + col + `=? OR substr(` + col + `,1,length(?)+1)=?||'/')`
 	return sql, append(args, base, base, base, base)
 }
 
@@ -66,9 +70,9 @@ func (s *Server) mediaList(c *gin.Context) {
 	if offset < 0 {
 		offset = 0
 	}
-	sortCol := "modified"
+	sortCol := "f.modified"
 	if c.Query("sort") == "name" {
-		sortCol = "name"
+		sortCol = "f.name"
 	}
 	dir := "DESC"
 	if c.Query("order") == "asc" {
@@ -79,17 +83,22 @@ func (s *Server) mediaList(c *gin.Context) {
 		orderBy = "RANDOM()"
 	}
 
-	sql := `SELECT path, name, size, modified FROM files WHERE is_dir=0 AND ext_type=?`
-	args := []any{kind}
-	sql, args = baseFilter(sql, args, getUser(c).BasePath)
-	sql, args = s.mediaVisFilter(sql, args, kind, "path")
+	// LEFT JOIN 播放历史带出续播位置：网格卡片与「最近播放」货架用同一套进度条，
+	// 同一个视频不该在货架上有进度、进网格就没有。无历史的行 COALESCE 成 0。
+	sql := `SELECT f.path, f.name, f.size, f.modified,
+			COALESCE(h.position, 0), COALESCE(h.duration, 0)
+		FROM files f LEFT JOIN play_history h ON h.path=f.path AND h.user_id=?
+		WHERE f.is_dir=0 AND f.ext_type=?`
+	args := []any{getUser(c).ID, kind}
+	sql, args = baseFilter(sql, args, getUser(c).VisibleBase(), "f.path")
+	sql, args = s.mediaVisFilter(sql, args, kind, "f.path")
 	if parent := c.Query("parent"); parent != "" {
 		p, err := fs.NormPath(parent)
 		if err != nil {
 			fsError(c, err)
 			return
 		}
-		sql += ` AND substr(path,1,length(?)+1)=?||'/'`
+		sql += ` AND substr(f.path,1,length(?)+1)=?||'/'`
 		args = append(args, p, p)
 	}
 	sql += ` ORDER BY ` + orderBy + ` LIMIT ? OFFSET ?`
@@ -104,7 +113,7 @@ func (s *Server) mediaList(c *gin.Context) {
 	items := []mediaItem{}
 	for rows.Next() {
 		var it mediaItem
-		if err := rows.Scan(&it.Path, &it.Name, &it.Size, &it.Modified); err != nil {
+		if err := rows.Scan(&it.Path, &it.Name, &it.Size, &it.Modified, &it.Position, &it.Duration); err != nil {
 			Fail500(c, err)
 			return
 		}
@@ -113,7 +122,7 @@ func (s *Server) mediaList(c *gin.Context) {
 	OK(c, gin.H{"items": items})
 }
 
-// POST /api/media/played {path, position?, duration?} —— 记录一次播放。
+// POST /api/media/played {path, position?, duration?, ended?} —— 记录一次播放。
 // 「最近播放」货架数据源，并保存断点续播位置（position/duration，秒）。
 // 视频起播即上报（position=0 只刷 played_at），播放中定时上报进度；
 // 图片上报无 position/duration（保持"最近查看"语义）。
@@ -122,6 +131,7 @@ func (s *Server) mediaPlayed(c *gin.Context) {
 		Path     string  `json:"path" binding:"required"`
 		Position float64 `json:"position"`
 		Duration float64 `json:"duration"`
+		Ended    bool    `json:"ended"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		Fail(c, 400, "请求参数有误")
@@ -141,14 +151,16 @@ func (s *Server) mediaPlayed(c *gin.Context) {
 	// 只认索引内本用户可见的媒体文件
 	sqlq := `SELECT 1 FROM files WHERE path=? AND is_dir=0 AND ext_type IN ('video','image')`
 	args := []any{p}
-	sqlq, args = baseFilter(sqlq, args, getUser(c).BasePath)
+	sqlq, args = baseFilter(sqlq, args, getUser(c).VisibleBase(), "path")
 	var one int
 	if err := s.db.QueryRow(sqlq, args...).Scan(&one); err != nil {
 		Fail(c, 404, "文件不存在")
 		return
 	}
-	// 看到接近片尾（≥95% 或剩余 ≤5s）视为看完 → position 归零，下次从头播。
-	if req.Duration > 0 && (req.Position >= req.Duration-5 || req.Position/req.Duration >= 0.95) {
+	// 只有播放自然结束才算看完 → position 归零，下次从头播。
+	// 拖到接近片尾不算：那只是跳着瞄了一眼，续播点应当忠实保留（早先按 ≥95% 一刀切，
+	// 导致拖动/暂停的每一次上报都把续播点清掉，进度条与「继续观看」随之消失）。
+	if req.Ended {
 		req.Position = 0
 	}
 	// duration 仅在本次带上（>0）时更新——播放器 ready 早于元数据就绪时会上报 0，
@@ -181,9 +193,7 @@ func (s *Server) mediaProgress(c *gin.Context) {
 
 type historyItem struct {
 	mediaItem
-	PlayedAt string  `json:"played_at"`
-	Position float64 `json:"position"`
-	Duration float64 `json:"duration"`
+	PlayedAt string `json:"played_at"`
 }
 
 // GET /api/media/history?kind=video|image&limit= —— 本用户最近播放，文件已删/移走的自然消失。
@@ -197,13 +207,13 @@ func (s *Server) mediaHistory(c *gin.Context) {
 	if limit <= 0 || limit > 100 {
 		limit = 12
 	}
-	base := getUser(c).BasePath
-	// JOIN 后 path 有歧义，视野过滤在 f.path 上展开（同 baseFilter 语义）
+	base := getUser(c).VisibleBase()
+	// JOIN 后 path 有歧义，视野过滤走 f.path
 	sqlq := `SELECT f.path, f.name, f.size, f.modified, h.played_at, h.position, h.duration
 		FROM play_history h JOIN files f ON f.path=h.path
-		WHERE h.user_id=? AND f.is_dir=0 AND f.ext_type=?
-		AND (?='/' OR f.path=? OR substr(f.path,1,length(?)+1)=?||'/')`
-	args := []any{getUser(c).ID, kind, base, base, base, base}
+		WHERE h.user_id=? AND f.is_dir=0 AND f.ext_type=?`
+	args := []any{getUser(c).ID, kind}
+	sqlq, args = baseFilter(sqlq, args, base, "f.path")
 	sqlq, args = s.mediaVisFilter(sqlq, args, kind, "f.path")
 	sqlq += ` ORDER BY h.played_at DESC LIMIT ?`
 	args = append(args, limit)
@@ -216,7 +226,8 @@ func (s *Server) mediaHistory(c *gin.Context) {
 	items := []historyItem{}
 	for rows.Next() {
 		var it historyItem
-		if err := rows.Scan(&it.Path, &it.Name, &it.Size, &it.Modified, &it.PlayedAt, &it.Position, &it.Duration); err != nil {
+		if err := rows.Scan(&it.Path, &it.Name, &it.Size, &it.Modified,
+			&it.PlayedAt, &it.Position, &it.Duration); err != nil {
 			Fail500(c, err)
 			return
 		}
@@ -240,10 +251,10 @@ func (s *Server) mediaGroups(c *gin.Context) {
 		Fail(c, 400, "媒体类型无效（应为视频或图片）")
 		return
 	}
-	base := getUser(c).BasePath
+	base := getUser(c).VisibleBase()
 	sql := `SELECT parent, COUNT(*), MAX(modified) FROM files WHERE is_dir=0 AND ext_type=?`
 	args := []any{kind}
-	sql, args = baseFilter(sql, args, base)
+	sql, args = baseFilter(sql, args, base, "path")
 	sql, args = s.mediaVisFilter(sql, args, kind, "path")
 	sql += ` GROUP BY parent ORDER BY MAX(modified) DESC LIMIT 40`
 

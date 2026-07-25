@@ -28,6 +28,15 @@
       </el-select>
     </div>
 
+    <!-- 首屏加载反馈：loaded 为 false 期间原本整页空白，挂在慢速云盘（OneDrive/Google Drive）
+         上首屏要等数秒，容易被当成卡死或者库是空的。延迟 200ms 才亮起：本地存储通常秒回，
+         这块面板不会被看见闪一下；跟空态共用同一只 .glass glass-panel，两者互斥（一个要求
+         loaded，一个要求 !loaded）不会同框。 -->
+    <div v-if="!loaded && showLoading" class="empty glass glass-panel">
+      <el-icon :size="36" class="dim is-loading"><Loading /></el-icon>
+      <p class="dim">加载中…</p>
+    </div>
+
     <!-- 空态引导 -->
     <div v-if="loaded && !grid.length" class="empty glass glass-panel">
       <template v-if="historyView">
@@ -105,8 +114,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue'
-import { ArrowLeft, ArrowRight, VideoCamera, VideoPlay, FolderOpened } from '@element-plus/icons-vue'
+import { ref, onMounted, onUnmounted, watch } from 'vue'
+import { ArrowLeft, ArrowRight, VideoCamera, VideoPlay, FolderOpened, Loading } from '@element-plus/icons-vue'
 import { api } from '../utils/api'
 import VideoDetailCard from '../components/VideoDetailCard.vue'
 import VideoCard from '../components/VideoCard.vue'
@@ -143,6 +152,17 @@ async function loadStatic() {
 // 共享骨架：网格分页 / 视图切换 / 无限滚动 / 轮播 / infuse-mode（见 composables/useMediaLibrary）
 const { grid, loaded, loading, sort, sentinel, carousel, heroActive, all, historyView, isHome, dirName, featHeight, swipe } =
   useMediaLibrary({ kind: 'video', routePath: '/library/video', historyKey: 'played', dirDefault: '视频库', historyCap: 50, loadStatic })
+
+// showLoading：loaded 转 false 后延迟 200ms 才置真，进 Doherty 阈值内、又明显长于本地存储的
+// 响应耗时，快速返回时定时器还没到就被 loaded=true 清掉，面板压根不会挂出来。
+const showLoading = ref(false)
+let loadingTimer = null
+watch(loaded, (v) => {
+  clearTimeout(loadingTimer)
+  if (v) showLoading.value = false
+  else loadingTimer = setTimeout(() => { showLoading.value = true }, 200)
+}, { immediate: true })
+onUnmounted(() => clearTimeout(loadingTimer))
 
 // 把点击来源的缩略图元素交给详情卡，做 iOS 式「从哪来回哪去」转场：
 // 视频卡取 16:9 封面框 .art（与卡片顶部封面区形状吻合），Featured 横幅取整块

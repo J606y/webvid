@@ -38,6 +38,12 @@ function onOpen() {
   treeKey.value++ // 重新挂载树，清掉旧的懒加载缓存
 }
 
+// blocked 非法目标：源自身，或源的子目录（把文件夹搬进自己里面会无限递归）。
+// 后端也拦这一手；这里让它压根不出现在树里，用户走不到那一步。
+function blocked(dir) {
+  return props.paths.some((p) => dir === p || dir.startsWith(p + '/'))
+}
+
 async function loadNode(node, resolve) {
   const path = node.level === 0 ? '/' : node.data.path
   try {
@@ -46,7 +52,7 @@ async function loadNode(node, resolve) {
       name: x.name,
       path: join(path, x.name),
       leaf: false,
-    }))
+    })).filter((n) => !blocked(n.path))
     if (node.level === 0) {
       resolve([{ name: '根目录 /', path: '/', leaf: false, children: dirs }])
     } else {

@@ -3,12 +3,15 @@ package fs
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"newlist/internal/driver"
 	"newlist/internal/driver/local"
@@ -389,3 +392,117 @@ func TestTransferRetryExhausted(t *testing.T) {
 }
 
 var _ io.ReadSeekCloser = (*failingReader)(nil)
+
+// ---- 文件夹内文件并发复制 ----
+
+func probeContent(i int) string { return fmt.Sprintf("probe-data-%d-%s", i, strings.Repeat("x", i+1)) }
+
+// concProbeDriver 源驱动：目录 "d" 下 n 个文件，每个 Link 出的读流首块 sleep 一小段，
+// 期间记录当前并发数与峰值——用于验证「文件夹内文件并发复制」确有并行。
+type concProbeDriver struct {
+	n    int
+	cur  atomic.Int32
+	peak atomic.Int32
+}
+
+func (d *concProbeDriver) Init(context.Context, driver.Config) error { return nil }
+func (d *concProbeDriver) Drop() error                               { return nil }
+func (d *concProbeDriver) List(_ context.Context, rel string) ([]model.FileInfo, error) {
+	if rel != "d" {
+		return nil, driver.ErrNotFound
+	}
+	out := make([]model.FileInfo, d.n)
+	for i := 0; i < d.n; i++ {
+		out[i] = model.FileInfo{Name: fmt.Sprintf("f%d.bin", i), Size: int64(len(probeContent(i)))}
+	}
+	return out, nil
+}
+func (d *concProbeDriver) Stat(_ context.Context, rel string) (model.FileInfo, error) {
+	if rel == "d" {
+		return model.FileInfo{Name: "d", IsDir: true}, nil
+	}
+	return model.FileInfo{}, driver.ErrNotFound // 转存只对源根 Stat 一次；文件走 List 结果
+}
+func (d *concProbeDriver) Link(_ context.Context, rel string) (*driver.Link, error) {
+	name := rel
+	if i := strings.LastIndexByte(rel, '/'); i >= 0 {
+		name = rel[i+1:]
+	}
+	var idx int
+	fmt.Sscanf(name, "f%d.bin", &idx)
+	return &driver.Link{Local: &probeReader{d: d, data: probeContent(idx)}}, nil
+}
+
+type probeReader struct {
+	d       *concProbeDriver
+	data    string
+	off     int
+	entered bool
+}
+
+func (r *probeReader) Read(p []byte) (int, error) {
+	if !r.entered {
+		r.entered = true
+		cur := r.d.cur.Add(1)
+		for { // peak = max(peak, cur)
+			peak := r.d.peak.Load()
+			if cur <= peak || r.d.peak.CompareAndSwap(peak, cur) {
+				break
+			}
+		}
+		time.Sleep(40 * time.Millisecond) // 拉长窗口让多文件重叠
+	}
+	if r.off >= len(r.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data[r.off:])
+	r.off += n
+	return n, nil
+}
+func (r *probeReader) Seek(int64, int) (int64, error) { return 0, nil }
+func (r *probeReader) Close() error {
+	if r.entered {
+		r.d.cur.Add(-1)
+	}
+	return nil
+}
+
+func TestTransferParallelFiles(t *testing.T) {
+	// 并行：SetCopyFileWorkers(4) 复制含 6 个文件的目录，并发峰值应 >1。
+	dirB := t.TempDir()
+	src := &concProbeDriver{n: 6}
+	f := newTestFS(
+		&Mount{ID: 1, Path: "/并发源", Driver: "probe", Enabled: true, drv: src},
+		newLocalMount(t, 2, "/存储B", dirB),
+	)
+	f.SetCopyFileWorkers(4)
+	pr := &fakeProgress{}
+	if err := f.Transfer(context.Background(), adminUser(), "/并发源/d", "/存储B", false, pr); err != nil {
+		t.Fatalf("Transfer 并发: %v", err)
+	}
+	for i := 0; i < src.n; i++ {
+		name := fmt.Sprintf("f%d.bin", i)
+		got, err := os.ReadFile(filepath.Join(dirB, "d", name))
+		if err != nil || string(got) != probeContent(i) {
+			t.Fatalf("%s 内容不符: %q err=%v", name, got, err)
+		}
+	}
+	if peak := src.peak.Load(); peak < 2 {
+		t.Fatalf("SetCopyFileWorkers(4) 下并发峰值应 >1，实际 %d（=未并行）", peak)
+	}
+
+	// 串行对照：SetCopyFileWorkers(1) 时峰值必为 1（等价旧行为）。
+	dirC := t.TempDir()
+	src2 := &concProbeDriver{n: 4}
+	f2 := newTestFS(
+		&Mount{ID: 1, Path: "/并发源", Driver: "probe", Enabled: true, drv: src2},
+		newLocalMount(t, 2, "/存储C", dirC),
+	)
+	f2.SetCopyFileWorkers(1)
+	if err := f2.Transfer(context.Background(), adminUser(), "/并发源/d", "/存储C", false, &fakeProgress{}); err != nil {
+		t.Fatalf("Transfer 串行: %v", err)
+	}
+	if peak := src2.peak.Load(); peak != 1 {
+		t.Fatalf("SetCopyFileWorkers(1) 下并发峰值应=1，实际 %d", peak)
+	}
+}

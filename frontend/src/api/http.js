@@ -46,8 +46,10 @@ http.interceptors.response.use(
         clearToken()
         location.href = '/login'
       }
-    } else if (!err.config?.silent) {
-      // silent：fire-and-forget 请求（如查看/播放上报）或调用方自行按码兜底时不打扰用户
+    } else if (!err.config?.silent && err.config?.url !== '/auth/login') {
+      // silent：fire-and-forget 请求（如查看/播放上报）或调用方自行按码兜底时不打扰用户。
+      // 登录接口的非 401 失败（限流/超时/网络不通/服务端异常）交给登录页自己的 catch 弹一次，
+      // 这里再弹会跟登录页重复；401 走上面那支，从不在这里弹，不受影响。
       ElMessage.error(msg)
     }
     return Promise.reject(httpError(msg, status))

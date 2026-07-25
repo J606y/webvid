@@ -36,6 +36,9 @@ type Builder struct {
 	mu         sync.Mutex
 	prog       Progress
 	onComplete func() // 全量重建成功后回调（后台预载封面/源信息），可空
+	// pending 重建进行中收到的增量写操作。整表替换会把它们一并抹掉
+	//（扫描开始时这些文件还不存在），所以替换提交后按序重放一遍。
+	pending []func()
 }
 
 func New(db *sql.DB, f *fs.FS) *Builder { return &Builder{db: db, fs: f} }
@@ -113,29 +116,54 @@ func newRow(full string, fi model.FileInfo) row {
 const upsertSQL = `INSERT OR REPLACE INTO files(path,parent,name,name_lower,is_dir,size,modified,ext_type)
 	VALUES(?,?,?,?,?,?,?,?)`
 
-func (b *Builder) flush(batch []row) error {
-	if len(batch) == 0 {
-		return nil
-	}
+// replaceAll 在单个事务内清空并回填 files 表。
+// 清表与回填必须同一个事务：早先是先 DELETE 再一边扫一边分批写，扫云盘的那几分钟里
+// 搜索和媒体库空空如也，看着像数据没了。现在扫描全程不动数据库，读到的一直是上一版
+// 索引，提交那一刻整体切到新版。
+func (b *Builder) replaceAll(rows []row) error {
 	tx, err := b.db.Begin()
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(upsertSQL)
-	if err != nil {
-		tx.Rollback()
+	defer tx.Rollback() // 已 Commit 时为空操作；中途出错则整体回滚，旧索引原样保留
+	if _, err := tx.Exec(`DELETE FROM files`); err != nil {
 		return err
 	}
-	for _, r := range batch {
+	stmt, err := tx.Prepare(upsertSQL)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, r := range rows {
 		if _, err := stmt.Exec(r.path, r.parent, r.name, strings.ToLower(r.name),
 			util.BoolInt(r.isDir), r.size, r.modified, r.extType); err != nil {
-			stmt.Close()
-			tx.Rollback()
 			return err
 		}
 	}
-	stmt.Close()
 	return tx.Commit()
+}
+
+// queueOrRun 执行一次增量写。重建进行中时同时排进 pending：这一笔既要作用于当前
+// （旧版）索引让用户马上看到，也要在整表替换之后补回去，否则会被替换抹掉。
+func (b *Builder) queueOrRun(fn func()) {
+	b.mu.Lock()
+	if b.prog.Running {
+		b.pending = append(b.pending, fn)
+	}
+	b.mu.Unlock()
+	fn()
+}
+
+// replayPending 重放重建期间排队的增量写。须在 finish 之后调用——那时 Running 已置否，
+// 重放本身不会再次入队。
+func (b *Builder) replayPending() {
+	b.mu.Lock()
+	pend := b.pending
+	b.pending = nil
+	b.mu.Unlock()
+	for _, fn := range pend {
+		fn()
+	}
 }
 
 func (b *Builder) run() {
@@ -146,21 +174,11 @@ func (b *Builder) run() {
 		}
 	}()
 	ctx := context.Background()
-	if _, err := b.db.Exec(`DELETE FROM files`); err != nil {
-		b.finish(err)
-		return
-	}
 	var scanned int64
-	batch := make([]row, 0, 500)
-	add := func(r row) error {
-		batch = append(batch, r)
+	rows := make([]row, 0, 4096)
+	add := func(r row) {
+		rows = append(rows, r)
 		scanned++
-		if len(batch) >= 500 {
-			err := b.flush(batch)
-			batch = batch[:0]
-			return err
-		}
-		return nil
 	}
 
 	for _, m := range b.fs.Mounts() {
@@ -168,10 +186,7 @@ func (b *Builder) run() {
 			continue
 		}
 		// 挂载点自身也入索引（可被搜索命中）
-		if err := add(newRow(m.Path, model.FileInfo{Name: path.Base(m.Path), IsDir: true})); err != nil {
-			b.finish(err)
-			return
-		}
+		add(newRow(m.Path, model.FileInfo{Name: path.Base(m.Path), IsDir: true}))
 		queue := []string{m.Path}
 		for len(queue) > 0 {
 			dir := queue[0]
@@ -184,22 +199,21 @@ func (b *Builder) run() {
 			}
 			for _, it := range items {
 				full := util.JoinLogical(dir, it.Name)
-				if err := add(newRow(full, it)); err != nil {
-					b.finish(err)
-					return
-				}
+				add(newRow(full, it))
 				if it.IsDir {
 					queue = append(queue, full)
 				}
 			}
 		}
 	}
-	if err := b.flush(batch); err != nil {
+	b.update("正在写入索引", scanned)
+	if err := b.replaceAll(rows); err != nil {
 		b.finish(err)
 		return
 	}
 	b.update("", scanned)
 	b.finish(nil)
+	b.replayPending() // 替换期间发生的上传/删除/改名补回去
 	log.Printf("[index] 索引完成，共 %d 条", scanned)
 
 	b.mu.Lock()
@@ -214,6 +228,10 @@ func (b *Builder) run() {
 
 // Upsert 单条写入（上传 / 新建目录）。
 func (b *Builder) Upsert(logical string, fi model.FileInfo) {
+	b.queueOrRun(func() { b.upsert(logical, fi) })
+}
+
+func (b *Builder) upsert(logical string, fi model.FileInfo) {
 	r := newRow(logical, fi)
 	if _, err := b.db.Exec(upsertSQL, r.path, r.parent, r.name, strings.ToLower(r.name),
 		util.BoolInt(r.isDir), r.size, r.modified, r.extType); err != nil {
@@ -224,15 +242,21 @@ func (b *Builder) Upsert(logical string, fi model.FileInfo) {
 // DeletePrefix 删除路径及其整个子树的索引行。
 // 前缀匹配用 substr 而非 LIKE：路径可能含 % _ 等通配字符。
 func (b *Builder) DeletePrefix(logical string) {
-	if _, err := b.db.Exec(
-		`DELETE FROM files WHERE path=? OR substr(path,1,length(?)+1)=?||'/'`,
-		logical, logical, logical); err != nil {
-		log.Printf("[index] delete %s: %v", logical, err)
-	}
+	b.queueOrRun(func() {
+		if _, err := b.db.Exec(
+			`DELETE FROM files WHERE path=? OR substr(path,1,length(?)+1)=?||'/'`,
+			logical, logical, logical); err != nil {
+			log.Printf("[index] delete %s: %v", logical, err)
+		}
+	})
 }
 
 // RenamePrefix 重命名/移动：把 oldPath 前缀整体替换为 newPath。
 func (b *Builder) RenamePrefix(oldPath, newPath string) {
+	b.queueOrRun(func() { b.renamePrefix(oldPath, newPath) })
+}
+
+func (b *Builder) renamePrefix(oldPath, newPath string) {
 	tx, err := b.db.Begin()
 	if err != nil {
 		log.Printf("[index] rename begin: %v", err)
@@ -265,7 +289,13 @@ func (b *Builder) RenamePrefix(oldPath, newPath string) {
 }
 
 // ScanSubtree 后台扫描某子树并写入索引（复制目录后调用）。
+// 整棵子树作为一笔排进重放队列（内部走不入队的 upsert），否则一次目录复制
+// 会往队列里塞成千上万条。
 func (b *Builder) ScanSubtree(logical string) {
+	b.queueOrRun(func() { b.scanSubtree(logical) })
+}
+
+func (b *Builder) scanSubtree(logical string) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -277,7 +307,7 @@ func (b *Builder) ScanSubtree(logical string) {
 		if err != nil {
 			return
 		}
-		b.Upsert(logical, fi)
+		b.upsert(logical, fi)
 		if !fi.IsDir {
 			return
 		}
@@ -291,7 +321,7 @@ func (b *Builder) ScanSubtree(logical string) {
 			}
 			for _, it := range items {
 				full := util.JoinLogical(dir, it.Name)
-				b.Upsert(full, it)
+				b.upsert(full, it)
 				if it.IsDir {
 					queue = append(queue, full)
 				}

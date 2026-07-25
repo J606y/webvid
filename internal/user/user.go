@@ -34,6 +34,15 @@ func (u *User) IsAdmin() bool { return u.Role == "admin" }
 // AllowWrite 是否允许写操作（管理员恒可写）。
 func (u *User) AllowWrite() bool { return u.IsAdmin() || u.CanWrite }
 
+// VisibleBase 生效的可见根路径。管理员恒为 "/"：base_path 在后台对管理员本就可自行编辑，
+// 拿它当限制形同虚设，却会让某个管理员莫名其妙看不见半个库——与"管理员恒可写"同一条语义。
+func (u *User) VisibleBase() string {
+	if u.IsAdmin() || u.BasePath == "" {
+		return "/"
+	}
+	return u.BasePath
+}
+
 // NormBasePath 归一化 base_path（POSIX 逻辑路径）。
 func NormBasePath(p string) string {
 	p = strings.TrimSpace(p)

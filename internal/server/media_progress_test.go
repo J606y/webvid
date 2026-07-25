@@ -57,8 +57,8 @@ func dataFloat(t *testing.T, body []byte, key string) float64 {
 	return r.Data[key]
 }
 
-// 断点续播：played 上报 position/duration，progress 读回、history 带回，
-// 接近片尾归零，图片上报不带进度。
+// 断点续播：played 上报 position/duration，progress 读回、history 与 list 带回，
+// 播完（ended）才归零、拖到片尾不算，图片上报不带进度。
 func TestPlaybackProgress(t *testing.T) {
 	root := t.TempDir()
 	writeFiles(t, root, "movie.mp4", "photo.jpg")
@@ -175,13 +175,39 @@ func TestPlaybackProgress(t *testing.T) {
 		t.Fatalf("duration=0 上报不应覆盖已知时长，应仍为 600，实际 %v", dur)
 	}
 
-	// 看到接近片尾（≥95%）→ 归零，下次从头
+	// 拖到接近片尾但没播完 → 续播点忠实保留（早先按 ≥95% 一刀切，拖动一次就把它清掉）
 	if code, _ := mediaPost(t, api+"/api/media/played", token,
 		`{"path":"/m/movie.mp4","position":580,"duration":600}`); code != 200 {
 		t.Fatal("片尾上报失败")
 	}
+	if p := dataFloat(t, mediaGet(t, api+"/api/media/progress?path=/m/movie.mp4", token), "position"); p != 580 {
+		t.Fatalf("拖到片尾不算看完，position 应保留 580，实际 %v", p)
+	}
+
+	// 列表接口同样带回续播进度：网格卡片与「最近播放」货架画同一条进度条
+	var listR struct {
+		Data struct {
+			Items []struct {
+				Path     string  `json:"path"`
+				Position float64 `json:"position"`
+				Duration float64 `json:"duration"`
+			} `json:"items"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(mediaGet(t, api+"/api/media/list?kind=video&limit=10", token), &listR); err != nil {
+		t.Fatalf("解析 list: %v", err)
+	}
+	if len(listR.Data.Items) != 1 || listR.Data.Items[0].Position != 580 || listR.Data.Items[0].Duration != 600 {
+		t.Fatalf("list 未带回续播进度: %+v", listR.Data.Items)
+	}
+
+	// 播放自然结束 → 归零，下次从头
+	if code, _ := mediaPost(t, api+"/api/media/played", token,
+		`{"path":"/m/movie.mp4","position":600,"duration":600,"ended":true}`); code != 200 {
+		t.Fatal("播完上报失败")
+	}
 	if p := dataFloat(t, mediaGet(t, api+"/api/media/progress?path=/m/movie.mp4", token), "position"); p != 0 {
-		t.Fatalf("看完应归零，实际 %v", p)
+		t.Fatalf("播完应归零，实际 %v", p)
 	}
 
 	// 图片上报（无 position/duration）仍成功，且不影响"最近查看"

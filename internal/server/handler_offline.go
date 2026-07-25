@@ -50,8 +50,10 @@ func (s *Server) fsOffline(c *gin.Context) {
 		return
 	}
 
-	// 先收集有效 URL（trim、http/https、host 非空）：任一非法即整单 400。
+	// 收集有效 URL（trim、http/https、host 非空）。非法的跳过并回报，其余照常建任务：
+	// 粘 10 条坏 1 条就整单打回、什么都不建，用户得把 10 条重新粘一遍。
 	var valid []string
+	skipped := []string{}
 	for _, raw := range req.URLs {
 		raw = strings.TrimSpace(raw)
 		if raw == "" {
@@ -59,12 +61,16 @@ func (s *Server) fsOffline(c *gin.Context) {
 		}
 		pu, err := url.Parse(raw)
 		if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
-			Fail(c, 400, "仅支持 http/https 链接: "+raw)
-			return
+			skipped = append(skipped, raw)
+			continue
 		}
 		valid = append(valid, raw)
 	}
 	if len(valid) == 0 {
+		if len(skipped) > 0 {
+			Fail(c, 400, "链接无效，仅支持 http/https："+strings.Join(skipped, "、"))
+			return
+		}
 		Fail(c, 400, "请填写下载链接")
 		return
 	}
@@ -88,7 +94,7 @@ func (s *Server) fsOffline(c *gin.Context) {
 			})
 		taskIDs = append(taskIDs, t.ID)
 	}
-	OK(c, gin.H{"task_ids": taskIDs})
+	OK(c, gin.H{"task_ids": taskIDs, "skipped": skipped})
 }
 
 // offlineClient 离线下载专用 HTTP 客户端：跟随重定向（限跳数），仅限连接阶段超时（下载本身不限时）。

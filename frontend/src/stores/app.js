@@ -6,6 +6,8 @@ export const useApp = defineStore('app', {
     siteTitle: 'WebVid',
     version: '',
     uploadWorkers: 2,  // 网页上传同传文件数，后台「任务设置」可调
+    // 媒体库首页「所有视频/所有照片」的取法：random 随机抽样 | modified 最新在前
+    mediaHomeSort: 'random',
     viewMode: localStorage.getItem('nl_view') || 'list', // list | grid
   }),
   actions: {
@@ -15,6 +17,7 @@ export const useApp = defineStore('app', {
         this.siteTitle = d.site_title || 'WebVid'
         this.version = d.version || ''
         this.uploadWorkers = d.upload_workers || 2
+        this.mediaHomeSort = d.media_home_sort === 'modified' ? 'modified' : 'random'
         document.title = this.siteTitle
       } catch { /* 忽略，用默认标题 */ }
     },

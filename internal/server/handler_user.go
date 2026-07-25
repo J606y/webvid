@@ -101,6 +101,18 @@ func (s *Server) userUpdate(c *gin.Context) {
 	if req.Role != "admin" {
 		req.Role = "user"
 	}
+	// 停用或降级当前登录的账号会当场自锁：保存成功，紧接着的任一请求即被判 401 踢回登录页，
+	// 且再也登不进来。与「不能删除当前登录的账号」同一条防呆。
+	if id == getUser(c).ID {
+		if !req.Enabled {
+			Fail(c, 400, "不能停用当前登录的账号")
+			return
+		}
+		if req.Role != "admin" {
+			Fail(c, 400, "不能取消当前登录账号的管理员权限")
+			return
+		}
+	}
 	u := &user.User{ID: id, Username: req.Username, Role: req.Role,
 		BasePath: req.BasePath, CanWrite: req.CanWrite, Enabled: req.Enabled}
 	if err := s.users.Update(u); err != nil {

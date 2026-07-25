@@ -11,9 +11,13 @@
     <div v-else-if="strategy === 'unsupported'" class="unsupported glass glass-panel">
       <el-icon :size="46" class="dim"><VideoCamera /></el-icon>
       <p>{{ message }}</p>
-      <a :href="rawUrl(path, true)">
-        <el-button type="primary" round :icon="Download">下载原文件</el-button>
-      </a>
+      <div class="ops">
+        <!-- 重试仅在运行期中断时给出（探测期判定的「格式不支持」重试无意义） -->
+        <el-button v-if="canRetry" round :icon="RefreshRight" @click="start(true)">重试</el-button>
+        <a :href="rawUrl(path, true)">
+          <el-button type="primary" round :icon="Download">下载原文件</el-button>
+        </a>
+      </div>
     </div>
 
     <!-- 探测未回前的占位（非直连格式才会经历）：给「立即播放」即时反馈，
@@ -28,7 +32,7 @@
 <script setup>
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
-import { Back, VideoCamera, Download, Loading } from '@element-plus/icons-vue'
+import { Back, VideoCamera, Download, Loading, RefreshRight } from '@element-plus/icons-vue'
 import Artplayer from 'artplayer'
 import { api } from '../utils/api'
 import { fetchVideoInfo } from '../utils/videoInfo'
@@ -52,16 +56,26 @@ const ext0 = name.value.slice(name.value.lastIndexOf('.') + 1).toLowerCase()
 const strategy = ref(DIRECT_EXTS.has(ext0) ? 'direct' : '')
 const message = ref('')
 const reason = ref('')
+const canRetry = ref(false) // 兜底面板是否给「重试」（运行期中断才给）
 const artRef = ref(null)
 let art = null
 let hls = null
 let resumeAt = 0        // 续播起点（秒），起播后定位到此处
 let reportTimer = null  // 进度定时上报句柄
 
-onMounted(async () => {
+// start 起播全流程：取续播位置 → 定播放策略 → 挂播放器。
+// keepResume=true 时沿用当前 resumeAt（运行期中断后重试，从断点接着播），
+// 否则回服务端取续播位置。
+async function start(keepResume = false) {
+  teardown() // 重试前收掉上一轮播放器与转码流（首次进入是空操作）
+  strategy.value = DIRECT_EXTS.has(ext0) ? 'direct' : ''
+  message.value = ''
+  reason.value = ''
+  canRetry.value = false
+
   // 起播前取续播位置，与 /video/info 并行请求，不额外拖慢起播；
   // ?restart=1（详情卡「从头播放」）跳过续播定位
-  const progP = route.query.restart === '1'
+  const progP = keepResume || route.query.restart === '1'
     ? Promise.resolve()
     : api.media.progress(path.value)
       .then((d) => { resumeAt = d?.position > 0 ? d.position : 0 })
@@ -89,15 +103,45 @@ onMounted(async () => {
   if (d.strategy === 'unsupported') return
   if (d.strategy === 'direct') await mount(rawUrl(path.value), false)
   else await mount(hlsUrl(path.value), true)
-})
+}
+onMounted(() => start())
+
+// fail 运行期播放中断 → 落到可重试、可下载的兜底面板。
+// 探测期失败一直有 unsupported 兜底，运行期（转码会话被回收、分片报错、断流）却没有，
+// 播放器只会无尽转圈。断点记在 resumeAt 上，重试从中断处接着播。
+function fail(msg) {
+  const at = art && isFinite(art.currentTime) ? art.currentTime : 0
+  // 切断 ArtPlayer 自带的断流重连，别让它在实例销毁后继续重设 url
+  if (art) art.off('video:error')
+  teardown()
+  resumeAt = at
+  strategy.value = 'unsupported'
+  message.value = msg
+  canRetry.value = true
+}
+
+// teardown 收掉播放器与转码流，并补记一次末次进度。离页与重试共用。
+function teardown() {
+  if (reportTimer) { clearTimeout(reportTimer); reportTimer = null }
+  if (art) {
+    try { report(art.currentTime) } catch { /* 末次进度，忽略异常 */ }
+    art.destroy(true)
+    art = null
+  }
+  if (hls) {
+    hls.destroy()
+    hls = null
+  }
+}
 
 // report 上报播放进度：起播 position=0 只刷"最近播放"；播放中带当前秒数；
 // duration 供货架/详情卡画进度条（后端只在 duration>0 时更新，避免元数据未就绪的
-// 早期上报把已知时长覆盖成 0）。silent 失败不打扰。频率由各调用点节流。
-function report(position) {
+// 早期上报把已知时长覆盖成 0）。ended=true 只在播完时带上，后端据此把续播点归零
+// （拖动到片尾不算看完，续播点要忠实保留）。silent 失败不打扰。频率由各调用点节流。
+function report(position, ended = false) {
   const sec = Math.floor(position || 0)
   const dur = art && isFinite(art.duration) ? art.duration : 0
-  api.media.played({ path: path.value, position: sec, duration: dur }).catch(() => {})
+  api.media.played({ path: path.value, position: sec, duration: dur, ended }).catch(() => {})
 }
 
 async function mount(url, isHls) {
@@ -134,6 +178,8 @@ async function mount(url, isHls) {
   if (isHls) {
     const { default: Hls } = await import('hls.js') // 独立 chunk，仅转码播放时加载
     opts.type = 'm3u8'
+    let netRetry = 0
+    let mediaRetry = 0
     opts.customType = {
       m3u8(video, src) {
         if (Hls.isSupported()) {
@@ -141,6 +187,24 @@ async function mount(url, isHls) {
           // 续播：从 resumeAt 起（0 = 从头）。event 型列表（remux 边跑边播）默认会追
           // "直播沿"，显式 startPosition 强制落到目标位置；vod 列表本就全时间轴可 seek。
           hls = new Hls({ startPosition: resumeAt })
+          // 运行期中断兜底：转码会话被回收、分片请求失败、断流都在这里报 fatal。
+          // 网络与解码类先按 hls.js 的既定手法就地恢复，连续恢复不了才落兜底面板。
+          hls.on(Hls.Events.ERROR, (_, data) => {
+            if (!data.fatal) return
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR && netRetry < 3) {
+              netRetry++
+              hls.startLoad()
+              return
+            }
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetry < 2) {
+              mediaRetry++
+              hls.recoverMediaError()
+              return
+            }
+            fail(data.type === Hls.ErrorTypes.NETWORK_ERROR
+              ? '播放已中断：视频流断开，可能是网络不稳或转码会话已结束。'
+              : '播放已中断：视频流无法解码，该文件可能已损坏。')
+          })
           hls.loadSource(src)
           hls.attachMedia(video)
         } else {
@@ -168,21 +232,10 @@ async function mount(url, isHls) {
   })
   art.on('video:pause', () => report(art.currentTime))
   art.on('video:seeked', () => report(art.currentTime))
-  art.on('video:ended', () => report(art.duration || 0)) // 播完上报满进度 → 后端归零，下次从头
+  art.on('video:ended', () => report(art.duration || 0, true)) // 播完 → 后端归零，下次从头
 }
 
-onBeforeUnmount(() => {
-  if (reportTimer) { clearTimeout(reportTimer); reportTimer = null }
-  if (art) {
-    try { report(art.currentTime) } catch { /* 离页最后一次进度，忽略异常 */ }
-    art.destroy(true)
-    art = null
-  }
-  if (hls) {
-    hls.destroy()
-    hls = null
-  }
-})
+onBeforeUnmount(teardown)
 </script>
 
 <style scoped>
@@ -301,6 +354,7 @@ onBeforeUnmount(() => {
   display: flex; flex-direction: column; align-items: center; gap: 12px;
 }
 .unsupported p { margin: 0 0 8px; font-size: 15px; }
+.unsupported .ops { display: flex; align-items: center; gap: 10px; }
 .detecting { aspect-ratio: 16/9; justify-content: center; }
 .detecting p { margin: 0; font-size: 14px; }
 

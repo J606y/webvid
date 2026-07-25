@@ -11,6 +11,10 @@ func TestHumanize(t *testing.T) {
 		in   string
 		want string // 期望包含的人话关键词
 	}{
+		// 安全策略：必须压过网络分支，否则被吞成「无法连接到服务器」，
+		// 用户只会以为是网速问题反复重试
+		{"Get \"http://127.0.0.1:5321/dl\": dial tcp 127.0.0.1:5321: 拒绝访问内网/保留地址: 127.0.0.1",
+			"不支持内网或本机地址"},
 		// 网络
 		{"Get \"https://x\": context deadline exceeded", "超时"},
 		{"dial tcp 1.2.3.4:443: i/o timeout", "超时"},

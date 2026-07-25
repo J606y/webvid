@@ -27,6 +27,15 @@
       </el-select>
     </div>
 
+    <!-- 首屏加载反馈：loaded 为 false 期间原本整页空白，挂在慢速云盘（OneDrive/Google Drive）
+         上首屏要等数秒，容易被当成卡死或者库是空的。延迟 200ms 才亮起：本地存储通常秒回，
+         这块面板不会被看见闪一下；跟空态共用同一只 .glass glass-panel，两者互斥（一个要求
+         loaded，一个要求 !loaded）不会同框。 -->
+    <div v-if="!loaded && showLoading" class="empty glass glass-panel">
+      <el-icon :size="36" class="dim is-loading"><Loading /></el-icon>
+      <p class="dim">加载中…</p>
+    </div>
+
     <!-- 空态引导 -->
     <div v-if="loaded && !grid.length" class="empty glass glass-panel">
       <template v-if="historyView">
@@ -44,8 +53,26 @@
       </template>
     </div>
 
+    <!-- 「最近添加」横向货架（按修改时间倒序，对齐视频库的信息层级），让刚上传的照片有个快捷入口；
+         卡片沿用本页「最近查看」货架自己的 p-card 写法。转场锚点选择器加 shelf-recent 前缀，
+         跟下面「最近查看」货架的同名 .p-card 结构区分开，避免 querySelectorAll 把两条货架的图混在一起数 -->
+    <section v-if="isHome && recent.length" class="shelf shelf-recent">
+      <div class="shelf-head"><h2>最近添加</h2></div>
+      <div class="shelf-row">
+        <div v-for="(p, i) in recent" :key="p.path" class="p-card shelf-card"
+          @click="openList(recent, i, 480, '.shelf-recent .p-card .art img')">
+          <div class="art">
+            <img :src="thumbUrl(p.path, 480)" loading="lazy" @error="hideImg" />
+            <div class="thumb-fallback abs"><el-icon :size="30"><Picture /></el-icon></div>
+          </div>
+          <div class="p-name" :title="p.name">{{ stripExt(p.name) }}</div>
+          <div class="dim p-sub">{{ formatTime(p.modified) }} 添加</div>
+        </div>
+      </div>
+    </section>
+
     <!-- 「最近查看」横向货架（按本用户查看历史），「查看更多」进 50 张完整视图 -->
-    <section v-if="isHome && viewed.length" class="shelf">
+    <section v-if="isHome && viewed.length" class="shelf shelf-viewed">
       <div class="shelf-head">
         <h2>最近查看</h2>
         <div class="shelf-ops">
@@ -57,7 +84,7 @@
       </div>
       <div class="shelf-row">
         <div v-for="(p, i) in viewed" :key="p.path" class="p-card shelf-card"
-          @click="openList(viewed, i, 480, '.shelf-row .p-card .art img')">
+          @click="openList(viewed, i, 480, '.shelf-viewed .p-card .art img')">
           <div class="art">
             <img :src="thumbUrl(p.path, 480)" loading="lazy" @error="hideImg" />
             <div class="thumb-fallback abs"><el-icon :size="30"><Picture /></el-icon></div>
@@ -93,8 +120,8 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
-import { ArrowLeft, ArrowRight, Picture, View, FolderOpened } from '@element-plus/icons-vue'
+import { ref, onUnmounted, watch } from 'vue'
+import { ArrowLeft, ArrowRight, Picture, View, FolderOpened, Loading } from '@element-plus/icons-vue'
 import { api } from '../utils/api'
 import FeaturedCarousel from '../components/FeaturedCarousel.vue'
 import { thumbUrl } from '../utils/path'
@@ -105,18 +132,21 @@ import { useMediaLibrary } from '../composables/useMediaLibrary'
 defineOptions({ name: 'LibraryPhotos' }) // App.vue keep-alive include 按此名匹配
 
 const hero = ref([])   // Featured 随机推荐
+const recent = ref([]) // 最近添加货架
 const viewed = ref([]) // 最近查看（本用户查看历史）
 
 async function loadStatic() {
   try {
-    // Featured/最近查看两路互不依赖，并发请求缩短首屏等待
-    const [r, h] = await Promise.all([
+    // Featured/最近添加/最近查看三路互不依赖，并发请求缩短首屏等待
+    const [r, d, h] = await Promise.all([
       // Featured：整库随机抽 5 张（封面 object-fit:cover，竖图也能铺满横幅）
       api.media.list({ kind: 'image', limit: 5, sort: 'random' }),
+      api.media.list({ kind: 'image', limit: 12, sort: 'modified', order: 'desc' }),
       // 最近查看：本用户查看历史（灯箱打开照片时上报，见 utils/lightbox），文件删/移后自然消失
       api.media.history({ kind: 'image', limit: 12 }),
     ])
     hero.value = r.items || []
+    recent.value = d.items || []
     viewed.value = h.items || []
   } catch (e) {
     // axios 响应拦截器已负责弹 toast，这里只吞掉避免未捕获 rejection
@@ -127,6 +157,17 @@ async function loadStatic() {
 // 共享骨架：网格分页 / 视图切换 / 无限滚动 / 轮播 / infuse-mode（见 composables/useMediaLibrary）
 const { grid, loaded, loading, sort, sentinel, carousel, heroActive, all, historyView, isHome, dirName, featHeight, swipe } =
   useMediaLibrary({ kind: 'image', routePath: '/library/photos', historyKey: 'viewed', dirDefault: '照片墙', historyCap: 50, loadStatic })
+
+// showLoading：loaded 转 false 后延迟 200ms 才置真，进 Doherty 阈值内、又明显长于本地存储的
+// 响应耗时，快速返回时定时器还没到就被 loaded=true 清掉，面板压根不会挂出来。
+const showLoading = ref(false)
+let loadingTimer = null
+watch(loaded, (v) => {
+  clearTimeout(loadingTimer)
+  if (v) showLoading.value = false
+  else loadingTimer = setTimeout(() => { showLoading.value = true }, 200)
+}, { immediate: true })
+onUnmounted(() => clearTimeout(loadingTimer))
 
 // msize 传该列表正在展示的缩略图尺寸，灯箱占位图可直接命中浏览器缓存。
 // sel 为该列表缩略图元素的选择器（querySelectorAll 文档序与 v-for 同序），

@@ -73,6 +73,7 @@ func (s *Server) Router() *gin.Engine {
 	admin.PUT("/storages/:id", s.storageUpdate)
 	admin.DELETE("/storages/:id", s.storageDelete)
 	admin.POST("/storages/:id/reload", s.storageReload)
+	admin.GET("/telegram/:id/status", s.tgStatus)
 	admin.POST("/telegram/:id/send_code", s.tgSendCode)
 	admin.POST("/telegram/:id/sign_in", s.tgSignIn)
 	admin.POST("/googledrive/:id/auth_url", s.gdAuthURL)

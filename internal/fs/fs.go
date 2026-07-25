@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"newlist/internal/driver"
@@ -42,12 +43,34 @@ type FS struct {
 	mu      sync.RWMutex
 	mounts  []*Mount // 按挂载路径长度降序，用于最长前缀匹配
 	copyLim *limiter.Limiter
+	// copyFileWorkers 单个转存任务内并发复制的文件数（0=未设置，按 1 串行）。
+	// 来自 settings.copy_file_workers，后台可热调，独立于任务级 copy_workers。
+	copyFileWorkers atomic.Int64
 }
 
 func New(db *sql.DB) *FS { return &FS{db: db} }
 
 // SetCopyLimiter 设置跨存储转存的全局限速器（所有复制任务共享同一速率配额）。
 func (f *FS) SetCopyLimiter(l *limiter.Limiter) { f.copyLim = l }
+
+// SetCopyFileWorkers 设置单个转存任务内并发复制的文件数（钳到 1..32），后台保存后热生效。
+func (f *FS) SetCopyFileWorkers(n int) {
+	if n < 1 {
+		n = 1
+	}
+	if n > 32 {
+		n = 32
+	}
+	f.copyFileWorkers.Store(int64(n))
+}
+
+// copyFileWorkersOrOne 返回当前并发文件数，未设置时为 1（串行，兼容旧行为/测试）。
+func (f *FS) copyFileWorkersOrOne() int {
+	if n := int(f.copyFileWorkers.Load()); n >= 1 {
+		return n
+	}
+	return 1
+}
 
 // NormPath 归一化逻辑路径：拒绝反斜杠与 NUL，POSIX Clean，恒以 / 开头。
 func NormPath(p string) (string, error) {
@@ -137,9 +160,9 @@ func (f *FS) Mounts() []*Mount {
 	return out
 }
 
-// accessOK：p 是否完全在用户视野（base_path）内。
+// accessOK：p 是否完全在用户视野内。视野取 VisibleBase（管理员恒为 "/"）。
 func accessOK(u *user.User, p string) bool {
-	base := u.BasePath
+	base := u.VisibleBase()
 	return base == "/" || p == base || strings.HasPrefix(p, base+"/")
 }
 
@@ -148,7 +171,7 @@ func navOK(u *user.User, p string) bool {
 	if accessOK(u, p) || p == "/" {
 		return true
 	}
-	return strings.HasPrefix(u.BasePath, p+"/")
+	return strings.HasPrefix(u.VisibleBase(), p+"/")
 }
 
 // findMount 最长前缀匹配；返回挂载与相对路径。

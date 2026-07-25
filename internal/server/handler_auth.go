@@ -46,5 +46,5 @@ func (s *Server) me(c *gin.Context) {
 // upload_workers 供网页上传队列决定同传文件数（非敏感）。
 func (s *Server) publicSettings(c *gin.Context) {
 	OK(c, gin.H{"site_title": s.conf.SiteTitle(), "version": conf.Version,
-		"upload_workers": s.conf.UploadWorkers()})
+		"upload_workers": s.conf.UploadWorkers(), "media_home_sort": s.conf.MediaHomeSort()})
 }

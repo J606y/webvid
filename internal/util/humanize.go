@@ -20,6 +20,11 @@ func Humanize(err error) string {
 	s := strings.TrimSpace(err.Error())
 	low := strings.ToLower(s)
 	switch {
+	// —— 安全策略（要排在网络之前）——
+	// SSRF 防护拒绝内网地址时，错误串里裹着 "dial tcp"，会被下面的网络分支吞成
+	// 「无法连接到服务器」——用户便以为是网速问题反复重试，真正的原因反而没了。
+	case has(s, "拒绝访问内网", "保留地址"):
+		return "不支持内网或本机地址。离线下载只能拉取公网可访问的链接。"
 	// —— 网络 ——
 	case has(low, "timeout", "deadline exceeded", "timed out", "i/o timeout"):
 		return "连接超时。请检查网络后重试。"

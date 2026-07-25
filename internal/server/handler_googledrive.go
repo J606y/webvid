@@ -79,25 +79,29 @@ func (s *Server) gdAuthURL(c *gin.Context) {
 
 // GET /api/googledrive/callback?code&state —— Google 授权回调（非鉴权路由，靠单次有效的 state 保护）。
 // Google 302 浏览器过来时不带我们的 JWT，故不能挂在 admin 组下。
+//
+// state 在这里统一先取（即便是取消/拒绝分支也一样）：Google 的错误重定向同样会带回
+// 我们下发的 state，借它拿到 storageID 才能让下面的结果页把"这是哪条存储的授权"
+// 广播回后台标签页；state 无效/过期时 id 为 0，广播里带不出具体归属，由前端兜底处理。
 func (s *Server) gdCallback(c *gin.Context) {
+	id, redirectURI, stateOK := googledrive.OAuth.Take(c.Query("state"))
 	if errStr := c.Query("error"); errStr != "" {
-		gdCallbackHTML(c, false, "授权未完成：你在 Google 页面取消或拒绝了授权，请回后台重新点「授权」")
+		gdCallbackHTML(c, id, false, "授权未完成：你在 Google 页面取消或拒绝了授权，请回后台重新点「授权」")
 		return
 	}
-	id, redirectURI, ok := googledrive.OAuth.Take(c.Query("state"))
-	if !ok {
-		gdCallbackHTML(c, false, "授权会话已过期或无效，请回后台重新点「授权」")
+	if !stateOK {
+		gdCallbackHTML(c, id, false, "授权会话已过期或无效，请回后台重新点「授权」")
 		return
 	}
 	code := c.Query("code")
 	if code == "" {
-		gdCallbackHTML(c, false, "未收到授权码")
+		gdCallbackHTML(c, id, false, "未收到授权码")
 		return
 	}
 	var cfgJSON string
 	if err := s.db.QueryRow(`SELECT config FROM storages WHERE id=? AND driver='googledrive'`, id).
 		Scan(&cfgJSON); err != nil {
-		gdCallbackHTML(c, false, "存储不存在")
+		gdCallbackHTML(c, id, false, "存储不存在")
 		return
 	}
 	cfg := driver.Config{}
@@ -105,27 +109,40 @@ func (s *Server) gdCallback(c *gin.Context) {
 	refresh, err := googledrive.Exchange(c.Request.Context(),
 		cfg["client_id"], cfg["client_secret"], code, redirectURI)
 	if err != nil {
-		gdCallbackHTML(c, false, util.Humanize(err))
+		gdCallbackHTML(c, id, false, util.Humanize(err))
 		return
 	}
 	cfg["refresh_token"] = refresh
 	b, _ := json.Marshal(cfg)
 	if _, err := s.db.Exec(`UPDATE storages SET config=? WHERE id=?`, string(b), id); err != nil {
-		gdCallbackHTML(c, false, "授权成功，但保存失败，请回后台重试")
+		gdCallbackHTML(c, id, false, "授权成功，但保存失败，请回后台重试")
 		return
 	}
 	// 重载挂载让新 token 生效（失败不阻断，用户可回后台手动重载）。
 	if err := s.fs.Reload(c.Request.Context()); err == nil {
 		s.index.Rebuild()
 	}
-	gdCallbackHTML(c, true, "授权成功！可以关闭此页面，回后台刷新即可看到该存储已就绪。")
+	gdCallbackHTML(c, id, true, "授权成功！可以关闭此页面，回后台刷新即可看到该存储已就绪。")
 }
 
 // gdCallbackHTML 回一个自包含的结果页（回调发生在新标签，用户看完关闭即可）。
-func gdCallbackHTML(c *gin.Context, ok bool, msg string) {
+//
+// 授权是否真的完成不该由用户点了后台弹窗里的哪个按钮决定，而应由这里——服务端已经
+// 落盘的结果——说了算。于是顺带用同源 BroadcastChannel 把 {id, ok, message} 广播出去：
+// BroadcastChannel 只认同源，不依赖 window.opener，因此后台那边 window.open 加的
+// 'noopener'（防止这个新标签反向操纵后台页面）不会挡路。后台页面监听到后据此立即
+// 给出准确的成功/失败提示；万一用户中途直接关掉这个标签、广播根本不会发生，后台页面
+// 点「已完成/关闭」时也会回查该存储的真实配置与挂载状态兜底，不会卡在"看着像成功"。
+func gdCallbackHTML(c *gin.Context, id int64, ok bool, msg string) {
 	title, color := "授权失败", "#f56c6c"
 	if ok {
 		title, color = "授权成功", "#22c55e"
+	}
+	// json.Marshal 默认会把 <、>、& 转义为 < 等，可安全嵌进 <script> 而不必担心
+	// msg 里出现 </script> 之类内容把标签提前截断。
+	payload, err := json.Marshal(gin.H{"id": id, "ok": ok, "message": msg})
+	if err != nil {
+		payload = []byte(`{"id":0,"ok":false,"message":"内部错误"}`)
 	}
 	c.Header("Content-Type", "text/html; charset=utf-8")
 	c.String(http.StatusOK, `<!doctype html><html lang="zh"><head><meta charset="utf-8">`+
@@ -134,5 +151,8 @@ func gdCallbackHTML(c *gin.Context, ok bool, msg string) {
 		`display:flex;min-height:100vh;align-items:center;justify-content:center;margin:0">`+
 		`<div style="text-align:center;padding:24px;max-width:460px">`+
 		`<div style="font-size:20px;font-weight:600;color:`+color+`;margin-bottom:12px">`+title+`</div>`+
-		`<div style="line-height:1.7">`+html.EscapeString(msg)+`</div></div></body></html>`)
+		`<div style="line-height:1.7">`+html.EscapeString(msg)+`</div></div>`+
+		`<script>try{var bc=new BroadcastChannel('webvid-googledrive-auth');bc.postMessage(`+
+		string(payload)+`);bc.close()}catch(e){}</script>`+
+		`</body></html>`)
 }

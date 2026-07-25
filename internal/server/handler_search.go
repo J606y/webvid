@@ -45,7 +45,7 @@ func (s *Server) fsSearch(c *gin.Context) {
 		args = append(args, kind)
 	}
 	// base_path 视野过滤
-	base := getUser(c).BasePath
+	base := getUser(c).VisibleBase()
 	sql += ` AND (?='/' OR path=? OR substr(path,1,length(?)+1)=?||'/')`
 	args = append(args, base, base, base, base)
 	// 挂载「在搜索中展示」开关过滤

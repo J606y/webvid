@@ -8,6 +8,16 @@
           <el-form-item label="站点标题">
             <el-input v-model="site.site_title" />
           </el-form-item>
+          <el-form-item label="媒体库首页">
+            <el-select v-model="site.media_home_sort" style="width: 100%">
+              <el-option label="随机抽样" value="random" />
+              <el-option label="最新在前" value="modified" />
+            </el-select>
+            <div class="dim field-help">
+              「所有视频」「所有照片」这一屏的取法。随机抽样每次进入换一批，适合翻着看；
+              最新在前按修改时间排序，适合找刚放进来的。完整列表始终在「查看全部」里。
+            </div>
+          </el-form-item>
 
           <el-form-item>
             <el-button type="primary" @click="saveSite">保存</el-button>
@@ -23,6 +33,10 @@
             <el-input-number v-model="site.copy_workers" :min="1" :max="32" />
             <div class="dim field-help">跨存储复制/移动同时执行的任务数，其余排队；保存后立即生效</div>
           </el-form-item>
+          <el-form-item label="文件夹内并发">
+            <el-input-number v-model="site.copy_file_workers" :min="1" :max="32" />
+            <div class="dim field-help">复制单个文件夹时，内部文件同时复制的数量；保存后对新任务生效</div>
+          </el-form-item>
           <el-form-item label="离线下载线程">
             <el-input-number v-model="site.offline_workers" :min="1" :max="32" />
             <div class="dim field-help">同时进行的离线下载任务数</div>
@@ -34,15 +48,15 @@
 
           <el-divider content-position="left" class="task-sect">速度限制（KB/s，0 为不限速）</el-divider>
           <el-form-item label="复制限速">
-            <el-input-number v-model="site.copy_speed_kb" :min="0" :step="512" />
+            <el-input-number v-model="site.copy_speed_kb" :min="0" :max="SPEED_MAX" :step="512" />
             <div class="dim field-help">全部复制/移动任务共享的总速率</div>
           </el-form-item>
           <el-form-item label="上传限速">
-            <el-input-number v-model="site.upload_speed_kb" :min="0" :step="512" />
+            <el-input-number v-model="site.upload_speed_kb" :min="0" :max="SPEED_MAX" :step="512" />
             <div class="dim field-help">网页上传的总速率</div>
           </el-form-item>
           <el-form-item label="下载限速">
-            <el-input-number v-model="site.download_speed_kb" :min="0" :step="512" />
+            <el-input-number v-model="site.download_speed_kb" :min="0" :max="SPEED_MAX" :step="512" />
             <div class="dim field-help">服务器中转下行（下载/直连播放）与离线下载共享的总速率；云盘 302 直链不经服务器、不受限</div>
           </el-form-item>
 
@@ -87,9 +101,12 @@ const tab = ref('site')
 // 两 Tab 共用同一 settings 对象与 saveSite（都 PUT /admin/settings 全量）。
 // 后端：site_title 必填，worker/限速为指针字段、缺省保原值，保存即热生效。
 const site = ref({
-  site_title: '', copy_workers: 2, offline_workers: 2, upload_workers: 2,
-  copy_speed_kb: 0, upload_speed_kb: 0, download_speed_kb: 0,
+  site_title: '', copy_workers: 2, copy_file_workers: 4, offline_workers: 2, upload_workers: 2,
+  copy_speed_kb: 0, upload_speed_kb: 0, download_speed_kb: 0, media_home_sort: 'random',
 })
+// 限速上限，与后端 handler_admin.go 的 1<<20 KB/s 一致。不设 :max 的话超出的值
+// 会被后端静默钳到边界，表单却还显示填进去的数字 —— 界面值与生效值对不上。
+const SPEED_MAX = 1 << 20
 async function loadSite() {
   try {
     site.value = await api.admin.settings.get()
@@ -100,7 +117,9 @@ async function loadSite() {
 }
 async function saveSite() {
   if (!site.value.site_title) return ElMessage.warning('站点标题不能为空')
-  await api.admin.settings.save(site.value)
+  // 用响应回填：后端返回的是钳位后的真实值，表单必须显示真正生效的数字
+  const d = await api.admin.settings.save(site.value)
+  if (d) site.value = d
   ElMessage.success('已保存并生效')
   app.fetchPublic()
 }

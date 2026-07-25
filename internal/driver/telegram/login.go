@@ -46,6 +46,10 @@ type CodeSent struct {
 	SentTo  string `json:"sent_to"`           // 人话：码发到哪了
 	Resend  string `json:"resend,omitempty"`  // 重发可切换的通道（空=服务端没给备选）
 	Timeout int    `json:"timeout,omitempty"` // 约多少秒后才允许重发切换
+	// Resumed 标记本次是否复用了此前未过期的登录会话（走 auth.resendCode 换通道），
+	// 而非一次全新的验证流程。前端据此把按钮文案/提示与真实行为对齐，不能只凭
+	// 本地是否点过按钮猜——本地状态在弹窗关闭重开后会丢失，但服务端这个会话仍可能存活。
+	Resumed bool `json:"resumed"`
 }
 
 // sentDesc 验证码实际投递通道 → 给用户看的人话。
@@ -126,6 +130,25 @@ func tgAuthError(err error, sending bool) error {
 // loginTTL 登录会话保活时长：验证码经 App 通道投递偶有数分钟延迟，给足取码时间。
 const loginTTL = 10 * time.Minute
 
+// PendingInfo 某存储当前有没有未过期的登录会话。
+// 会话在服务端存活 loginTTL，与登录弹窗的开关无关：关掉弹窗再打开，服务端这边
+// 可能仍在等验证码。前端据此显示真实的按钮文案，而不是凭本地有没有点过按钮猜。
+type PendingInfo struct {
+	Pending   bool `json:"pending"`
+	ExpiresIn int  `json:"expires_in,omitempty"` // 剩余秒数
+}
+
+// Pending 查询 id 的登录会话状态（只读，不动会话本身）。
+func (m *LoginManager) Pending(id int64) PendingInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p := m.pending[id]
+	if p == nil || time.Now().After(p.expires) {
+		return PendingInfo{}
+	}
+	return PendingInfo{Pending: true, ExpiresIn: int(time.Until(p.expires).Seconds())}
+}
+
 // take 取走 id 的登录会话（从表中摘除，由调用方决定放回或停掉）；
 // 过期或手机号已改则就地回收，返回 nil。
 func (m *LoginManager) take(id int64, phone string) *pendingLogin {
@@ -167,7 +190,9 @@ func (m *LoginManager) SendCode(ctx context.Context, id int64, cfg driver.Config
 				m.pending[id] = p
 				m.mu.Unlock()
 				log.Printf("telegram: resend_code 已切换通道 -> %T (next %v)", code.Type, code.NextType)
-				return describeSent(code), nil
+				info := describeSent(code)
+				info.Resumed = true
+				return info, nil
 			}
 		}
 		// 没有备选通道 / 码已失效等 → 拆掉旧会话，落回全新 sendCode

@@ -3,6 +3,7 @@ import { useRoute } from 'vue-router'
 import { api } from '../utils/api'
 import { isMobile } from '../utils/viewport'
 import { swipeHandlers } from '../utils/swipe'
+import { useApp } from '../stores/app'
 
 const PAGE = 120
 const HOME_CAP = 200 // 主页网格默认展示上限，看更多走「查看全部」
@@ -19,6 +20,7 @@ const HOME_CAP = 200 // 主页网格默认展示上限，看更多走「查看�
 export function useMediaLibrary(opts) {
   const { kind, routePath, historyKey, dirDefault, historyCap = 50, loadStatic } = opts
   const route = useRoute()
+  const app = useApp()
 
   const grid = ref([]) // 主网格（分页累积）
   const loaded = ref(false)
@@ -68,7 +70,10 @@ export function useMediaLibrary(opts) {
       const limit = isHome.value ? HOME_CAP : PAGE
       const params = { kind, limit, offset: offset.value }
       if (isHome.value) {
-        params.sort = 'random' // 主页随机挑选；完整有序列表走「查看全部」
+        // 首页这一屏的取法由后台设置决定：随机抽样（每次换一批）或最新在前。
+        // 无论哪种，完整有序列表都在「查看全部」里。
+        params.sort = app.mediaHomeSort
+        if (params.sort === 'modified') params.order = 'desc'
       } else {
         params.sort = sort.value
         params.order = sort.value === 'name' ? 'asc' : 'desc'
