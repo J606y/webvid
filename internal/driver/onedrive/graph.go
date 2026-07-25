@@ -12,13 +12,17 @@ import (
 	"log"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"newlist/internal/driver"
+	"newlist/internal/util"
 )
+
+// maxThrottleRetries 限流退避重试次数。撞限流是并发转存下的常态而非异常，
+// 只重试一次等于把本能自愈的请求直接判死，整个文件夹任务跟着中断。
+const maxThrottleRetries = 4
 
 const (
 	modeDelegated = "delegated" // refresh_token
@@ -232,10 +236,10 @@ func mapGraphError(status int, code, message string) error {
 }
 
 // req 发送带鉴权的 Graph 请求并解析 JSON 到 out（可为 nil）。
-// 401 强制刷新 token 重试 1 次；429 按 Retry-After（≤5s）重试 1 次。
+// 401 强制刷新 token 重试 1 次；429 按 util.ThrottleWait 退避重试 maxThrottleRetries 次。
 // body 为 JSON 可序列化对象或 nil。
 func (c *client) req(ctx context.Context, method, u string, body any, out any) error {
-	retried401, retried429 := false, false
+	retried401, rlAttempts := false, 0
 	for {
 		var br io.Reader
 		if body != nil {
@@ -278,17 +282,10 @@ func (c *client) req(ctx context.Context, method, u string, body any, out any) e
 			retried401 = true
 			c.forceRefresh()
 			continue
-		case resp.StatusCode == 429 && !retried429:
-			retried429 = true
-			wait := 2 * time.Second
-			if ra, _ := strconv.Atoi(resp.Header.Get("Retry-After")); ra > 0 {
-				wait = time.Duration(ra) * time.Second
-			}
-			if wait > 5*time.Second {
-				wait = 5 * time.Second
-			}
+		case resp.StatusCode == 429 && rlAttempts < maxThrottleRetries:
+			rlAttempts++
 			select {
-			case <-time.After(wait):
+			case <-time.After(util.ThrottleWait(rlAttempts, resp.Header.Get("Retry-After"))):
 				continue
 			case <-ctx.Done():
 				return ctx.Err()
@@ -301,39 +298,50 @@ func (c *client) req(ctx context.Context, method, u string, body any, out any) e
 }
 
 // reqHeader 同 req，但额外返回响应头（Copy 需要 Location 监控 URL）。
+// body 每轮重新序列化，撞 429 时可以安全退避重发。
 func (c *client) reqHeader(ctx context.Context, method, u string, body any) (http.Header, error) {
-	var br io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
+	for attempt := 1; ; attempt++ {
+		var br io.Reader
+		if body != nil {
+			b, err := json.Marshal(body)
+			if err != nil {
+				return nil, err
+			}
+			br = strings.NewReader(string(b))
+		}
+		req, err := http.NewRequestWithContext(ctx, method, u, br)
 		if err != nil {
 			return nil, err
 		}
-		br = strings.NewReader(string(b))
+		tok, err := c.token(ctx)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		if body != nil {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return resp.Header, nil
+		}
+		if resp.StatusCode == 429 && attempt <= maxThrottleRetries {
+			select {
+			case <-time.After(util.ThrottleWait(attempt, resp.Header.Get("Retry-After"))):
+				continue
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		var ge graphError
+		json.Unmarshal(data, &ge)
+		return nil, mapGraphError(resp.StatusCode, ge.Error.Code, ge.Error.Message)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, u, br)
-	if err != nil {
-		return nil, err
-	}
-	tok, err := c.token(ctx)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return resp.Header, nil
-	}
-	var ge graphError
-	json.Unmarshal(data, &ge)
-	return nil, mapGraphError(resp.StatusCode, ge.Error.Code, ge.Error.Message)
 }
 
 // itemURL 构造 path-based addressing 的条目 URL。

@@ -389,6 +389,55 @@ func TestLookupCacheAndNotFound(t *testing.T) {
 	}
 }
 
+// TestLookupNegativeCache 查不存在的路径不该每次都重列父目录（与 googledrive 同源问题）。
+func TestLookupNegativeCache(t *testing.T) {
+	ms := &mockServer{t: t}
+	var calls int
+	ms.handleFiles = func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		switch r.URL.Query().Get("parent_id") {
+		case "":
+			writeJSON(w, filesResp{Files: []rawFile{{ID: "d1", Kind: "drive#folder", Name: "电影"}}})
+		case "d1":
+			writeJSON(w, filesResp{Files: []rawFile{{ID: "f1", Kind: "drive#file", Name: "片.mp4", Size: "1"}}})
+		default:
+			writeJSON(w, filesResp{})
+		}
+	}
+	srv := httptest.NewServer(ms.handler())
+	defer srv.Close()
+	d := newTestDriver(t, srv, ms)
+
+	const missing = "/电影/缺失.mp4"
+	if _, err := d.lookup(context.Background(), missing); err != driver.ErrNotFound {
+		t.Fatalf("应为 ErrNotFound，得 %v", err)
+	}
+	first := calls
+	if first == 0 {
+		t.Fatal("首次查询应真的发起列举")
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := d.lookup(context.Background(), missing); err != driver.ErrNotFound {
+			t.Fatalf("第 %d 次仍应为 ErrNotFound，得 %v", i+2, err)
+		}
+	}
+	if calls != first {
+		t.Fatalf("重复查不存在的路径应命中负缓存，却多发了 %d 次列举", calls-first)
+	}
+	if f, err := d.lookup(context.Background(), "/电影/片.mp4"); err != nil || f.id != "f1" {
+		t.Fatalf("同目录已存在的文件仍应解析成功: %+v err=%v", f, err)
+	}
+
+	// 写操作（MakeDir/Rename/Move/Copy）成功后都调 cacheClear，负缓存必须随之失效
+	d.cacheClear()
+	if _, err := d.lookup(context.Background(), missing); err != driver.ErrNotFound {
+		t.Fatalf("清缓存后仍应为 ErrNotFound，得 %v", err)
+	}
+	if calls == first {
+		t.Fatal("cacheClear 后应重新发起列举——负缓存没被清掉")
+	}
+}
+
 func TestLinkSelection(t *testing.T) {
 	ms := &mockServer{t: t}
 	ms.handleFiles = func(w http.ResponseWriter, r *http.Request) {

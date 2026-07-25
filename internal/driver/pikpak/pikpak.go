@@ -54,8 +54,9 @@ type PikPak struct {
 }
 
 type cacheEntry struct {
-	f  pkFile
-	at time.Time
+	f       pkFile
+	at      time.Time
+	missing bool // 已确认不存在，见 cacheMissing
 }
 
 // pkFile 是 PikPak 文件条目的最小投影。
@@ -205,8 +206,11 @@ func (d *PikPak) lookup(ctx context.Context, rel string) (pkFile, error) {
 	if rel == "" {
 		return pkFile{id: d.root, isDir: true, name: ""}, nil
 	}
-	if f, ok := d.cacheGet(rel); ok {
-		return f, nil
+	if e, ok := d.cacheGet(rel); ok {
+		if e.missing {
+			return pkFile{}, driver.ErrNotFound
+		}
+		return e.f, nil
 	}
 	parentRel := path.Dir(rel)
 	if parentRel == "." {
@@ -230,17 +234,28 @@ func (d *PikPak) lookup(ctx context.Context, rel string) (pkFile, error) {
 			return ch, nil
 		}
 	}
+	d.cacheMissing(rel)
 	return pkFile{}, driver.ErrNotFound
 }
 
-func (d *PikPak) cacheGet(rel string) (pkFile, bool) {
+// cacheGet 返回缓存条目；条目可能是「已确认不存在」，调用方须查 missing 后再用 f。
+func (d *PikPak) cacheGet(rel string) (cacheEntry, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	e, ok := d.cache[rel]
 	if !ok || d.now().Sub(e.at) > d.cacheTTL {
-		return pkFile{}, false
+		return cacheEntry{}, false
 	}
-	return e.f, true
+	return e, true
+}
+
+// cacheMissing 记住「这个路径不存在」。只缓存找得到的路径时，每查一次不存在的路径
+// 都要把父目录整个重列一遍。所有让路径由无变有的写操作（MakeDir/Rename/Move/Copy）
+// 成功后都会 cacheClear，负缓存不会盖住新建的条目；外部改动与正缓存一样受 TTL 约束。
+func (d *PikPak) cacheMissing(rel string) {
+	d.mu.Lock()
+	d.cache[rel] = cacheEntry{at: d.now(), missing: true}
+	d.mu.Unlock()
 }
 
 func (d *PikPak) cachePut(rel string, f pkFile) {

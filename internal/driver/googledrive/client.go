@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"newlist/internal/driver"
+	"newlist/internal/util"
 )
 
 const (
@@ -212,14 +213,18 @@ func isRateLimited(status int, reason string) bool {
 	return status == 403 && (reason == "rateLimitExceeded" || reason == "userRateLimitExceeded")
 }
 
+// maxThrottleRetries 限流退避重试次数。撞限流是并发转存下的常态而非异常，
+// 只重试一次等于把本能自愈的请求直接判死，整个文件夹任务跟着中断。
+const maxThrottleRetries = 4
+
 // req 发送带鉴权的 Drive JSON 请求。q 查询参数（可 nil），body JSON 对象（可 nil），out 解析响应（可 nil）。
-// 401 强制刷新 token 重试 1 次；限流按 Retry-After（≤5s）退避重试 1 次。
+// 401 强制刷新 token 重试 1 次；限流按 util.ThrottleWait 退避重试 maxThrottleRetries 次。
 func (c *client) req(ctx context.Context, method, rawURL string, q url.Values, body any, out any) error {
 	u := rawURL
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-	retried401, retriedRL := false, false
+	retried401, rlAttempts := false, 0
 	for {
 		var br io.Reader
 		if body != nil {
@@ -264,17 +269,10 @@ func (c *client) req(ctx context.Context, method, rawURL string, q url.Values, b
 			c.forceRefresh()
 			continue
 		}
-		if isRateLimited(resp.StatusCode, reason) && !retriedRL {
-			retriedRL = true
-			wait := 2 * time.Second
-			if ra, _ := strconv.Atoi(resp.Header.Get("Retry-After")); ra > 0 {
-				wait = time.Duration(ra) * time.Second
-			}
-			if wait > 5*time.Second {
-				wait = 5 * time.Second
-			}
+		if isRateLimited(resp.StatusCode, reason) && rlAttempts < maxThrottleRetries {
+			rlAttempts++
 			select {
-			case <-time.After(wait):
+			case <-time.After(util.ThrottleWait(rlAttempts, resp.Header.Get("Retry-After"))):
 				continue
 			case <-ctx.Done():
 				return ctx.Err()

@@ -127,7 +127,8 @@ func TestOAuthManager(t *testing.T) {
 
 // mockDrive 起一个假的 Drive/token 端点，供 lookup 路径解析测试。
 // 目录树：root(id=ROOT) → 电影(id=F1) → 2024(id=F2) → a.mp4(id=X, size=123)
-func mockDrive(t *testing.T) (*httptest.Server, func()) {
+// 返回的计数器统计目录列举次数——路径解析的真实开销就在这里。
+func mockDrive(t *testing.T) (*httptest.Server, *int, func()) {
 	t.Helper()
 	folder := func(id, name string) map[string]any {
 		return map[string]any{"id": id, "name": name, "mimeType": folderMime}
@@ -140,6 +141,7 @@ func mockDrive(t *testing.T) (*httptest.Server, func()) {
 		"F1":   {folder("F2", "2024")},
 		"F2":   {file("X", "a.mp4", "123")},
 	}
+	listCalls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/token":
@@ -147,6 +149,7 @@ func mockDrive(t *testing.T) (*httptest.Server, func()) {
 		case r.URL.Path == "/files/root":
 			json.NewEncoder(w).Encode(map[string]any{"id": "ROOT", "mimeType": folderMime})
 		case r.URL.Path == "/files": // list：q=" 'PARENT' in parents ..."
+			listCalls++
 			q := r.URL.Query().Get("q")
 			parent := ""
 			if i := strings.Index(q, "' in parents"); i > 0 {
@@ -160,11 +163,56 @@ func mockDrive(t *testing.T) (*httptest.Server, func()) {
 	oldAPI, oldTok := driveAPIBase, tokenURL
 	driveAPIBase = srv.URL
 	tokenURL = srv.URL + "/token"
-	return srv, func() { driveAPIBase, tokenURL = oldAPI, oldTok; srv.Close() }
+	return srv, &listCalls, func() { driveAPIBase, tokenURL = oldAPI, oldTok; srv.Close() }
+}
+
+// TestLookupNegativeCache 查不存在的路径不该每次都把父目录重列一遍。转存的续传判断、
+// 播放前的探测都走这条路，旧实现只缓存「找得到」的路径，查一次不存在就列一轮目录。
+func TestLookupNegativeCache(t *testing.T) {
+	_, listCalls, restore := mockDrive(t)
+	defer restore()
+
+	d := &GDrive{}
+	if err := d.Init(context.Background(), driver.Config{
+		"client_id": "c", "client_secret": "s", "refresh_token": "r",
+	}); err != nil {
+		t.Fatalf("Init: %v", err)
+	}
+
+	const missing = "电影/2024/不存在.mp4"
+	if _, err := d.lookup(context.Background(), missing); err != driver.ErrNotFound {
+		t.Fatalf("应为 ErrNotFound，得 %v", err)
+	}
+	first := *listCalls
+	if first == 0 {
+		t.Fatal("首次查询应真的发起列举")
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := d.lookup(context.Background(), missing); err != driver.ErrNotFound {
+			t.Fatalf("第 %d 次仍应为 ErrNotFound，得 %v", i+2, err)
+		}
+	}
+	if *listCalls != first {
+		t.Fatalf("重复查不存在的路径应命中负缓存，却多发了 %d 次列举", *listCalls-first)
+	}
+	// 负缓存只针对这一个路径，不能波及同目录下真实存在的条目
+	if f, err := d.lookup(context.Background(), "电影/2024/a.mp4"); err != nil || f.id != "X" {
+		t.Fatalf("同目录已存在的文件仍应解析成功: %+v err=%v", f, err)
+	}
+
+	// 写操作后负缓存必须失效，否则刚上传的文件会被判成不存在，播放/续传全错。
+	// Put/MakeDir/Rename/Move/Copy 成功后都调 cacheClear，这里以它为代表。
+	d.cacheClear()
+	if _, err := d.lookup(context.Background(), missing); err != driver.ErrNotFound {
+		t.Fatalf("清缓存后仍应为 ErrNotFound，得 %v", err)
+	}
+	if *listCalls == first {
+		t.Fatal("cacheClear 后应重新发起列举——负缓存没被清掉")
+	}
 }
 
 func TestLookupResolvesPath(t *testing.T) {
-	srv, restore := mockDrive(t)
+	srv, _, restore := mockDrive(t)
 	defer restore()
 	_ = srv
 

@@ -27,6 +27,12 @@ M12 Docker：✅ 2026-07-07 完成（本机 Docker Desktop 实测：构建/转�
 
 技术债务整改进度另见 `docs/REFACTOR-PROGRESS.md`。
 
+**转存链路提速与限流可靠性（2026-07-25）见 `docs/TRANSFER-RELIABILITY.md`**：
+断点续传探测从每文件一次 Stat 改为每目录一次 List、googledrive/pikpak 路径解析加负缓存、
+限流退避改对（上传路径原本完全没有退避）+ 错误能定位到文件与源/目标侧。
+内含实测结论：**Google Drive 每天 750GB 上传额度用尽时返回的是 `userRateLimitExceeded`，
+与并发过高的瞬时限流同码**，官方文档未记载；两个并发设置是相乘的。
+
 **上线后打磨（2026-07-25）另见 `docs/POLISH-PROGRESS.md`**：
 A. 报错人话化 + Apple 风文案已完成（`util.Humanize` + 三处异步任务 + 驱动前缀 +
 `aadMessage`/`oauthMessage` + ffmpeg stderr 收敛），全量测试与 13 个 e2e 脚本通过、

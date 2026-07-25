@@ -1,9 +1,55 @@
 package util
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"unicode"
 )
+
+// throttleHints 判定「上游限流」的关键词，与 IsThrottled 共用一份。
+var throttleHints = []string{
+	"http 429", "too many requests", "flood_wait", "rate limit", "操作频繁", "操作过于频繁",
+}
+
+// contextError 给错误附一句人话上下文（哪个文件、哪一步出的问题）。
+// Humanize 认得它：保留这句、只翻译内层。否则一条「请求过于频繁」浮到界面上，
+// 用户既不知道是哪个文件，也不知道是源端还是目标端在限流，根本无从下手。
+type contextError struct {
+	ctx string
+	err error
+}
+
+func (e *contextError) Error() string { return e.ctx + "：" + e.err.Error() }
+func (e *contextError) Unwrap() error { return e.err }
+
+// Contextf 给 err 附上下文；err 为 nil 时返回 nil，可以直接包在返回值上。
+func Contextf(err error, format string, a ...any) error {
+	if err == nil {
+		return nil
+	}
+	return &contextError{ctx: fmt.Sprintf(format, a...), err: err}
+}
+
+// messageError 由调用方直接给出面向用户的完整说明，Humanize 原样采用、不再翻译内层。
+// 用在调用方比通用翻译更懂处境的地方：同一个「限流」，退避一次就过去和反复退避都过不去，
+// 该说的话完全不同，而错误码本身分不出这两者。
+type messageError struct {
+	msg string
+	err error
+}
+
+func (e *messageError) Error() string { return e.msg + "：" + e.err.Error() }
+func (e *messageError) Unwrap() error { return e.err }
+
+// Messagef 用一句写好的人话覆盖 err 的对外说明，同时保留错误链供 errors.Is 判定。
+// err 为 nil 时返回 nil。
+func Messagef(err error, format string, a ...any) error {
+	if err == nil {
+		return nil
+	}
+	return &messageError{msg: fmt.Sprintf(format, a...), err: err}
+}
 
 // Humanize 把底层技术错误转成一句给用户看的中文，口吻对标 Apple 软件的错误提示：
 // 说清「什么错 + 一句怎么办」，克制、不甩英文/jargon/Go 类型名。
@@ -16,6 +62,16 @@ import (
 func Humanize(err error) string {
 	if err == nil {
 		return "操作失败"
+	}
+	// 调用方已写好完整说明：原样采用，不再翻译内层
+	var me *messageError
+	if errors.As(err, &me) {
+		return me.msg
+	}
+	// 带上下文的错误：保留上下文，只把内层技术错误翻成人话
+	var ce *contextError
+	if errors.As(err, &ce) {
+		return ce.ctx + "：" + Humanize(ce.err)
 	}
 	s := strings.TrimSpace(err.Error())
 	low := strings.ToLower(s)
@@ -44,7 +100,7 @@ func Humanize(err error) string {
 	case has(low, "permission denied", "access is denied", "operation not permitted"):
 		return "服务器文件权限不足，无法访问。"
 	// —— 接口 / 授权（云盘、OAuth 常见）——
-	case has(low, "http 429", "too many requests", "flood_wait", "rate limit", "操作频繁", "操作过于频繁"):
+	case has(low, throttleHints...):
 		return "请求过于频繁，请稍后重试。"
 	case has(low, "http 401", "invalid_grant", "unauthorized", "token expired", "token 已失效", "token 失效"):
 		return "登录授权已失效，请重新授权后重试。"

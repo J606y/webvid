@@ -60,8 +60,9 @@ type GDrive struct {
 }
 
 type cacheEntry struct {
-	f  gdFile
-	at time.Time
+	f       gdFile
+	at      time.Time
+	missing bool // 已确认不存在，见 cacheMissing
 }
 
 // gdFile 是 Drive 文件条目的最小投影。
@@ -187,8 +188,11 @@ func (d *GDrive) lookup(ctx context.Context, rel string) (gdFile, error) {
 	if rel == "" {
 		return gdFile{id: d.root, isDir: true, name: ""}, nil
 	}
-	if f, ok := d.cacheGet(rel); ok {
-		return f, nil
+	if e, ok := d.cacheGet(rel); ok {
+		if e.missing {
+			return gdFile{}, driver.ErrNotFound
+		}
+		return e.f, nil
 	}
 	parentRel := path.Dir(rel)
 	if parentRel == "." {
@@ -216,17 +220,30 @@ func (d *GDrive) lookup(ctx context.Context, rel string) (gdFile, error) {
 	if match != nil {
 		return *match, nil
 	}
+	d.cacheMissing(rel)
 	return gdFile{}, driver.ErrNotFound
 }
 
-func (d *GDrive) cacheGet(rel string) (gdFile, bool) {
+// cacheGet 返回缓存条目；条目可能是「已确认不存在」，调用方须查 missing 后再用 f。
+func (d *GDrive) cacheGet(rel string) (cacheEntry, bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	e, ok := d.cache[rel]
 	if !ok || d.now().Sub(e.at) > d.cacheTTL {
-		return gdFile{}, false
+		return cacheEntry{}, false
 	}
-	return e.f, true
+	return e, true
+}
+
+// cacheMissing 记住「这个路径不存在」。只缓存找得到的路径时，每查一次不存在的路径
+// 都要把父目录整个重列一遍——上传前的探测、播放前的 Stat 都在这条路径上，
+// 目标目录一大就是成千上万次列举。
+// 安全性：所有让路径由无变有的写操作（Put/MakeDir/Rename/Move/Copy）成功后都会
+// cacheClear，负缓存不会盖住刚建好的文件；外部改动则和正缓存一样受 TTL 约束。
+func (d *GDrive) cacheMissing(rel string) {
+	d.mu.Lock()
+	d.cache[rel] = cacheEntry{at: d.now(), missing: true}
+	d.mu.Unlock()
 }
 
 func (d *GDrive) cachePut(rel string, f gdFile) {
@@ -571,32 +588,53 @@ func (d *GDrive) putSimple(ctx context.Context, parentID, existingID, name strin
 	}
 	mw.Close()
 	u := driveUploadBase + "/files?uploadType=multipart&supportsAllDrives=true"
-	return doUpload(ctx, http.MethodPost, u, tok, "multipart/related; boundary="+mw.Boundary(), &buf, int64(buf.Len()))
+	// 用 bytes.Reader 而非 &buf：内容已经整个在内存里，给 doUpload 一个能回绕的 body，
+	// 撞限流时就能就地退避重发，不必把整个文件退回上层重来。
+	body := bytes.NewReader(buf.Bytes())
+	return doUpload(ctx, http.MethodPost, u, tok, "multipart/related; boundary="+mw.Boundary(), body, body.Size())
 }
 
 // doUpload 发一个上传请求并按 Drive 错误体映射失败。
+// 撞限流时退避重试——但仅限 body 能回绕（io.Seeker）的情况：转存时 r 是源端网络流，
+// 读过就没了，就地重发只会传出半个文件，那种情况原样返回让上层重来整个文件。
 func doUpload(ctx context.Context, method, u, tok, contentType string, r io.Reader, size int64) error {
-	req, err := http.NewRequestWithContext(ctx, method, u, r)
-	if err != nil {
-		return err
+	seeker, rewindable := r.(io.Seeker)
+	for attempt := 1; ; attempt++ {
+		if attempt > 1 {
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, method, u, r)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Content-Type", contentType)
+		if size >= 0 {
+			req.ContentLength = size
+		}
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		var ge gError
+		json.Unmarshal(data, &ge)
+		if rewindable && isRateLimited(resp.StatusCode, ge.reason()) && attempt <= maxThrottleRetries {
+			select {
+			case <-time.After(util.ThrottleWait(attempt, resp.Header.Get("Retry-After"))):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return mapDriveError(resp.StatusCode, &ge)
 	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Content-Type", contentType)
-	if size >= 0 {
-		req.ContentLength = size
-	}
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-	var ge gError
-	json.Unmarshal(data, &ge)
-	return mapDriveError(resp.StatusCode, &ge)
 }
 
 // putResumable 大文件：initiate 会话拿 Location，逐块 PUT（Content-Range），每块重试 2 次。
@@ -650,12 +688,22 @@ func (d *GDrive) putResumable(ctx context.Context, parentID, existingID, name st
 		}
 		chunk := buf[:n]
 		var lastErr error
-		for attempt := 0; attempt <= 2; attempt++ {
+		// 限流已由 putChunk 就地按 Retry-After 退避（秒级到分钟级）；这层只管网络抖动
+		// 一类的硬错误，短暂让一下再重发即可，不必也不该按限流的节奏等。
+		for attempt := 1; attempt <= 3; attempt++ {
 			lastErr = putChunk(ctx, sessionURL, chunk, off, size)
 			if lastErr == nil {
 				break
 			}
 			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if attempt == 3 {
+				break
+			}
+			select {
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
@@ -667,27 +715,39 @@ func (d *GDrive) putResumable(ctx context.Context, parentID, existingID, name st
 	return nil
 }
 
+// putChunk 传一个分块；限流时按服务端的 Retry-After 就地退避重发——
+// 分块在内存里，重发绝对安全，且大文件的请求量几乎全在这条路径上。
 func putChunk(ctx context.Context, sessionURL string, chunk []byte, off, total int64) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, sessionURL, bytes.NewReader(chunk))
-	if err != nil {
-		return err
+	for attempt := 1; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, sessionURL, bytes.NewReader(chunk))
+		if err != nil {
+			return err
+		}
+		end := off + int64(len(chunk)) - 1
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", off, end, total))
+		req.ContentLength = int64(len(chunk))
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		// 308 Resume Incomplete = 该块已收、还有后续；2xx = 末块完成。
+		if resp.StatusCode == 308 || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
+			return nil
+		}
+		var ge gError
+		json.Unmarshal(data, &ge)
+		if isRateLimited(resp.StatusCode, ge.reason()) && attempt <= maxThrottleRetries {
+			select {
+			case <-time.After(util.ThrottleWait(attempt, resp.Header.Get("Retry-After"))):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		return mapDriveError(resp.StatusCode, &ge)
 	}
-	end := off + int64(len(chunk)) - 1
-	req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", off, end, total))
-	req.ContentLength = int64(len(chunk))
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
-	// 308 Resume Incomplete = 该块已收、还有后续；2xx = 末块完成。
-	if resp.StatusCode == 308 || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
-		return nil
-	}
-	var ge gError
-	json.Unmarshal(data, &ge)
-	return mapDriveError(resp.StatusCode, &ge)
 }
 
 func min64(a, b int64) int64 {

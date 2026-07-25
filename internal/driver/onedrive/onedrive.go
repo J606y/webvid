@@ -17,6 +17,7 @@ import (
 
 	"newlist/internal/driver"
 	"newlist/internal/model"
+	"newlist/internal/util"
 )
 
 func init() {
@@ -459,31 +460,49 @@ func (d *OneDrive) Put(ctx context.Context, dstDirRel, name string, r io.Reader,
 	return err
 }
 
+// putSmall 小文件整体 PUT。撞限流时退避重发——但仅限 body 能回绕（io.Seeker）的情况：
+// 转存时 r 是源端网络流，读过就没了，就地重发只会传出半个文件，那种情况交给上层重来。
 func (d *OneDrive) putSmall(ctx context.Context, targetRel string, r io.Reader, size int64) error {
 	u := d.cli.itemURL(d.root, targetRel, "/content?@microsoft.graph.conflictBehavior=replace")
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, r)
-	if err != nil {
-		return err
+	seeker, rewindable := r.(io.Seeker)
+	for attempt := 1; ; attempt++ {
+		if attempt > 1 {
+			if _, err := seeker.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, u, r)
+		if err != nil {
+			return err
+		}
+		tok, err := d.cli.token(ctx)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+tok)
+		req.Header.Set("Content-Type", "application/octet-stream")
+		req.ContentLength = size
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		if rewindable && resp.StatusCode == 429 && attempt <= maxThrottleRetries {
+			select {
+			case <-time.After(util.ThrottleWait(attempt, resp.Header.Get("Retry-After"))):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		var ge graphError
+		jsonUnmarshal(data, &ge)
+		return mapGraphError(resp.StatusCode, ge.Error.Code, ge.Error.Message)
 	}
-	tok, err := d.cli.token(ctx)
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+tok)
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.ContentLength = size
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-	var ge graphError
-	jsonUnmarshal(data, &ge)
-	return mapGraphError(resp.StatusCode, ge.Error.Code, ge.Error.Message)
 }
 
 type sessionResp struct {
@@ -514,12 +533,22 @@ func (d *OneDrive) putSession(ctx context.Context, targetRel string, r io.Reader
 		}
 		chunk := buf[:n]
 		var lastErr error
-		for attempt := 0; attempt <= 2; attempt++ { // 每块最多 3 次（1+重试2）
+		// 限流已由 putChunk 就地按 Retry-After 退避（秒级到分钟级）；这层只管网络抖动
+		// 一类的硬错误，短暂让一下再重发即可，不必也不该按限流的节奏等。
+		for attempt := 1; attempt <= 3; attempt++ { // 每块最多 3 次（1+重试2）
 			lastErr = d.putChunk(ctx, sr.UploadURL, chunk, off, size)
 			if lastErr == nil {
 				break
 			}
 			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			if attempt == 3 {
+				break
+			}
+			select {
+			case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+			case <-ctx.Done():
 				return ctx.Err()
 			}
 		}
@@ -531,26 +560,38 @@ func (d *OneDrive) putSession(ctx context.Context, targetRel string, r io.Reader
 	return nil
 }
 
+// putChunk 传一个分块；限流时按服务端的 Retry-After 就地退避重发——
+// 分块在内存里，重发绝对安全，且大文件的请求量几乎全在这条路径上。
 func (d *OneDrive) putChunk(ctx context.Context, uploadURL string, chunk []byte, off, total int64) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(chunk))
-	if err != nil {
-		return err
+	for attempt := 1; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, uploadURL, bytes.NewReader(chunk))
+		if err != nil {
+			return err
+		}
+		end := off + int64(len(chunk)) - 1
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", off, end, total))
+		req.ContentLength = int64(len(chunk))
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		if resp.StatusCode == 429 && attempt <= maxThrottleRetries {
+			select {
+			case <-time.After(util.ThrottleWait(attempt, resp.Header.Get("Retry-After"))):
+				continue
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		var ge graphError
+		jsonUnmarshal(data, &ge)
+		return mapGraphError(resp.StatusCode, ge.Error.Code, ge.Error.Message)
 	}
-	end := off + int64(len(chunk)) - 1
-	req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", off, end, total))
-	req.ContentLength = int64(len(chunk))
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	resp.Body.Close()
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		return nil
-	}
-	var ge graphError
-	jsonUnmarshal(data, &ge)
-	return mapGraphError(resp.StatusCode, ge.Error.Code, ge.Error.Message)
 }
 
 func min64(a, b int64) int64 {

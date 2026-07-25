@@ -46,6 +46,9 @@ type FS struct {
 	// copyFileWorkers 单个转存任务内并发复制的文件数（0=未设置，按 1 串行）。
 	// 来自 settings.copy_file_workers，后台可热调，独立于任务级 copy_workers。
 	copyFileWorkers atomic.Int64
+	// retryBackoff 文件级重试之间等多久；nil = 默认策略（见 copyRetryWait）。
+	// 只有测试会替换它来跳过真实等待，策略本身另有单元测试盯着。
+	retryBackoff func(attempt int, err error) time.Duration
 }
 
 func New(db *sql.DB) *FS { return &FS{db: db} }

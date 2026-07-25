@@ -17,6 +17,7 @@ import (
 	"newlist/internal/driver/local"
 	"newlist/internal/model"
 	"newlist/internal/user"
+	"newlist/internal/util"
 )
 
 // fakeProgress 记录进度回调（测试断言用）。
@@ -40,6 +41,36 @@ func (p *fakeProgress) FileStart(s string) {
 func (p *fakeProgress) FileDone(string) { p.mu.Lock(); p.active--; p.mu.Unlock() }
 func (p *fakeProgress) Add(n int64)     { p.mu.Lock(); p.done += n; p.mu.Unlock() }
 
+// countingLocal 包装 local 驱动统计 Stat/List 次数，用来盯住断点续传的请求量——
+// 云盘上每次 Stat 都可能是一整轮目录列举，回归时必须能看出请求数没被打回原形。
+type countingLocal struct {
+	*local.Local
+	stats atomic.Int64
+	lists atomic.Int64
+}
+
+func (d *countingLocal) Stat(ctx context.Context, rel string) (model.FileInfo, error) {
+	d.stats.Add(1)
+	return d.Local.Stat(ctx, rel)
+}
+
+func (d *countingLocal) List(ctx context.Context, rel string) ([]model.FileInfo, error) {
+	d.lists.Add(1)
+	return d.Local.List(ctx, rel)
+}
+
+// newCountingMount 与 newLocalMount 相同，但驱动会计数。
+func newCountingMount(t *testing.T, id int64, mountPath, rootDir string) (*Mount, *countingLocal) {
+	t.Helper()
+	inner := &local.Local{}
+	if err := inner.Init(context.Background(), driver.Config{"root_path": rootDir}); err != nil {
+		t.Fatalf("local Init: %v", err)
+	}
+	t.Cleanup(func() { inner.Drop() })
+	d := &countingLocal{Local: inner}
+	return &Mount{ID: id, Path: mountPath, Driver: "local", Enabled: true, drv: d}, d
+}
+
 func adminUser() *user.User {
 	return &user.User{ID: 1, Username: "admin", Role: "admin", BasePath: "/", CanWrite: true, Enabled: true}
 }
@@ -59,7 +90,38 @@ func newLocalMount(t *testing.T, id int64, mountPath, rootDir string) *Mount {
 func newTestFS(mounts ...*Mount) *FS {
 	f := &FS{}
 	f.mounts = mounts
+	// 测试不等真实退避，否则每个重试用例都要白等几秒；
+	// 退避策略本身由 TestCopyRetryWait 单独盯着。
+	f.retryBackoff = func(int, error) time.Duration { return 0 }
 	return f
+}
+
+// TestCopyRetryWait 重试退避策略：限流要按限流的节奏等，网络抖动短暂让一下即可。
+// 两者混为一谈的话，要么撞限流后等不够又去撞，要么普通抖动白等几十秒。
+func TestCopyRetryWait(t *testing.T) {
+	f := &FS{} // 不设 retryBackoff，走默认策略
+	throttled := errors.New("上游错误：rateLimitExceeded(HTTP 429) Rate Limit Exceeded")
+	ordinary := errors.New("connection reset by peer")
+
+	cases := []struct {
+		name    string
+		attempt int
+		err     error
+		want    time.Duration
+	}{
+		{"限流首次", 1, throttled, 2 * time.Second},
+		{"限流二次翻倍", 2, throttled, 4 * time.Second},
+		{"普通错误首次", 1, ordinary, 1 * time.Second},
+		{"普通错误二次", 2, ordinary, 2 * time.Second},
+	}
+	for _, c := range cases {
+		if got := f.copyRetryWait(c.attempt, c.err); got != c.want {
+			t.Errorf("%s: copyRetryWait = %v，应为 %v", c.name, got, c.want)
+		}
+	}
+	if f.copyRetryWait(1, throttled) <= f.copyRetryWait(1, ordinary) {
+		t.Error("限流退避必须明显长于普通错误，否则等于没区分")
+	}
 }
 
 func writeFile(t *testing.T, p, content string) {
@@ -192,6 +254,61 @@ func TestTransferResumeSkipsExisting(t *testing.T) {
 	}
 }
 
+// TestTransferResumeScansOncePerDir 盯住断点续传的探测开销：目标目录只列一次，
+// 之后判断全走内存。旧实现是每文件一次 Stat——在 googledrive/pikpak 上每次 Stat
+// 都可能是一整轮目录列举，文件一多就慢到不可用。
+func TestTransferResumeScansOncePerDir(t *testing.T) {
+	const n, size = 12, 16
+	dirA, dirB := t.TempDir(), t.TempDir()
+	for i := 0; i < n; i++ {
+		writeFile(t, filepath.Join(dirA, "相册", fmt.Sprintf("p%02d.jpg", i)), strings.Repeat("x", size))
+	}
+	dst, cnt := newCountingMount(t, 2, "/存储B", dirB)
+	f := newTestFS(newLocalMount(t, 1, "/存储A", dirA), dst)
+
+	if err := f.Transfer(context.Background(), adminUser(), "/存储A/相册", "/存储B", false, &fakeProgress{}); err != nil {
+		t.Fatalf("首次复制: %v", err)
+	}
+	baseStats, baseLists := cnt.stats.Load(), cnt.lists.Load()
+
+	// 第二轮 = 重试场景：12 个文件应全部命中断点续传
+	pr := &fakeProgress{}
+	if err := f.Transfer(context.Background(), adminUser(), "/存储A/相册", "/存储B", false, pr); err != nil {
+		t.Fatalf("重试复制: %v", err)
+	}
+	if len(pr.files) != 0 {
+		t.Fatalf("应全部跳过，实际 %d 个走了复制: %v", len(pr.files), pr.files)
+	}
+	if pr.done != int64(n*size) {
+		t.Fatalf("跳过的文件也要计进度: done=%d 应为 %d", pr.done, n*size)
+	}
+	if stats := cnt.stats.Load() - baseStats; stats != 0 {
+		t.Fatalf("预扫描后不应再逐文件 Stat，实际 %d 次（每文件一次=打回旧实现）", stats)
+	}
+	if lists := cnt.lists.Load() - baseLists; lists != 1 {
+		t.Fatalf("目标目录应只列 1 次，实际 %d 次", lists)
+	}
+}
+
+// TestTransferSingleFileSkipsPrescan 单文件转存不预扫：为一个文件去列一个可能很大的
+// 目标目录是净亏，一次 Stat 才是最省的。
+func TestTransferSingleFileSkipsPrescan(t *testing.T) {
+	dirA, dirB := t.TempDir(), t.TempDir()
+	writeFile(t, filepath.Join(dirA, "one.bin"), "12345678")
+	dst, cnt := newCountingMount(t, 2, "/存储B", dirB)
+	f := newTestFS(newLocalMount(t, 1, "/存储A", dirA), dst)
+
+	if err := f.Transfer(context.Background(), adminUser(), "/存储A/one.bin", "/存储B", false, &fakeProgress{}); err != nil {
+		t.Fatalf("单文件复制: %v", err)
+	}
+	if lists := cnt.lists.Load(); lists != 0 {
+		t.Fatalf("单文件转存不应预扫目标目录，实际 List %d 次", lists)
+	}
+	if stats := cnt.stats.Load(); stats != 1 {
+		t.Fatalf("单文件应恰好 1 次 Stat 探测，实际 %d 次", stats)
+	}
+}
+
 func TestTransferMove(t *testing.T) {
 	dirA, dirB := t.TempDir(), t.TempDir()
 	writeFile(t, filepath.Join(dirA, "搬家", "x.bin"), strings.Repeat("x", 1024))
@@ -319,6 +436,7 @@ type flakyDriver struct {
 	content string
 	failN   int
 	calls   int
+	linkErr error // 非 nil 时 Link 恒定返回它，用来模拟持续性故障（如一直被限流）
 }
 
 func (d *flakyDriver) Init(context.Context, driver.Config) error { return nil }
@@ -331,6 +449,9 @@ func (d *flakyDriver) Stat(_ context.Context, rel string) (model.FileInfo, error
 }
 func (d *flakyDriver) Link(_ context.Context, rel string) (*driver.Link, error) {
 	d.calls++
+	if d.linkErr != nil {
+		return nil, d.linkErr
+	}
 	if d.calls <= d.failN {
 		return &driver.Link{Local: &failingReader{data: d.content[:len(d.content)/2]}}, nil
 	}
@@ -401,6 +522,44 @@ func TestTransferRetryExhausted(t *testing.T) {
 	}
 	if pr.done != 0 {
 		t.Fatalf("全部失败后进度应回退到 0，实际 %d", pr.done)
+	}
+	// 失败信息要能定位：哪个文件、哪一侧。只丢一句技术错误出去，用户无从下手。
+	// 这里源流读到一半就断，锅在源端——即便失败是从 Put 里冒出来的也不能算在目标头上。
+	msg := util.Humanize(err)
+	for _, want := range []string{"f.txt", stageSource, "已重试 2 次"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("错误信息应含 %q，实际为 %q", want, msg)
+		}
+	}
+	if strings.Contains(msg, stageDest) {
+		t.Fatalf("源端读失败不该归因到写入目标，实际为 %q", msg)
+	}
+}
+
+// TestTransferThrottledExhaustedMessage 退避全用完还在被限流时，不能再劝「稍后重试」——
+// 那会让用户以为等几分钟就好，而实际要么并发开太大，要么每日上传额度已用尽（得等明天）。
+func TestTransferThrottledExhaustedMessage(t *testing.T) {
+	dirB := t.TempDir()
+	src := &flakyDriver{
+		content: "内容",
+		linkErr: errors.New("上游错误：userRateLimitExceeded(HTTP 403) User Rate Limit Exceeded"),
+	}
+	f := newTestFS(
+		&Mount{ID: 1, Path: "/限流源", Driver: "flaky", Enabled: true, drv: src},
+		newLocalMount(t, 2, "/存储B", dirB),
+	)
+	err := f.Transfer(context.Background(), adminUser(), "/限流源/f.txt", "/存储B", false, &fakeProgress{})
+	if err == nil {
+		t.Fatal("持续限流应导致失败")
+	}
+	msg := util.Humanize(err)
+	for _, want := range []string{"f.txt", "反复被限流", "并发", "不会重传"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("限流耗尽的提示应含 %q，实际为 %q", want, msg)
+		}
+	}
+	if strings.Contains(msg, "请稍后重试") {
+		t.Fatalf("退避都用完了就不该再劝「稍后重试」，实际为 %q", msg)
 	}
 }
 
