@@ -40,11 +40,14 @@ A. 报错人话化 + Apple 风文案（`util.Humanize` + 三处异步任务 + �
 C. 预载「不是现在」（2026-07-26）：后台「封面与源信息预载」卡片新增推迟按钮，
 点后停下预载、一天后自动继续，期间自动预载跳过、跨重启有效，「继续」可提前恢复
 并接着剩余清单跑。前后端 + 单测 + e2e（`frontend/preload-snooze-check.mjs` 11/11）
-均通过、二进制已重嵌，**未提交**。
+均通过、二进制已重嵌，**随 v2.1.0 发布**。
 D. 后台「传输任务」（2026-07-26）：后台新增传输任务 Tab（全站视野），比顶栏抽屉多一层——
 点「查看文件」看文件夹内逐文件状态（等待/传输中/已完成/已跳过/失败 + 搜索 + 筛选 + 分页）。
 任务层为此建了文件级进度模型，`fs.Progress` 接口改按下标上报。
-e2e `frontend/admin-tasks-check.mjs` 15/15，**未提交**。
+e2e `frontend/admin-tasks-check.mjs` 15/15，**随 v2.1.0 发布**。
+E. 离线下载可选 Referer（2026-07-27）：弹窗新增可选 Referer，直链请求与 ffmpeg 拉 HLS
+分片两条路径都带上，防盗链站点（校验 Referer 非 IP）可下；403 且未填时明确提示填 Referer。
+单测 `internal/server/offline_referer_test.go` + `offline-check.mjs` 18/0/3，**随 v2.1.2 发布**。
 
 ## 如何启动预览
 ```

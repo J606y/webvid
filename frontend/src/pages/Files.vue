@@ -116,6 +116,7 @@
       <el-input v-model="offlineUrls" type="textarea" :rows="5"
         placeholder="每行一个 http/https 链接（支持 m3u8）" />
       <el-input v-model="offlineName" class="offline-name" placeholder="文件名（可选，仅单个链接时生效）" clearable />
+      <el-input v-model="offlineReferer" class="offline-referer" placeholder="Referer（可选，防盗链站点填来源网址）" clearable />
       <div class="dim offline-dst">将下载到：{{ current || '/' }}</div>
       <template #footer>
         <el-button @click="offlineVisible = false">取消</el-button>
@@ -182,6 +183,7 @@ const busyCount = computed(() => activeTasks.value + activeUploads.value)
 const offlineVisible = ref(false)
 const offlineUrls = ref('')
 const offlineName = ref('')
+const offlineReferer = ref('') // 防盗链站点要求的来源网址；空 = 不发 Referer
 const offlineSubmitting = ref(false)
 
 // 传输任务数变化。跨存储转存与离线下载都是后台任务，建任务时刷新只会看到空目录，
@@ -196,7 +198,8 @@ async function submitOffline() {
   if (!urls.length) return ElMessage.warning('请填写下载链接')
   offlineSubmitting.value = true
   try {
-    const d = await api.fs.offline(urls, current.value || '/', offlineName.value.trim())
+    const d = await api.fs.offline(urls, current.value || '/', offlineName.value.trim(),
+      offlineReferer.value.trim())
     const skipped = d?.skipped || []
     if (skipped.length) {
       // 无效链接留在输入框里，用户一眼看到是哪几条、改完直接再提交；
@@ -209,6 +212,8 @@ async function submitOffline() {
     offlineVisible.value = false
     offlineUrls.value = ''
     offlineName.value = ''
+    // Referer 一并清空：下次粘的可能是别的站，留着会把上一个站的来源发出去
+    offlineReferer.value = ''
     tasksVisible.value = true // 直接打开任务抽屉看进度
   } finally {
     offlineSubmitting.value = false
@@ -445,7 +450,7 @@ onBeforeRouteLeave(() => { tasksVisible.value = false })
   padding: 10px 14px; margin-bottom: 14px;
 }
 .spacer { flex: 1; }
-.offline-name { margin-top: 10px; }
+.offline-name, .offline-referer { margin-top: 10px; }
 .offline-dst { font-size: 12px; margin-top: 8px; word-break: break-all; }
 .sel-info { font-size: 12px; }
 

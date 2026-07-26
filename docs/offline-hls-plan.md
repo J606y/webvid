@@ -258,7 +258,9 @@ offline: (urls, dst_dir, name) => http.post('/fs/offline', { urls, dst_dir, name
 
 ## 非目标（本期不做）
 
-- 防盗链 Referer / 自定义请求头 UI（如遇需要 Referer 的站点再加；可预留 `referer` 字段不接 UI）。
+- ~~防盗链 Referer / 自定义请求头 UI（如遇需要 Referer 的站点再加；可预留 `referer` 字段不接 UI）。~~
+  → **2026-07-27 已实现**：可选 `referer` 字段 + 弹窗输入，直链与 HLS 分片两条路径都发；
+  自定义请求头 UI 仍不做（见 `docs/POLISH-PROGRESS.md` 的 E 段）。
 - Go 侧逐分片解析下载 / SSRF 深度隔离（自用定位，ffmpeg 直拉 + protocol_whitelist 足够）。
 - master 多清晰度选择（交给 ffmpeg 默认挑选）。
 - 云盘上传阶段的细粒度进度（以下载阶段进度为主；本地驱动上传瞬时可忽略）。

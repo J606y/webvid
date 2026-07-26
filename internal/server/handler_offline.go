@@ -27,13 +27,14 @@ import (
 	"newlist/internal/util"
 )
 
-// POST /api/fs/offline {urls[], dst_dir} —— 离线下载：每个 URL 建一个后台任务（offline 组），
-// 服务器拉流写入目标目录。返回 task_ids，进度/取消/重试走统一任务接口。
+// POST /api/fs/offline {urls[], dst_dir, name, referer} —— 离线下载：每个 URL 建一个后台任务
+//（offline 组），服务器拉流写入目标目录。返回 task_ids，进度/取消/重试走统一任务接口。
 func (s *Server) fsOffline(c *gin.Context) {
 	var req struct {
-		URLs   []string `json:"urls"`
-		DstDir string   `json:"dst_dir"`
-		Name   string   `json:"name"` // 可选：自定义文件名，仅单链接时生效
+		URLs    []string `json:"urls"`
+		DstDir  string   `json:"dst_dir"`
+		Name    string   `json:"name"`    // 可选：自定义文件名，仅单链接时生效
+		Referer string   `json:"referer"` // 可选：防盗链站点要求的来源页地址，本批全部链接共用
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.DstDir == "" {
 		Fail(c, 400, "缺少下载链接或目标目录")
@@ -49,6 +50,11 @@ func (s *Server) fsOffline(c *gin.Context) {
 		Fail(c, 400, "目标目录所在存储不支持上传")
 		return
 	}
+	referer := strings.TrimSpace(req.Referer)
+	if referer != "" && httpURL(referer) == nil {
+		Fail(c, 400, "Referer 需为完整的 http/https 网址")
+		return
+	}
 
 	// 收集有效 URL（trim、http/https、host 非空）。非法的跳过并回报，其余照常建任务：
 	// 粘 10 条坏 1 条就整单打回、什么都不建，用户得把 10 条重新粘一遍。
@@ -59,8 +65,7 @@ func (s *Server) fsOffline(c *gin.Context) {
 		if raw == "" {
 			continue
 		}
-		pu, err := url.Parse(raw)
-		if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
+		if httpURL(raw) == nil {
 			skipped = append(skipped, raw)
 			continue
 		}
@@ -82,19 +87,47 @@ func (s *Server) fsOffline(c *gin.Context) {
 
 	var taskIDs []string
 	for _, raw := range valid {
-		pu, _ := url.Parse(raw) // valid 里已校验过，不会出错
+		pu := httpURL(raw) // valid 里已校验过，不会为 nil
 		display := path.Base(pu.Path)
 		if display == "" || display == "/" || display == "." {
 			display = pu.Host
 		}
-		srcURL, cn := raw, customName // 闭包取副本
+		job := offlineJob{url: raw, dstDir: dst, name: customName, referer: referer} // 每轮一份，闭包各持己有
 		t := s.tasks.SubmitIn(task.GroupOffline, u.ID, "离线下载 "+display+" → "+dst,
 			func(ctx context.Context, t *task.Task) error {
-				return s.offlineFetch(ctx, u, t, srcURL, dst, cn)
+				return s.offlineFetch(ctx, u, t, job)
 			})
 		taskIDs = append(taskIDs, t.ID)
 	}
 	OK(c, gin.H{"task_ids": taskIDs, "skipped": skipped})
+}
+
+// offlineJob 一次离线下载的全部参数。
+type offlineJob struct {
+	url     string
+	dstDir  string
+	name    string // 可选自定义文件名（多链接时为空）
+	referer string // 可选 Referer；空 = 不发该头，与未支持该字段时行为一致
+}
+
+// refererHint 给 403 配一句怎么办：没填就提示填，填了就提示可能填错——
+// 两种处境的下一步动作完全不同，笼统一句「没有权限」两边都帮不上。
+func refererHint(job offlineJob) string {
+	if job.referer == "" {
+		return "若是防盗链站点，填写 Referer 后重试。"
+	}
+	return "填写的 Referer 可能不对。"
+}
+
+// httpURL 解析 http/https 网址，非法返回 nil：scheme 非 http(s)、host 为空，
+// 或含 ASCII 控制字符（url.Parse 直接拒）都算非法——后者顺带挡住把 CRLF 塞进
+// ffmpeg -headers 追加任意请求头。
+func httpURL(raw string) *url.URL {
+	pu, err := url.Parse(raw)
+	if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
+		return nil
+	}
+	return pu
 }
 
 // offlineClient 离线下载专用 HTTP 客户端：跟随重定向（限跳数），仅限连接阶段超时（下载本身不限时）。
@@ -119,10 +152,15 @@ var offlineClient = &http.Client{
 // offlineFetch 拉取 URL 写入目标目录。文件名优先自定义名，其次响应 Content-Disposition，
 // 再次 URL 末段；拉流共享全站下载限速。源未给 Content-Length 时进度只涨字节数，完成后补齐总量。
 // 识别到 HLS（m3u8）则改交 ffmpeg 拉全部分片合并成 mp4（见 offlineFetchHLS）。
-func (s *Server) offlineFetch(ctx context.Context, u *user.User, t *task.Task, srcURL, dstDir, customName string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, srcURL, nil)
+func (s *Server) offlineFetch(ctx context.Context, u *user.User, t *task.Task, job offlineJob) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, job.url, nil)
 	if err != nil {
 		return err
+	}
+	if job.referer != "" {
+		// 防盗链站点凭此放行。跟随重定向时显式设过的 Referer 会被保留（net/http
+		// refererForURL：显式值优先），仅 https→http 降级按 RFC 丢弃。
+		req.Header.Set("Referer", job.referer)
 	}
 	resp, err := offlineClient.Do(req)
 	if err != nil {
@@ -130,19 +168,25 @@ func (s *Server) offlineFetch(ctx context.Context, u *user.User, t *task.Task, s
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("源站返回 HTTP %d", resp.StatusCode)
+		srcErr := fmt.Errorf("源站返回 HTTP %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusForbidden {
+			// 走 Messagef 而非直接 fmt.Errorf：Humanize 见到「http 403」会一律翻成
+			// 「没有权限执行此操作，可能需要重新授权」，把该说的「填 Referer」盖掉。
+			return util.Messagef(srcErr, "源站拒绝访问（403）。%s", refererHint(job))
+		}
+		return srcErr
 	}
 
 	// 先行 GET 已用 offlineClient 校验入口 host 是公网；若是 HLS 播放列表，
 	// 别把列表文本当文件存——立即释放连接，交给 ffmpeg 重新拉分片合并。
-	if isHLS(resp, srcURL) {
+	if isHLS(resp, job.url) {
 		resp.Body.Close()
-		return s.offlineFetchHLS(ctx, u, t, srcURL, dstDir, customName)
+		return s.offlineFetchHLS(ctx, u, t, job)
 	}
 
-	name := sanitizeName(customName)
+	name := sanitizeName(job.name)
 	if name == "" {
-		name = offlineFilename(resp, srcURL)
+		name = offlineFilename(resp, job.url)
 	}
 	t.SetFile(name)
 	if resp.ContentLength > 0 {
@@ -150,13 +194,13 @@ func (s *Server) offlineFetch(ctx context.Context, u *user.User, t *task.Task, s
 	}
 	pr := &offlineProgressReader{r: resp.Body, t: t}
 	r := s.limDown.Reader(ctx, pr)
-	if err := s.fs.Put(ctx, u, dstDir, name, r, resp.ContentLength, false); err != nil {
+	if err := s.fs.Put(ctx, u, job.dstDir, name, r, resp.ContentLength, false); err != nil {
 		return err
 	}
 	if resp.ContentLength <= 0 {
 		t.SetTotal(pr.n) // 源未报大小：以实收字节数收尾，避免完成时进度归零
 	}
-	target := util.JoinLogical(dstDir, name)
+	target := util.JoinLogical(job.dstDir, name)
 	if fi, err := s.fs.Get(ctx, u, target); err == nil {
 		s.index.Upsert(target, fi)
 	}
@@ -222,13 +266,13 @@ func hlsOutName(custom, srcURL string) string {
 // offlineFetchHLS 用 ffmpeg 把 HLS 全部分片拉取并无损 remux 成单个 mp4 落入目标目录。
 // 临时文件放数据盘（勿用 /tmp，可能是 tmpfs），完成即删；ctx 取消即杀 ffmpeg 并清理临时文件。
 // -c copy 零重编码，-bsf:a aac_adtstoasc 把 ADTS AAC 转 ASC 进 fMP4（ASC 源直通无害，保证有声音）。
-func (s *Server) offlineFetchHLS(ctx context.Context, u *user.User, t *task.Task, srcURL, dstDir, customName string) error {
+func (s *Server) offlineFetchHLS(ctx context.Context, u *user.User, t *task.Task, job offlineJob) error {
 	ffmpeg := media.LookTool("ffmpeg")
 	if ffmpeg == "" {
 		return media.ErrNoFFmpeg
 	}
 
-	name := hlsOutName(customName, srcURL)
+	name := hlsOutName(job.name, job.url)
 	t.SetFile(name)
 
 	dataDir := os.Getenv("NL_DATA_DIR")
@@ -254,11 +298,19 @@ func (s *Server) offlineFetchHLS(ctx context.Context, u *user.User, t *task.Task
 		"-reconnect_delay_max", "30", "-reconnect_on_http_error", "429,5xx",
 		// 白名单不含 file，畸形 m3u8 里的 file:// 引用被拒，防读本地文件。
 		"-protocol_whitelist", "crypto,data,http,https,tcp,tls",
-		"-i", srcURL,
+	}
+	if job.referer != "" {
+		// hls 解复用器会把 headers 这一项透传给子请求（libavformat/hls.c 保存的 avio 选项
+		// 含 headers/referer/user_agent/cookies），所以播放列表与每个分片都带上 Referer——
+		// 防盗链站点往往正是卡在分片上。本机对造的 403 源站实测：4 次请求全部命中。
+		args = append(args, "-headers", "Referer: "+job.referer+"\r\n")
+	}
+	args = append(args,
+		"-i", job.url,
 		"-c", "copy", "-bsf:a", "aac_adtstoasc",
 		"-progress", "pipe:1", "-nostats",
 		"-y", tmpPath,
-	}
+	)
 	cmd := exec.CommandContext(ctx, ffmpeg, args...) // ctx 取消即杀 ffmpeg
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -282,7 +334,13 @@ func (s *Server) offlineFetchHLS(ctx context.Context, u *user.User, t *task.Task
 		}
 	}
 	if err := cmd.Wait(); err != nil {
-		log.Printf("[offline] ffmpeg 合并失败: %v: %s", err, strings.TrimSpace(stderr.String()))
+		msg := strings.TrimSpace(stderr.String())
+		log.Printf("[offline] ffmpeg 合并失败: %v: %s", err, msg)
+		// 播放列表能取到、分片被拒的站点（防盗链只校验分片请求）在此收口，
+		// 否则用户只看到「源地址可能已失效」，猜不到跟 Referer 有关。
+		if strings.Contains(msg, "403") {
+			return util.Messagef(err, "源站拒绝下载分片（403）。%s", refererHint(job))
+		}
 		return fmt.Errorf("合并视频失败：源地址可能已失效或格式不受支持")
 	}
 
@@ -297,11 +355,11 @@ func (s *Server) offlineFetchHLS(ctx context.Context, u *user.User, t *task.Task
 		return err
 	}
 	t.SetTotal(fi.Size()) // 收尾补齐总量 → 进度条到 100%
-	if err := s.fs.Put(ctx, u, dstDir, name, f, fi.Size(), false); err != nil {
+	if err := s.fs.Put(ctx, u, job.dstDir, name, f, fi.Size(), false); err != nil {
 		return err
 	}
 
-	target := util.JoinLogical(dstDir, name)
+	target := util.JoinLogical(job.dstDir, name)
 	if gi, err := s.fs.Get(ctx, u, target); err == nil {
 		s.index.Upsert(target, gi)
 	}

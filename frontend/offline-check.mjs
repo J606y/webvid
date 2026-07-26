@@ -101,6 +101,16 @@ await offBtn.click()
 const dlg = page.locator('.el-dialog:has-text("离线下载")')
 await dlg.waitFor({ state: 'visible' })
 ok('弹窗显示目标目录', (await dlg.locator('.offline-dst').textContent()).includes('/本地存储'))
+// 防盗链站点用的可选 Referer：输入框在位，后端校验非法值时直接打回、不建任务。
+// 负例走 Node 侧直发（不经页面 fetch）：浏览器会把 400 记成控制台错误，污染文末那条断言
+ok('弹窗含 Referer 输入', await dlg.locator('.offline-referer input').count() === 1)
+const jwt = await page.evaluate(() => localStorage.getItem('nl_token'))
+const badRef = await fetch(`${BASE}/api/fs/offline`, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${jwt}` },
+  body: JSON.stringify({ urls: ['http://127.0.0.1:5321/dl'], dst_dir: '/本地存储', referer: 'fansone.example' }),
+}).then((r) => r.json())
+ok('非法 Referer 被拒（400，不建任务）', badRef.code === 400 && !badRef.data)
 await dlg.locator('textarea').fill('http://127.0.0.1:5321/dl')
 await dlg.locator('button:has-text("开始下载")').click()
 await page.waitForSelector('.el-message--success')
