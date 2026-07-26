@@ -267,8 +267,11 @@ func (t *Task) endFilesLocked(st FileState) {
 	for _, f := range t.files {
 		if f.State == FileRunning {
 			t.setStateLocked(f, st)
-			if st == FileDone {
+			switch {
+			case st == FileDone:
 				f.Done = f.Size
+			case st == FileError && f.Err == "": // 清单里不留「失败」却没原因的行
+				f.Err = "任务已中止，该文件未传完"
 			}
 		}
 	}

@@ -17,6 +17,8 @@
         <el-tag size="small" :type="stateTag(t.state)" effect="dark">{{ stateText(t.state) }}</el-tag>
       </div>
       <el-progress :percentage="percent(t)" :status="progressStatus(t.state)" :stroke-width="8" />
+      <!-- 失败原因独占整行：与按钮挤在一行时只剩两百来像素，长路径一来原因就被省略号吃掉了 -->
+      <div v-if="t.state === 'error' && t.error" class="t-err" :title="t.error">{{ t.error }}</div>
       <div class="t-foot">
         <span class="dim t-info">
           <template v-if="t.state === 'running'">
@@ -26,7 +28,6 @@
             <template v-if="t.cur_file"> · {{ t.cur_file }}</template>
             <template v-if="t.active_files > 1"> 等 {{ t.active_files }} 个</template>
           </template>
-          <template v-else-if="t.state === 'error'">{{ t.error }}</template>
         </span>
         <span class="t-actions">
           <el-button v-if="t.state === 'running' || t.state === 'pending'" link size="small"
@@ -144,6 +145,12 @@ onBeforeUnmount(onClose)
 .t-name {
   font-size: 13px; flex: 1;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* 三行足够放下「原因 + 怎么办」；再长的（多为路径）截断，悬停看全文 */
+.t-err {
+  font-size: 12px; line-height: 1.5; margin-top: 6px;
+  color: var(--el-color-error);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
 }
 .t-foot {
   display: flex; align-items: center; justify-content: space-between;

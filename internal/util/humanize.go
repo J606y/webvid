@@ -12,9 +12,12 @@ var throttleHints = []string{
 	"http 429", "too many requests", "flood_wait", "rate limit", "操作频繁", "操作过于频繁",
 }
 
-// contextError 给错误附一句人话上下文（哪个文件、哪一步出的问题）。
+// contextError 给错误附一句定位说明（哪个文件、哪一步出的问题）。
 // Humanize 认得它：保留这句、只翻译内层。否则一条「请求过于频繁」浮到界面上，
 // 用户既不知道是哪个文件，也不知道是源端还是目标端在限流，根本无从下手。
+//
+// 定位说明放在原因之后的括号里：界面上错误只有一两行，路径动辄几十字，
+// 摆在句首会把「为什么失败、该怎么办」整句挤出可视范围——那等于没显示原因。
 type contextError struct {
 	ctx string
 	err error
@@ -23,7 +26,7 @@ type contextError struct {
 func (e *contextError) Error() string { return e.ctx + "：" + e.err.Error() }
 func (e *contextError) Unwrap() error { return e.err }
 
-// Contextf 给 err 附上下文；err 为 nil 时返回 nil，可以直接包在返回值上。
+// Contextf 给 err 附定位说明；err 为 nil 时返回 nil，可以直接包在返回值上。
 func Contextf(err error, format string, a ...any) error {
 	if err == nil {
 		return nil
@@ -68,10 +71,10 @@ func Humanize(err error) string {
 	if errors.As(err, &me) {
 		return me.msg
 	}
-	// 带上下文的错误：保留上下文，只把内层技术错误翻成人话
+	// 带定位说明的错误：原因先说，定位跟在括号里，一行放不下时至少保住原因
 	var ce *contextError
 	if errors.As(err, &ce) {
-		return ce.ctx + "：" + Humanize(ce.err)
+		return Humanize(ce.err) + "（" + ce.ctx + "）"
 	}
 	s := strings.TrimSpace(err.Error())
 	low := strings.ToLower(s)

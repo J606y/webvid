@@ -54,12 +54,14 @@ func TestIsThrottledMatchesHumanize(t *testing.T) {
 	}
 }
 
-// TestContextfSurvivesHumanize 上下文必须活着到界面上——否则用户只看到
+// TestContextfSurvivesHumanize 定位说明必须活着到界面上——否则用户只看到
 // 「请求过于频繁」，不知道是哪个文件、也不知道是源端还是目标端。
+// 同时锁住顺序：原因在前、定位在后。界面上错误只有一两行，长路径摆在句首会把
+// 「为什么失败、该怎么办」整句挤出可视范围，用户就只看得见一个「失败」。
 func TestContextfSurvivesHumanize(t *testing.T) {
 	inner := errors.New("上游错误：rateLimitExceeded(HTTP 429) Rate Limit Exceeded")
-	err := Contextf(inner, "复制 相册/2024/a.mp4 失败（写入目标，已重试 2 次）")
-	const want = "复制 相册/2024/a.mp4 失败（写入目标，已重试 2 次）：请求过于频繁，请稍后重试。"
+	err := Contextf(inner, "相册/2024/a.mp4，写入目标时失败，已重试 2 次")
+	const want = "请求过于频繁，请稍后重试。（相册/2024/a.mp4，写入目标时失败，已重试 2 次）"
 	if got := Humanize(err); got != want {
 		t.Errorf("Humanize = %q，应为 %q", got, want)
 	}
@@ -75,7 +77,7 @@ func TestContextfSurvivesHumanize(t *testing.T) {
 // 「反复退避都过不去的限流」和「等一下就好的限流」错误码相同，只有调用方知道区别。
 func TestMessagefSurvivesHumanize(t *testing.T) {
 	inner := errors.New("上游错误：userRateLimitExceeded(HTTP 403) User Rate Limit Exceeded")
-	const want = "复制 相册/a.mp4 失败（写入目标）：反复被限流，明天再继续。"
+	const want = "反复被限流，明天再继续。（相册/a.mp4，写入目标时失败）"
 	err := Messagef(inner, want)
 	if got := Humanize(err); got != want {
 		t.Errorf("Humanize = %q，应原样返回调用方的说明 %q", got, want)

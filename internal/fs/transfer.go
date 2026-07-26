@@ -341,13 +341,13 @@ func (f *FS) copyOne(ctx context.Context, sm *Mount, up driver.Uploader, fj file
 	// 但都不该再劝用户「稍后重试」：得给出能动手的下一步。
 	if util.IsThrottled(lastErr) {
 		return util.Messagef(lastErr,
-			"复制 %s 失败（%s）：反复被限流。请调低「文件夹内并发」后重试；若持续如此，"+
-				"可能是云盘每日上传额度已用尽，明天再继续。已传完的文件不会重传。",
+			"反复被限流。请调低「文件夹内并发」后重试；若持续如此，"+
+				"可能是云盘每日上传额度已用尽，明天再继续。已传完的文件不会重传。（%s，%s时失败）",
 			fj.srcRel, stage)
 	}
-	// 带上完整路径与阶段：Humanize 会保留这句上下文，只把内层技术错误翻成人话，
-	// 用户因此能看出是哪个文件、哪一侧出的问题，而不是光一句「请求过于频繁」。
-	return util.Contextf(lastErr, "复制 %s 失败（%s，已重试 2 次）", fj.srcRel, stage)
+	// 原因在前、定位在后：Humanize 会把内层技术错误翻成人话摆在句首，完整路径与阶段
+	// 跟在括号里。界面上错误只有一两行，路径摆在句首会把原因整句挤掉。
+	return util.Contextf(lastErr, "%s，%s时失败，已重试 2 次", fj.srcRel, stage)
 }
 
 // countingReader 包装源读取流，把读到的字节数上报进度；

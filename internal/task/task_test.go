@@ -168,6 +168,25 @@ func TestError(t *testing.T) {
 	}
 }
 
+// TestErrorFileReasonFallback 任务失败时仍挂在「传输中」的文件（上报中断的兜底路径）
+// 也要留下原因——清单里一行「失败」却说不出为什么，等于没告诉用户任何事。
+func TestErrorFileReasonFallback(t *testing.T) {
+	m := New(1)
+	tk := m.Submit(1, "失败任务", func(ctx context.Context, t *Task) error {
+		plan(t, "a.mkv")
+		t.FileStart(0) // 故意不调 FileDone
+		return errors.New("boom")
+	})
+	waitState(t, m, tk.ID, StateError)
+	page, err := m.Files(tk.ID, 1, true, FilesQuery{})
+	if err != nil {
+		t.Fatalf("Files: %v", err)
+	}
+	if f := page.Items[0]; f.State != FileError || f.Err == "" {
+		t.Fatalf("兜底收口的文件应记失败且带原因: %+v", f)
+	}
+}
+
 func TestCancelRunning(t *testing.T) {
 	m := New(1)
 	started := make(chan struct{})

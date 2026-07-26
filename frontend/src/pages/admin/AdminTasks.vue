@@ -315,11 +315,16 @@ onBeforeUnmount(() => {
 }
 .head-stat { font-size: 12px; }
 .t-name, .f-path { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.t-sub, .t-err {
+.t-sub {
   font-size: 12px; line-height: 1.5;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.t-err { color: var(--el-color-error); }
+/* 失败原因不省略成一行：路径一长，「为什么失败、该怎么办」就全被吃掉了。
+   三行封顶，更长的（多为路径）悬停看全文 */
+.t-err {
+  font-size: 12px; line-height: 1.5; color: var(--el-color-error);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+}
 
 .f-bar { display: flex; gap: 8px; }
 .f-search { flex: 1; }

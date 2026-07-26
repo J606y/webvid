@@ -572,6 +572,11 @@ func TestTransferRetryExhausted(t *testing.T) {
 	if strings.Contains(msg, stageDest) {
 		t.Fatalf("源端读失败不该归因到写入目标，实际为 %q", msg)
 	}
+	// 顺序也要锁住：原因在前、定位在后。界面上错误只有一两行，长路径摆在句首会把
+	// 「为什么失败」整句挤出可视范围，用户就只看得见一个「失败」。
+	if strings.Index(msg, "模拟网络中断") > strings.Index(msg, "f.txt") {
+		t.Fatalf("失败原因必须排在文件路径之前，实际为 %q", msg)
+	}
 }
 
 // TestTransferThrottledExhaustedMessage 退避全用完还在被限流时，不能再劝「稍后重试」——
@@ -598,6 +603,9 @@ func TestTransferThrottledExhaustedMessage(t *testing.T) {
 	}
 	if strings.Contains(msg, "请稍后重试") {
 		t.Fatalf("退避都用完了就不该再劝「稍后重试」，实际为 %q", msg)
+	}
+	if strings.Index(msg, "反复被限流") > strings.Index(msg, "f.txt") {
+		t.Fatalf("失败原因必须排在文件路径之前，实际为 %q", msg)
 	}
 }
 
