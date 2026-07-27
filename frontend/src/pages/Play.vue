@@ -37,6 +37,7 @@ import Artplayer from 'artplayer'
 import { api } from '../utils/api'
 import { fetchVideoInfo } from '../utils/videoInfo'
 import { rawUrl, hlsUrl, fromParams } from '../utils/path'
+import { attachMediaSession } from '../utils/mediaSession'
 
 const route = useRoute()
 // path 冻结在进入播放页时的值（不跟 route 变）：离开时路由先改、组件后卸载，
@@ -62,6 +63,7 @@ let art = null
 let hls = null
 let resumeAt = 0        // 续播起点（秒），起播后定位到此处
 let reportTimer = null  // 进度定时上报句柄
+let detachMS = null     // 系统「正在播放」会话的摘除句柄
 
 // start 起播全流程：取续播位置 → 定播放策略 → 挂播放器。
 // keepResume=true 时沿用当前 resumeAt（运行期中断后重试，从断点接着播），
@@ -123,6 +125,8 @@ function fail(msg) {
 // teardown 收掉播放器与转码流，并补记一次末次进度。离页与重试共用。
 function teardown() {
   if (reportTimer) { clearTimeout(reportTimer); reportTimer = null }
+  // 先摘系统会话再销毁播放器：否则片名与封面会留在灵动岛上，指着一个已经不在播的视频
+  if (detachMS) { detachMS(); detachMS = null }
   if (art) {
     try { report(art.currentTime) } catch { /* 末次进度，忽略异常 */ }
     art.destroy(true)
@@ -214,6 +218,8 @@ async function mount(url, isHls) {
     }
   }
   art = new Artplayer(opts)
+  // 接上系统「正在播放」：iOS 灵动岛/锁屏拿到片名、封面、进度与控件（详见 utils/mediaSession.js）
+  detachMS = attachMediaSession(art, path.value)
 
   // 续播定位：direct / Safari 原生 HLS 走 video.currentTime；hls.js 已在 startPosition 处理
   art.on('ready', () => {

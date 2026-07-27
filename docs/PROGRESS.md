@@ -63,6 +63,19 @@ G. 传输任务文件清单记住翻页（2026-07-28）：`openFiles()` 原本�
 记住的页码若已越界（筛选换窄、任务重试后清单变短）按 total 回落到最后一页，不停在空白页上。
 e2e `frontend/tasks-page-memory-check.mjs` 9/9——清单要 100 条以上才翻得动页，
 跑真实转存造这么多太重，这里把任务与清单打桩（真实链路仍由 `admin-tasks-check.mjs` 覆盖）。
+H. 锁屏与灵动岛显示片名封面（2026-07-28）：iPhone 上播放时灵动岛常驻一颗「正在播放」胶囊，
+但里面是空的。查清了机制——WebKit 只要见到带音轨且在播的 video 就自建系统会话
+（WebCore `MediaElementSession` 的 NowPlaying 判定），**网页没有任何开关能关掉它**，
+连原生 App 都压不掉别人的灵动岛活动（Apple 开发者论坛 thread/804164）。
+胶囊消不掉，能做的是让它显示得体：新增 `frontend/src/utils/mediaSession.js` 接管
+Media Session API——片名（文件名去扩展名）、所在目录当专辑、480 档缩略图作封面、
+播放态与进度同步，并接管播放/暂停/快退/快进/拖动五个系统控件；`teardown()` 里摘除，
+否则离页后灵动岛挂着一个已经不在播的视频。封面刻意取 480 档：列表卡片用的就是这档、
+多半已在缓存里命中，不必为锁屏再向云盘拉一次数据抽帧。
+`setPositionState` 的入参先自校验（HLS event 列表边转边播时 duration 是 Infinity，直接交会抛）。
+e2e `frontend/media-session-check.mjs` 18/18——这套 API 只有 setter 读不回来，
+脚本在页面里挂探针记录真正交给系统的入参；跑在临时端口+临时数据目录的隔离实例上
+（本仓库 `_e2e_*` 会被并行会话清掉）。真机呈现效果待用户在 iPhone 上确认。
 
 ## 如何启动预览
 ```
