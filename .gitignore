@@ -5,6 +5,9 @@
 /docker-test/
 /_shots/
 /frontend/_shots/
+# e2e 用的一次性实例（独立端口+独立数据目录，跑完即删）
+/_e2e_data/
+/_e2e_files/
 
 # 编译产物（构建时再生成）
 *.exe

@@ -177,6 +177,7 @@ async function remove(t) {
     return
   }
   await api.tasks.remove(t.id)
+  fileViews.delete(t.id)
   if (fileTask.value?.id === t.id) filesDlg.value = false
   loadTasks()
 }
@@ -188,6 +189,7 @@ async function clearDone() {
     return
   }
   await api.tasks.clearDone()
+  tasks.value.forEach((t) => { if (t.state === 'done') fileViews.delete(t.id) })
   loadTasks()
 }
 
@@ -204,6 +206,10 @@ const page = ref(1)
 const pageSize = 100
 let filesTimer = null
 let filterTimer = null
+// 每个任务的清单视图（搜索/筛选/页码）：翻到第 3 页看某个文件，关掉再打开还该在第 3 页，
+// 不用重新翻一遍。搜索与筛选一并记——只记页码的话，回来的「第 3 页」跟离开时不是同一批文件。
+// 键是任务 id，换个任务自然从头开始；任务记录被删时一并清掉。
+const fileViews = new Map()
 
 const stateOptions = [
   { label: '全部', value: 'all' },
@@ -237,13 +243,22 @@ const filesEmptyText = computed(() =>
 
 function openFiles(row) {
   fileTask.value = row
-  fileQuery.value = ''
-  fileState.value = 'all'
-  page.value = 1
+  const v = fileViews.get(row.id) || { q: '', state: 'all', page: 1 }
+  fileQuery.value = v.q
+  fileState.value = v.state
+  page.value = v.page
   files.value = []
   filesDlg.value = true
   loadFiles()
   filesTimer = setInterval(loadFiles, 1500)
+}
+
+// saveView 在页码/搜索/筛选变化的当下就存，不等关闭：删除任务记录时抽屉是异步关的，
+// 放在关闭回调里会在「删掉这条记录的视图」之后又把它写回来。
+function saveView() {
+  if (!fileTask.value) return
+  fileViews.set(fileTask.value.id,
+    { q: fileQuery.value, state: fileState.value, page: page.value })
 }
 async function loadFiles() {
   const t = fileTask.value
@@ -258,6 +273,14 @@ async function loadFiles() {
     files.value = d.items || []
     fileTotal.value = d.total
     fileCounts.value = d.counts
+    // 记住的页码可能已经不存在了（筛选换窄了、任务重试后清单变短），回落到最后一页，
+    // 否则停在一片空白上。取自 total，必定收敛：重来一次时 page 已经 ≤ last。
+    const last = Math.max(1, Math.ceil(fileTotal.value / pageSize))
+    if (page.value > last) {
+      page.value = last
+      saveView()
+      return loadFiles()
+    }
     // 任务本身的状态也跟着刷新（抽屉标题下的进度、按钮可用性都取自它）
     const fresh = tasks.value.find((x) => x.id === t.id)
     if (fresh) fileTask.value = fresh
@@ -270,11 +293,13 @@ async function loadFiles() {
 // 输入即查会把每个按键都打成一次请求，等手停下来再发
 function onFilterChange() {
   page.value = 1
+  saveView()
   clearTimeout(filterTimer)
   filterTimer = setTimeout(loadFiles, 250)
 }
 function goPage(p) {
   page.value = p
+  saveView()
   loadFiles()
 }
 function stopFilesPoll() {
