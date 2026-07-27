@@ -5,6 +5,7 @@ package index
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log"
 	"path"
@@ -21,6 +22,9 @@ import (
 
 // adminIdent 扫描时使用的管理员身份（全视野）。
 var adminIdent = &user.User{Role: "admin", BasePath: "/"}
+
+// ErrBusy 重建进行中，此时不接受清空（handler 映射 409）。
+var ErrBusy = errors.New("索引重建进行中")
 
 type Progress struct {
 	Running bool   `json:"running"`
@@ -41,7 +45,15 @@ type Builder struct {
 	pending []func()
 }
 
-func New(db *sql.DB, f *fs.FS) *Builder { return &Builder{db: db, fs: f} }
+func New(db *sql.DB, f *fs.FS) *Builder {
+	b := &Builder{db: db, fs: f}
+	// 进度是内存态：不回填的话，重启后一个建好的索引会显示成「共 0 项」，
+	// 看着像索引没了。启动时数一次真实行数。
+	if err := db.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&b.prog.Scanned); err != nil {
+		log.Printf("[index] 读取索引条数失败: %v", err)
+	}
+	return b
+}
 
 // OnComplete 注册全量重建成功后的回调（用于触发媒体预载）。
 func (b *Builder) OnComplete(fn func()) {
@@ -67,6 +79,25 @@ func (b *Builder) Rebuild() bool {
 	b.mu.Unlock()
 	go b.run()
 	return true
+}
+
+// Clear 清空索引：删掉 files 表全部行，进度归零。文件本身不受影响。
+// 重建进行中返回 ErrBusy——那时清表毫无意义，重建提交时的整表替换会把数据写回来。
+// 全程持锁：期间到来的增量写（queueOrRun）与新的 Rebuild 都排在后面，不与清空交错；
+// queueOrRun 的 fn() 在锁外执行，不会死锁。
+func (b *Builder) Clear() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.prog.Running {
+		return ErrBusy
+	}
+	if _, err := b.db.Exec(`DELETE FROM files`); err != nil {
+		return err
+	}
+	b.pending = nil     // 尚未重放的增量写一并作废（索引已空，重放无意义）
+	b.prog = Progress{} // scanned 归零，顺带清掉上次重建的报错
+	log.Println("[index] 索引已删除")
+	return nil
 }
 
 func (b *Builder) update(current string, scanned int64) {

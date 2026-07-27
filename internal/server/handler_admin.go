@@ -1,8 +1,11 @@
 package server
 
 import (
+	"errors"
+
 	"github.com/gin-gonic/gin"
 
+	"newlist/internal/index"
 	"newlist/internal/task"
 )
 
@@ -102,6 +105,19 @@ func (s *Server) indexRebuild(c *gin.Context) {
 	OK(c, nil)
 }
 
+// POST /api/admin/index/clear —— 删除索引（清空 files 表，文件本身不动）。
+func (s *Server) indexClear(c *gin.Context) {
+	if err := s.index.Clear(); err != nil {
+		if errors.Is(err, index.ErrBusy) {
+			Fail(c, 409, "索引重建进行中，请稍后再试")
+			return
+		}
+		Fail500(c, err)
+		return
+	}
+	OK(c, s.index.Progress())
+}
+
 // GET /api/admin/preload/progress —— 后台封面/源信息预载进度。
 func (s *Server) preloadProgress(c *gin.Context) {
 	if s.preload == nil {
@@ -119,6 +135,20 @@ func (s *Server) preloadRun(c *gin.Context) {
 	}
 	s.preload.Run()
 	OK(c, nil)
+}
+
+// POST /api/admin/preload/clear —— 删除已缓存的封面与视频源信息（先停下在跑的预载）。
+func (s *Server) preloadClear(c *gin.Context) {
+	if s.preload == nil {
+		Fail(c, 501, "预载不可用")
+		return
+	}
+	res, err := s.preload.Clear()
+	if err != nil {
+		Fail500(c, err)
+		return
+	}
+	OK(c, res)
 }
 
 // POST /api/admin/preload/snooze —— 「不是现在」：停下预载，一天后自动继续。

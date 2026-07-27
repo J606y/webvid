@@ -153,6 +153,48 @@ func (s *Service) Resume() {
 	s.start(left, true)
 }
 
+// Cleared 是一次缓存删除的结果（供后台反馈）。
+type Cleared struct {
+	Covers int64 `json:"covers"` // 删除的封面缓存文件数
+	Bytes  int64 `json:"bytes"`  // 释放的磁盘空间
+}
+
+// Clear 停下预载并删除其全部产物：封面缓存文件 + 视频源信息缓存，进度归零。
+// 推迟状态原样保留——删的是数据，不是「稍后再预载」的意愿。
+func (s *Service) Clear() (Cleared, error) {
+	s.stop()
+	covers, bytes, err := s.thumbs.Purge()
+	if err != nil {
+		return Cleared{}, err
+	}
+	if err := s.media.PurgeInfo(); err != nil {
+		return Cleared{}, err
+	}
+	return Cleared{Covers: covers, Bytes: bytes}, nil
+}
+
+// stop 停下当前轮并把进度复位到「从未预载」。gen++ 让旧轮的 finish/计数自行失效
+// （见 finish 与 process 的 gen 判定），在途的几项跑完即止，不会写回状态。
+// 剩余清单一并作废：计数已归零，接着跑会让进度对不上。
+func (s *Service) stop() {
+	s.mu.Lock()
+	s.gen++
+	if s.cancel != nil {
+		s.cancel() // 取消在途的下载/探测
+		s.cancel = nil
+	}
+	s.running = false
+	s.current = ""
+	s.errMsg = ""
+	s.finishedAt = ""
+	s.pending = nil
+	s.total = 0
+	s.done.Store(0)
+	s.covers.Store(0)
+	s.probes.Store(0)
+	s.mu.Unlock()
+}
+
 // start 启动一轮预载并取代旧轮。resume=true 表示接着推迟时的剩余清单跑（沿用已有
 // 计数），false 则全量重新收集并清零计数。立即返回，进度经 Progress 观察。
 func (s *Service) start(files []fileRow, resume bool) {
@@ -221,8 +263,10 @@ func (s *Service) run(ctx context.Context, gen int, files []fileRow, resume bool
 				}
 			}()
 			s.setCurrent(gen, fr.path)
-			s.process(ctx, fr)
-			s.done.Add(1)
+			s.process(ctx, gen, fr)
+			if s.isCurrent(gen) {
+				s.done.Add(1)
+			}
 		}(files[i])
 	}
 	wg.Wait()
@@ -269,15 +313,17 @@ func (s *Service) collect() []fileRow {
 }
 
 // process 预热单个文件：下载/生成封面 + （非 direct 视频）探测源信息入库。
-func (s *Service) process(ctx context.Context, fr fileRow) {
+// 计数只在本轮仍是当前轮时累加：Clear/新一轮已把计数归零，在途的这几项跑完再加
+// 会让界面显示出刚被删掉的缓存（gen 判定同 setCurrent）。
+func (s *Service) process(ctx context.Context, gen int, fr fileRow) {
 	// 封面：远端盘下载落盘一份（宽度无关，各尺寸共用）；本地盘生成默认宽度。
-	if _, file, err := s.thumbs.Get(ctx, admin, fr.path, 400); err == nil && file != "" {
+	if _, file, err := s.thumbs.Get(ctx, admin, fr.path, 400); err == nil && file != "" && s.isCurrent(gen) {
 		s.covers.Add(1)
 	}
 	// 视频源信息：direct 扩展名由 handler 按扩展名秒判，无需 ffprobe；其余探测并回写 media_info。
 	if fr.extType == "video" && !media.IsDirectExt(fr.name) {
 		fi := model.FileInfo{Name: fr.name, Size: fr.size, Modified: parseMod(fr.modified)}
-		if _, err := s.media.Decide(ctx, admin, fr.path, fi); err == nil {
+		if _, err := s.media.Decide(ctx, admin, fr.path, fi); err == nil && s.isCurrent(gen) {
 			s.probes.Add(1)
 		}
 	}

@@ -48,6 +48,15 @@ e2e `frontend/admin-tasks-check.mjs` 15/15，**随 v2.1.0 发布**。
 E. 离线下载可选 Referer（2026-07-27）：弹窗新增可选 Referer，直链请求与 ffmpeg 拉 HLS
 分片两条路径都带上，防盗链站点（校验 Referer 非 IP）可下；403 且未填时明确提示填 Referer。
 单测 `internal/server/offline_referer_test.go` + `offline-check.mjs` 18/0/3，**随 v2.1.2 发布**。
+F. 索引管理两个删除动作（2026-07-28）：后台「文件索引」加「删除索引」（清空 files 表，
+文件不动；重建进行中拒绝，409），「封面与源信息预载」加「删除缓存」（先停下预载，
+再删 data/thumbs 全部封面文件 + 清空 media_info，进度归零、推迟状态保留）。
+两者互不联动。顺带修了索引条数只存内存导致「重启后显示共 0 项」——`index.New` 启动回填真实行数；
+并给预载计数加代际判定（`process(ctx, gen, …)`），免得删完缓存后在途几项把计数加回去。
+单测 `internal/index/index_test.go`（新）+ `preload_test.go` 的 `TestClearRemovesCache`，
+e2e `frontend/index-clear-check.mjs` 12/12、零控制台错误，二进制已重嵌。
+e2e 里两个 clear 接口有意打桩——打真后端会把实例的封面缓存真删掉、重扫云盘代价太大；
+路由是否注册改用未鉴权 POST 验（返 401 而非 404）。
 
 ## 如何启动预览
 ```

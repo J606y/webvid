@@ -239,6 +239,22 @@ func (s *Service) saveInfo(logical string, fi model.FileInfo, d Decision) {
 	}
 }
 
+// PurgeInfo 清空视频源信息缓存：内存决策缓存 + media_info 全表。
+// 在播的转码会话不受影响——会话建立时决策已取到手，运行期不再回查缓存。
+func (s *Service) PurgeInfo() error {
+	s.mu.Lock()
+	s.probes = map[string]Decision{}
+	s.mu.Unlock()
+	if s.db == nil {
+		return nil
+	}
+	if _, err := s.db.Exec(`DELETE FROM media_info`); err != nil {
+		return err
+	}
+	log.Println("[media] 视频源信息缓存已删除")
+	return nil
+}
+
 // modKey 把修改时间归一为 RFC3339（秒级，与 index 写入 files.modified 同格式）。
 func modKey(t time.Time) string {
 	if t.IsZero() {

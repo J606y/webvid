@@ -322,6 +322,66 @@ func TestSnoozeSurvivesRestart(t *testing.T) {
 	}
 }
 
+// TestClearRemovesCache：删除缓存清掉封面文件与 media_info、进度归零，推迟状态保留。
+func TestClearRemovesCache(t *testing.T) {
+	root := t.TempDir()
+	writeImage(t, filepath.Join(root, "a.png"))
+	writeImage(t, filepath.Join(root, "b.jpg"))
+	d, f := mount(t, root, map[string]string{})
+	rebuild(t, d, f)
+
+	dataDir := t.TempDir()
+	th := thumb.New(f, dataDir)
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
+	pl := New(d, store(t, d), f, th, md)
+	pl.Run()
+	if prog := waitPreload(t, pl); prog.Covers < 2 {
+		t.Fatalf("期望先预热 ≥2 张封面, got %d", prog.Covers)
+	}
+	// 源信息缓存直接造一行，免去本用例对 ffmpeg 的依赖
+	if _, err := d.Exec(
+		`INSERT INTO media_info(path,size,modified,probed_at) VALUES('/m/x.mkv',1,'','2026-07-28T00:00:00Z')`); err != nil {
+		t.Fatalf("造 media_info: %v", err)
+	}
+	thumbDir := filepath.Join(dataDir, "thumbs")
+	if n := len(dirFiles(t, thumbDir)); n < 2 {
+		t.Fatalf("预热后封面目录应有 ≥2 个文件, got %d", n)
+	}
+	pl.Snooze() // 推迟意愿与缓存无关，删完应原样保留
+
+	res, err := pl.Clear()
+	if err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	if res.Covers < 2 || res.Bytes <= 0 {
+		t.Fatalf("应报告删除的封面数与释放空间, got %+v", res)
+	}
+	if n := len(dirFiles(t, thumbDir)); n != 0 {
+		t.Fatalf("Clear 后封面目录应为空, got %d 个文件", n)
+	}
+	var n int
+	d.QueryRow(`SELECT COUNT(*) FROM media_info`).Scan(&n)
+	if n != 0 {
+		t.Fatalf("Clear 后 media_info 应为空, got %d 行", n)
+	}
+	p := pl.Progress()
+	if p.Running || p.Total != 0 || p.Done != 0 || p.Covers != 0 || p.Probes != 0 || p.Pending != 0 {
+		t.Fatalf("Clear 后进度应归零, got %+v", p)
+	}
+	if !p.Snoozed {
+		t.Fatal("Clear 不应解除推迟")
+	}
+}
+
+func dirFiles(t *testing.T, dir string) []os.DirEntry {
+	t.Helper()
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("读目录 %s: %v", dir, err)
+	}
+	return ents
+}
+
 func genVideo(t *testing.T, ffmpeg, out string) {
 	t.Helper()
 	args := []string{"-hide_banner", "-loglevel", "error", "-y",

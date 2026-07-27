@@ -281,6 +281,34 @@ func (s *Service) remoteVideoFrame(ctx context.Context, u *user.User, logical st
 	return out
 }
 
+// Purge 删除全部封面缓存文件，返回删除的文件数与释放的字节数。
+// 逐个删而不是整目录 RemoveAll：Windows 上正被写入的文件（在途下载、ffmpeg 抽帧）
+// 删不掉，整目录删会中途失败留下半清状态，重建的目录还会让在途写入落进孤儿目录。
+// 逐个删则跳过这类文件（记日志），其余照清；漏下的几个会被后续覆盖或过期刷新。
+func (s *Service) Purge() (files int64, bytes int64, err error) {
+	ents, err := os.ReadDir(s.cacheDir)
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, e := range ents {
+		if e.IsDir() {
+			continue
+		}
+		size := int64(0)
+		if fi, err := e.Info(); err == nil {
+			size = fi.Size()
+		}
+		if err := os.Remove(filepath.Join(s.cacheDir, e.Name())); err != nil {
+			log.Printf("[thumb] 删除缓存 %s 失败: %v", e.Name(), err)
+			continue
+		}
+		files++
+		bytes += size
+	}
+	log.Printf("[thumb] 封面缓存已删除：%d 个文件", files)
+	return files, bytes, nil
+}
+
 func download(ctx context.Context, url, out string) error {
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()

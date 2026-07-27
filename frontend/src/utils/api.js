@@ -83,10 +83,12 @@ export const api = {
     index: {
       progress: () => http.get('/admin/index/progress'),
       rebuild: () => http.post('/admin/index/rebuild'),
+      clear: () => http.post('/admin/index/clear'),
     },
     preload: {
       progress: () => http.get('/admin/preload/progress'),
       run: () => http.post('/admin/preload/run'),
+      clear: () => http.post('/admin/preload/clear'),
       snooze: () => http.post('/admin/preload/snooze'),
       resume: () => http.post('/admin/preload/resume'),
     },

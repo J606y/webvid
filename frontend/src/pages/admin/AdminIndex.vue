@@ -12,8 +12,12 @@
         <p v-if="progress.err" class="err">上次重建出错：{{ progress.err }}</p>
         <p class="dim">重建会全量扫描所有存储，供搜索与媒体库使用。日常写操作会自动增量更新。</p>
       </template>
-      <el-button type="primary" :disabled="progress.running" :icon="RefreshRight"
-        @click="rebuild">重建索引</el-button>
+      <div class="index-actions">
+        <el-button type="primary" :disabled="progress.running" :icon="RefreshRight"
+          @click="rebuild">重建索引</el-button>
+        <el-button type="danger" link :disabled="progress.running" :icon="Delete"
+          @click="clearIndex">删除索引</el-button>
+      </div>
     </div>
 
     <div class="glass index-card">
@@ -43,6 +47,7 @@
           <el-button :disabled="preload.running" :icon="RefreshRight" @click="runPreload">重新预载</el-button>
           <el-button v-if="preload.running" :icon="Clock" @click="snoozePreload">不是现在</el-button>
         </template>
+        <el-button type="danger" link :icon="Delete" @click="clearPreload">删除缓存</el-button>
       </div>
     </div>
   </div>
@@ -50,9 +55,11 @@
 
 <script setup>
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue'
-import { ElMessage } from 'element-plus'
-import { Clock, RefreshRight, VideoPlay } from '@element-plus/icons-vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import 'element-plus/es/components/message-box/style/css'
+import { Clock, Delete, RefreshRight, VideoPlay } from '@element-plus/icons-vue'
 import { api } from '../../utils/api'
+import { formatSize } from '../../utils/file'
 
 // active：本 pane 是否为当前选中 Tab。切到索引管理时刷新进度（原 Admin.vue 的 watch(tab)），
 // 好在别的 Tab 触发重建（如添加存储）后切回来能看到运行中的进度。
@@ -105,6 +112,39 @@ async function rebuild() {
   ElMessage.success('已开始重建')
   loadProgress()
 }
+// confirmDelete 两处删除共用的确认弹窗：取消走 catch，当作没点。
+function confirmDelete(title, body) {
+  return ElMessageBox.confirm(body, title,
+    { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' })
+    .then(() => true).catch(() => false)
+}
+
+async function clearIndex() {
+  if (!await confirmDelete('删除索引',
+    '索引只记录文件的位置与名称，文件本身不受影响。搜索与媒体库会暂时为空，直到重新建立索引。')) return
+  try {
+    progress.value = await api.admin.index.clear()
+    ElMessage.success('索引已删除')
+  } catch {
+    // 多半是 409：别处已开始重建。失败原因拦截器已经弹过，这里只把进度拉回真实状态
+    loadProgress()
+  }
+}
+
+async function clearPreload() {
+  if (!await confirmDelete('删除缓存',
+    '删除全部已缓存的封面与视频源信息，正在进行的预载会停下。之后浏览与播放时重新加载，文件本身不受影响。')) return
+  try {
+    const r = await api.admin.preload.clear()
+    ElMessage.success(r?.covers
+      ? `已删除 ${r.covers} 个封面，释放 ${formatSize(r.bytes)}`
+      : '缓存已删除')
+  } catch {
+    // 原因已由拦截器弹出；预载此时已停下，刷新进度让界面与服务端一致
+  }
+  loadProgress()
+}
+
 async function runPreload() {
   await api.admin.preload.run()
   ElMessage.success('已开始预载封面与源信息')
