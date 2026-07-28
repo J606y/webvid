@@ -20,7 +20,7 @@ func newServeTS(t *testing.T, content []byte, size int64) (string, *rangeSrv, fu
 	mod := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		Serve(w, r, "f.bin", mod, size, "application/octet-stream",
-			fixedProvider(upstream.URL), 3, 64<<10)
+			fixedProvider(upstream.URL), tOpts(3, 64<<10))
 	}))
 	return down.URL, up, func() { upstream.Close(); down.Close() }
 }
@@ -292,7 +292,7 @@ func TestServeUnknownSizePassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		Serve(w, r, "f.bin", time.Time{}, -1, "video/mp4", fixedProvider(upstream.URL), 4, 64<<10)
+		Serve(w, r, "f.bin", time.Time{}, -1, "video/mp4", fixedProvider(upstream.URL), tOpts(4, 64<<10))
 	}))
 	defer down.Close()
 

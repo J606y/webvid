@@ -324,21 +324,33 @@ func (f *FS) List(ctx context.Context, u *user.User, p string) ([]model.FileInfo
 
 // AccelOpts 挂载的加速配置（driver.CommonRemoteFields，本地驱动无这些字段→零值）。
 type AccelOpts struct {
-	Proxy      bool  // 代理模式：下载/播放经服务器中转
-	Threads    int   // 并发 Range 连接数
-	ChunkBytes int64 // 分块大小（字节）
+	Proxy          bool  // 代理模式：下载/播放经服务器中转
+	Threads        int   // 并发 Range 连接数
+	ChunkBytes     int64 // 分块大小（字节）
+	ReadaheadBytes int64 // 预读缓冲上限（字节）：每条在播的流常驻的内存量
 }
 
-// accelOpts 解析挂载配置；缺省 threads=4、chunk_mb=4，钳制到安全区间。
+// accelOpts 解析挂载配置；缺省 threads=4、chunk_mb=4、readahead_mb=32，钳制到安全区间。
+// 取值范围只在这里定——stream 包是纯机制，不掺"多大算合理"的策略。
 func (m *Mount) accelOpts() AccelOpts {
-	o := AccelOpts{Proxy: m.Cfg["proxy"] == "true", Threads: 4, ChunkBytes: 4 << 20}
+	o := AccelOpts{Proxy: m.Cfg["proxy"] == "true", Threads: 4,
+		ChunkBytes: 4 << 20, ReadaheadBytes: 32 << 20}
 	if n, err := strconv.Atoi(m.Cfg["threads"]); err == nil {
 		o.Threads = min(max(n, 1), 32)
 	}
 	if n, err := strconv.Atoi(m.Cfg["chunk_mb"]); err == nil {
 		o.ChunkBytes = int64(min(max(n, 1), 64)) << 20
 	}
+	if n, err := strconv.Atoi(m.Cfg["readahead_mb"]); err == nil {
+		o.ReadaheadBytes = int64(min(max(n, 4), 512)) << 20
+	}
 	return o
+}
+
+// Stream 转成 stream 包的调参。
+func (o AccelOpts) Stream(label string) stream.Opts {
+	return stream.Opts{Threads: o.Threads, ChunkBytes: o.ChunkBytes,
+		ReadaheadBytes: o.ReadaheadBytes, Label: label}
 }
 
 // MediaVisible 该挂载的内容是否在指定界面展示（kind: video=视频库 / image=照片墙 / search=搜索）。

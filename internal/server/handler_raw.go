@@ -135,5 +135,5 @@ func (s *Server) rawProxy(c *gin.Context, res *fs.LinkResult) {
 		return
 	}
 	stream.Serve(s.downloadWriter(c), c.Request, res.Info.Name, res.Info.Modified, res.Info.Size,
-		contentTypeFor(res.Info.Name), res.Provider(), res.Accel.Threads, res.Accel.ChunkBytes)
+		contentTypeFor(res.Info.Name), res.Provider(), res.Accel.Stream(res.Info.Name))
 }

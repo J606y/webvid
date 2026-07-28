@@ -280,7 +280,7 @@ func (f *FS) copyOne(ctx context.Context, sm *Mount, up driver.Uploader, fj file
 					lr := &LinkResult{Link: lk, Refresh: func(rctx context.Context) (*driver.Link, error) {
 						return sm.drv.Link(rctx, fj.srcRel)
 					}}
-					r = stream.NewMultiReader(ctx, lr.Provider(), 0, fj.size, opts.Threads, opts.ChunkBytes)
+					r = stream.NewMultiReader(ctx, lr.Provider(), 0, fj.size, opts.Stream(fj.name))
 					break
 				}
 				req, err := http.NewRequestWithContext(ctx, http.MethodGet, lk.URL, nil)

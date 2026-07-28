@@ -27,6 +27,14 @@ M12 Docker：✅ 2026-07-07 完成（本机 Docker Desktop 实测：构建/转�
 
 技术债务整改进度另见 `docs/REFACTOR-PROGRESS.md`。
 
+**播放拉流性能整改（2026-07-29）见 `docs/PLAYBACK-PERF.md`**：
+高码率视频持续缓冲的根因是**并发分块被 HTTP/2 复用到了一条 TCP 连接上**（Go 的
+`http.DefaultTransport` 默认尝试 h2，googleapis 协商 h2），多线程等于没开；
+另有失速时干等 2 分钟、首字节要等满一整块、几乎没有预读、连接从不复用四条。
+已全部修掉并加 `NL_STREAM_DEBUG=1` 拉流诊断（第 5 条根因就是它发现的）。
+**真机实测尚未做**，判定标准见该文档末尾。
+另：Google Drive 直链带授权头，**无论「代理模式」开关如何都走服务器中转**。
+
 **转存链路提速与限流可靠性（2026-07-25）见 `docs/TRANSFER-RELIABILITY.md`**：
 断点续传探测从每文件一次 Stat 改为每目录一次 List、googledrive/pikpak 路径解析加负缓存、
 限流退避改对（上传路径原本完全没有退避）+ 错误能定位到文件与源/目标侧。

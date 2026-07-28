@@ -2,6 +2,7 @@ package stream
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
@@ -62,8 +63,11 @@ func parseRange(h string, size int64) (r httpRange, hasRange, satisfiable bool) 
 // Serve 以代理模式响应下载/播放请求：解析客户端 Range → 并发分块拉直链 → 单流回给客户端。
 // size 未知（<0）时退化为单流透传（原样转发 Range 头、镜像上游状态与长度头）。
 // 调用方先设好 Content-Disposition 等附加头再进来。
+//
+// 客户端那一侧永远是单条有序响应——浏览器对一个文件只发一个 Range 请求，HTTP 语义
+// 决定了它不能拆到多条连接上发。并发只发生在服务器↔云盘这一段（见 MultiReader）。
 func Serve(w http.ResponseWriter, req *http.Request, name string, modtime time.Time, size int64,
-	ctype string, provider LinkProvider, threads int, chunkBytes int64) {
+	ctype string, provider LinkProvider, o Opts) {
 	if ctype != "" {
 		w.Header().Set("Content-Type", ctype)
 	}
@@ -97,7 +101,10 @@ func Serve(w http.ResponseWriter, req *http.Request, name string, modtime time.T
 		w.WriteHeader(status)
 		return
 	}
-	mr := NewMultiReader(req.Context(), provider, rg.start, rg.length, threads, chunkBytes)
+	if o.Label == "" {
+		o.Label = name
+	}
+	mr := NewMultiReader(req.Context(), provider, rg.start, rg.length, o)
 	defer mr.Close()
 	w.WriteHeader(status)
 	io.Copy(w, mr) // 客户端断开→req.Context 取消→MultiReader 退出；此处无法再改状态码
@@ -159,12 +166,16 @@ const (
 )
 
 // singleClient 带响应头超时（体传输不限时——单流本就长寿命）。
+// 同样禁 h2：h2 的每流流控窗口固定 4MB，长跑的整片顺序读在高时延链路上会被它封顶，
+// 而单流本就只用一条连接，h2 的多路复用在这里一点好处也没有。理由详见 chunkClient。
 var singleClient = &http.Client{Transport: func() http.RoundTripper {
 	t, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return http.DefaultTransport
 	}
 	t2 := t.Clone()
+	t2.ForceAttemptHTTP2 = false
+	t2.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	t2.ResponseHeaderTimeout = 30 * time.Second
 	return t2
 }()}
@@ -275,7 +286,7 @@ func servePassthrough(w http.ResponseWriter, req *http.Request, provider LinkPro
 	if r := req.Header.Get("Range"); r != "" {
 		up.Header.Set("Range", r)
 	}
-	resp, err := http.DefaultClient.Do(up)
+	resp, err := singleClient.Do(up) // 同为单流，复用其响应头超时与 h1.1 设定
 	if err != nil {
 		http.Error(w, "拉取源失败", http.StatusBadGateway)
 		return
