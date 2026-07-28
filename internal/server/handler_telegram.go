@@ -93,5 +93,6 @@ func (s *Server) tgSignIn(c *gin.Context) {
 		Fail500(c, err)
 		return
 	}
-	s.afterStorageChange(c)
+	// 登录成功这个盘才真正挂得上，它的文件此前不在索引里：只扫它一个
+	s.afterStorageChange(c, func() bool { return s.rescanMount(id) })
 }

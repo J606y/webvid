@@ -198,12 +198,12 @@ async function saveStorage() {
   if (!ok) return
   saving.value = true
   try {
-    if (editingStorage.value?.id) {
-      await api.admin.storages.update(editingStorage.value.id, storageForm.value)
-    } else {
-      await api.admin.storages.create(storageForm.value)
-    }
-    ElMessage.success('已保存，索引重建已触发')
+    // scanning 由后端给：只有文件清单可能变了（新增存储、换驱动/账号/根目录）才会后台重扫
+    // 这一个盘；改排序、展示开关这类不动索引，就别说"正在索引"
+    const r = editingStorage.value?.id
+      ? await api.admin.storages.update(editingStorage.value.id, storageForm.value)
+      : await api.admin.storages.create(storageForm.value)
+    ElMessage.success(r?.scanning ? '已保存，正在后台索引该存储' : '已保存')
     storageHero.animatedClose()
     loadStorages()
   } finally {
@@ -211,8 +211,8 @@ async function saveStorage() {
   }
 }
 async function reloadStorage(row) {
-  await api.admin.storages.reload(row.id)
-  ElMessage.success('已重载')
+  const r = await api.admin.storages.reload(row.id)
+  ElMessage.success(r?.scanning ? '已重载，正在后台索引该存储' : '已重载')
   loadStorages()
 }
 async function deleteStorage(row) {
@@ -340,7 +340,7 @@ async function tgSignIn() {
       ElMessage.warning('该账号开启了两步验证，请补填两步密码后再点登录')
       return
     }
-    ElMessage.success('登录成功，存储已重载')
+    ElMessage.success(r?.scanning ? '登录成功，正在后台索引该存储' : '登录成功，存储已重载')
     tgClearMemory(tgStorage.value.id) // 会话已消费完毕，不能再让下次重开弹窗误判成"仍待续发"
     tgHero.animatedClose()
     loadStorages()

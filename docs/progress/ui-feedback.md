@@ -3,6 +3,52 @@
 > 用户反馈 #1~#52 的迭代记录与踩坑明细。历史归档，只读参考。
 
 ## UI 迭代记录（用户反馈）
+- 2026-07-28 反馈#53「播放视频适配 iOS 的画中画功能」（要的是**系统**画中画，
+  不是播放器自己在网页里画的小窗）：
+  - 现状三处硬伤：① ArtPlayer 的 `pip:true` 退回 WebKit 分支时只判断
+    `webkitSetPresentationMode` 方法存在、不判断 `webkitSupportsPresentationMode
+    ('picture-in-picture')`，系统里关掉画中画照样给按钮、点了弹英文 `PIP Not Supported`；
+    ② 该分支不监听 `webkitpresentationmodechanged`，用户从小窗自己关闭/还原后状态不同步；
+    ③ 离页 `art.destroy(true)` 连 video 元素一起销毁 —— 开了小窗再返回视频库小窗立刻消失，
+    而"一边看一边干别的"正是画中画唯一的意义。
+  - `utils/pip.js`（新）能力层：`pipMode` 先判 WebKit（Apple 平台的系统小窗那条链）
+    再判标准 API，两者皆无返回空串 → 不给按钮（Safari 进小窗失败**没有可 catch 的
+    promise**，只能按能力显隐而非点了再报错）；`isPipActive/enterPip/exitPip/onPipChange`。
+  - `utils/playerHost.js`（新）播放器单例与寄存：实例移出 Vue 组件（容器 div 自建，
+    Vue 卸载页面会连子树一起摘掉，只有自建节点能在卸载前整块搬走）。离页时在小窗里
+    → 搬进隐藏宿主 `#wv-player-park` 继续播；否则销毁。回播放页 `snapshot(path)` 命中
+    就搬回插槽并 `exitPip`，不重探测不重起播。退出小窗的分流：**还在播 = 还原键**
+    → `router.push` 回播放页接回；**已暂停 = 关闭键**（WebKit 关小窗会顺带暂停）→ 收摊补报进度。
+    进度上报与 `attachMediaSession` 一并迁入（寄存期间必须继续跑），另加 `pagehide` 兜底上报。
+  - 隐藏宿主只能**离屏定位**，不能 `display:none`/`visibility:hidden` —— 那会让 WebKit
+    判定元素不可渲染直接收掉小窗。搬移用同一任务内 remove+insert，规范的「移出文档即暂停」
+    判定要等 stable state，同步搬不触发。
+  - 画中画按钮改自建（`pip:false` + `art.controls.add`，SF Symbols 形制图标，
+    tooltip 中文），能力判定放在 `video:loadedmetadata` 之后：iOS 在元数据就绪前
+    `webkitSupportsPresentationMode` 可能还报 false，构造时判会漏掉按钮。
+    图标 svg 照例写死 width/height（无宽高属性的 svg 在 iOS 会解析成 0 高，见反馈#51）。
+  - **iPhone 的转码播放改走 Safari 原生 HLS**：iPhone 只给 ManagedMediaSource 没有
+    MediaSource，`Hls.isSupported()` 却为真，于是一直在走 MSE —— 系统画中画、AirPlay、
+    硬解都在原生这条链上。判据 `!window.MediaSource && canPlayType('application/vnd.apple.mpegurl')`
+    （iPad/macOS 有完整 MSE，维持 hls.js 不变）。顺带补原生路径的运行期兜底：
+    `art.on('error')` 让 ArtPlayer 自带重连试两轮，仍失败才落兜底面板（此前只有 hls.js 分支有）。
+  - `Play.vue` 瘦身成"探测策略 + 兜底面板"，播放器外观整段迁到全局 `assets/player.css`
+    的 `.wv-player`（容器脱离组件树拿不到 scoped 的 data-v，规则一条未改）；
+    页面里留 `.player-slot`（16/9 玻璃底，播放器未就位时顶着首帧不留白）。
+    e2e 选择器随之更新：mobile-check `.player`→`.player-slot`、detect-check 同。
+  - 回归 `frontend/pip-check.mjs`（新）：桌面 Chromium 给 `HTMLVideoElement.prototype`
+    打 WebKit presentationMode 的桩把 iPhone 形状装出来，验按钮显隐、进出小窗调用、
+    离页寄存仍在播且进度继续走、回页接回不重起播、还原键回页、关闭键收摊补报末次进度、
+    转码播放不回归。真机（系统小窗本身）只能在 iPhone 上确认。
+  - **踩坑**：样式全局化后特异性掉一档 —— scoped 编译出的前缀是 `.player[data-v-xxx]`
+    (0,2,0)，只写 `.wv-player` 只有 (0,1,0)，与 ArtPlayer 运行时注入的同级规则打平，
+    而它的 `<style>` 排在产物 CSS 之后就赢了，玻璃胶囊被打回原样（pip-check 首轮抓到）。
+    修法：`.wv-player.wv-player` 把那一档原样补回来，逐条与迁移前等价。
+  - 回归（NL_BASE 指 5299 隔离实例）：pip 18/18、player 12/12、progress 15/15、
+    detect 3/3、hls 30/30、media-session 18/18（顺带修其陈旧默认样片路径
+    `星际穿越.mp4`→`星际漫游.mp4`，库里没有前者，播不起来必超时；hls-check 加 NL_BASE
+    支持，原写死 5243）；mobile 36/37，唯一失败「后台 Tab 头无溢出」是后台加到第六个
+    Tab（索引管理，v2.2.0）撑出的横向滚动，与本次无关，脚本注释仍写着"五项"。
 - 2026-07-19 反馈#52「给这个项目设计一个图标」（此前项目完全没有图标：无 favicon、
   manifest 无 icons、无 apple-touch-icon，iOS 加主屏用网页截图兜底）：
   设计 = 产品自身视觉语言的浓缩——暗底 #0a0a12 + 四色极光光斑（取 glass.css .aurora
@@ -831,3 +877,55 @@
   - 验证：random 连查三次顺序均不同；DOM 断言全过（hero=5/主页 200/查看全部跳转/
     all 视图 120→240 滚动加载/返回键/控制台零错误）；全量 e2e 14 张通过
 
+
+## 索引管理面板（2026-07-28，用户反馈三连）
+
+**#1 打开界面要等一会数字才出现**
+- 根因不在后端：两个 progress 接口纯内存读，实测 1.4 ms；面板随后台页挂载即发请求
+  （el-tab-pane 默认 lazy=false）。问题在首帧——进度是内存态、默认值全 0，数据没回来时
+  卡片已写死「索引共 0 项」「封面 0 · 视频源信息 0 已缓存」，回来后再跳，远程实例上就是「滞后」。
+- 改：`AdminIndex.vue` 加占位（`.ph` 与数字同高，不跳行）；未读到状态时动作按钮不可点；
+  两张卡各记各的加载态（`Promise.allSettled`，一个接口挂了不牵连另一张）；
+  两个 progress 接口改 `silent`（1.5 s 轮询断线不再刷屏 toast），失败就地说明 + 重试，
+  已有数字时留住上一次的值并继续轮询自愈，面板底部挂一行说明。
+- 验证：`frontend/index-loading-check.mjs`（慢网首帧 / 数据到位 / 接口失败三态，13 断言）。
+
+**#2 每次重新预载都从 79% 开始**
+- 根因：进度总数把「会被瞬间跳过的项」也算成活——已缓存的、以及做也白做的
+  （挂载连不上、驱动出不了封面、服务器没 ffmpeg/ffprobe）。它们在第一次轮询（1.5 s）前就全跳完，
+  条子一上来就停在这批的占比上，真活全挤在最后一小截。79% 每次一样是因为这个比例是确定的。
+- 本机复现同一机制：42 项里 18 项在连不上的 telegram 挂载上 → 43% 瞬间跳过。
+- 改：`thumb.Cover()` / `media.ProbeStatus()` 各给三态（Ready / Pending / None），**只读盘查库、
+  不发网络**；`preload.collect()` 据此只把真有活的项放进 todo，`total` 只算真活；
+  已缓存量作为 `covers/probes` 计数基线 —— 卡片显示的从此是「现在缓存了多少」而不是
+  「这轮跑了多少」，重启后也准（推迟期间另跑 `countCached()` 补基线）。
+  `process()` 只做 collect 判定还缺的那份，避免把基线里的重复计一次。
+  `collect` 拆出 `visible()`（纯可见性过滤，与 ffmpeg 有无无关，保住原测试）。
+- 坑：`thumb.Cover` 的分支顺序与缓存键取法必须与 `Get` 一模一样（含 remoteTTL 30 天、
+  本地键含 mtime/size/宽度 400），Get 改了要同步改，否则进度多算或少算活。
+- 验证：`TestCollectSkipsCached`（二次收集 todo=0、总数=0、缓存量仍为真实值）、
+  `TestCountCachedWhileSnoozed`；`go test ./...` 全过；三个前端 e2e（loading/clear/snooze）全过。
+
+**#3 待查：网页关掉后台就不干活**
+- 预载只在启动、索引重建完成、手动「重新预载」三处触发，与浏览器无关（main.go / index.OnComplete）。
+- 怀疑同 #2 同源：那批「做也白做」的项瞬间跑完 → 后台等于没干活；而浏览时封面照样出得来，
+  是 `thumbHandler` 在下载失败时 302 直连云盘（handler_video.go:128），那条路不落盘。
+- 待用户回传 `journalctl -u webvid --since today | grep -i preload` 定案。
+
+**#3 定案（2026-07-29）：后台只在三处触发 + 失败全隐身**
+- 触发点只有：进程启动、索引全量重建完成、手动「重新预载」（main.go / index.OnComplete），
+  全仓无定时器。日常新增走索引**增量**更新，不带预载——新文件的封面只能等浏览到时
+  当场加载（thumbHandler），于是像「只有网页打开才干活」。远端封面 30 天到期后同理没人刷新。
+- 本机复现到第二个更狠的现象：telegram 挂载 18 项抽帧**同一秒全部失败**
+  （`exit status 0xcecfcb08`），既把进度条瞬间冲上去，又永远缓存不到；而界面上只显示
+  「跑完了」，一个字都不提失败——这正是「后台好像没干活」的观感来源。
+- 改：
+  1. `preload.StartAuto(ctx, AutoEvery=6h)`，main 启动后挂上；上一轮还在跑就跳过这次。
+     全已缓存时 collect 阶段就跳完，一次网络都不发，代价可忽略。
+  2. `Progress` 加 `failed` / `fail_note`（本轮没做成的项数 + 头一条人话原因），
+     卡片直接显示「N 项没能预载：<原因>」。取消（推迟/删缓存）不计入失败。
+  3. 修错误归因：`thumb.remoteVideoFrame` 改为返回 error，`Get` 照实上抛，
+     不再让抽帧失败一路落到「该存储不支持此操作」这句谎报；配套
+     `thumbHandler` 一律 404（原注释本就写着「一律 404」，代码却会 500）。
+- 验证：`TestStartAutoPicksUpNewFiles`；`go test ./...` 全过；三个前端 e2e 全过；
+  真机截图确认卡片显示「18 项没能预载：无法为云盘视频生成封面。请确认服务器装了 ffmpeg…」。

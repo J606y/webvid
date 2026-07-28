@@ -211,7 +211,7 @@ ok('播放页顶部留白收窄（< 68px）', await page.evaluate(() =>
   parseFloat(getComputedStyle(document.querySelector('.play-page')).paddingTop) < 68))
 // 播放器在头部之下垂直居中：其上、下留白大致相当（差 ≤ 视口高 8%）
 ok('播放器垂直居中', await page.evaluate(() => {
-  const r = document.querySelector('.player').getBoundingClientRect()
+  const r = document.querySelector('.player-slot').getBoundingClientRect()
   const above = r.top, below = window.innerHeight - r.bottom
   return above > 20 && below > 20 && Math.abs(above - below) <= window.innerHeight * 0.08
 }))

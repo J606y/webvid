@@ -10,6 +10,7 @@ import (
 
 	"newlist/internal/db"
 	"newlist/internal/driver"
+	"newlist/internal/fs"
 	"newlist/internal/util"
 )
 
@@ -132,14 +133,63 @@ func (s *Server) storageGet(c *gin.Context) {
 	Fail(c, 404, "存储不存在")
 }
 
-// afterStorageChange 增删改存储后：重载挂载树 + 重建索引。
-func (s *Server) afterStorageChange(c *gin.Context) {
+// indexNeutral 是改了也不影响文件清单的配置字段：展示开关只决定媒体库/搜索要不要展示
+// （查询时按挂载实时过滤），代理与加速只改取流方式。改这些不必动索引。
+var indexNeutral = map[string]bool{
+	"show_video": true, "show_photo": true, "show_search": true,
+	"proxy": true, "threads": true, "chunk_mb": true,
+}
+
+// contentCfgChanged 判断两份配置里"决定这个盘有哪些文件"的字段有没有变。
+func contentCfgChanged(a, b map[string]string) bool {
+	for k, v := range a {
+		if !indexNeutral[k] && b[k] != v {
+			return true
+		}
+	}
+	for k, v := range b {
+		if !indexNeutral[k] && a[k] != v {
+			return true
+		}
+	}
+	return false
+}
+
+// mountByID 返回该存储当前的挂载（未挂上返回 nil）。
+func (s *Server) mountByID(id int64) *fs.Mount {
+	for _, m := range s.fs.Mounts() {
+		if m.ID == id {
+			return m
+		}
+	}
+	return nil
+}
+
+// rescanMount 让这个盘的索引跟上：挂载正常就后台只重扫它一个，返回是否真的开扫。
+func (s *Server) rescanMount(id int64) bool {
+	m := s.mountByID(id)
+	if m == nil || !m.Enabled || m.Status != "" {
+		return false
+	}
+	s.index.ReplaceSubtree(m.Path)
+	return true
+}
+
+// afterStorageChange 增删改存储后重载挂载树，再由 apply 对索引做最小改动
+// （apply 返回是否开了后台重扫；传 nil 表示这次改动与索引无关）。
+//
+// 过去这里无差别触发全量重建：扫遍所有网盘，完了还全库预载一遍——改个排序、关一下
+// 「在视频库展示」也得等几分钟。真正需要动索引的只有被改的那一个盘，多数改动连扫都不用扫。
+func (s *Server) afterStorageChange(c *gin.Context, apply func() bool) {
 	if err := s.fs.Reload(c.Request.Context()); err != nil {
 		Fail(c, 500, "存储已保存，但挂载重载失败："+util.Humanize(err))
 		return
 	}
-	s.index.Rebuild()
-	OK(c, nil)
+	scanning := false
+	if apply != nil {
+		scanning = apply()
+	}
+	OK(c, gin.H{"scanning": scanning})
 }
 
 // POST /api/admin/storages
@@ -162,7 +212,7 @@ func (s *Server) storageCreate(c *gin.Context) {
 		return
 	}
 	cfgJSON, _ := json.Marshal(req.Config)
-	_, err := s.db.Exec(
+	res, err := s.db.Exec(
 		`INSERT INTO storages(mount_path, driver, config, ord, enabled, status, created_at)
 		 VALUES(?,?,?,?,?, '', ?)`,
 		mp, req.Driver, string(cfgJSON), req.Ord, util.BoolInt(req.Enabled),
@@ -175,7 +225,9 @@ func (s *Server) storageCreate(c *gin.Context) {
 		Fail500(c, err)
 		return
 	}
-	s.afterStorageChange(c)
+	id, _ := res.LastInsertId()
+	// 新盘的文件还不在索引里，只扫它一个（挂载失败则不扫，修好后点重载再说）
+	s.afterStorageChange(c, func() bool { return s.rescanMount(id) })
 }
 
 // PUT /api/admin/storages/:id —— config 中值为 "***" 的 secret 字段保留旧值。
@@ -193,8 +245,11 @@ func (s *Server) storageUpdate(c *gin.Context) {
 		Fail(c, 400, "不支持的驱动类型："+req.Driver)
 		return
 	}
-	var oldJSON string
-	if err := s.db.QueryRow(`SELECT config FROM storages WHERE id=?`, id).Scan(&oldJSON); err != nil {
+	// 旧值决定索引要不要动、动多少（见下方 afterStorageChange 的分支）
+	var oldJSON, oldPath, oldDriver string
+	var oldEnabled int
+	if err := s.db.QueryRow(`SELECT config, mount_path, driver, enabled FROM storages WHERE id=?`, id).
+		Scan(&oldJSON, &oldPath, &oldDriver, &oldEnabled); err != nil {
 		Fail(c, 404, "存储不存在")
 		return
 	}
@@ -213,9 +268,10 @@ func (s *Server) storageUpdate(c *gin.Context) {
 		return
 	}
 	cfgJSON, _ := json.Marshal(req.Config)
+	newPath, oldPath := normMount(req.MountPath), normMount(oldPath)
 	_, err := s.db.Exec(
 		`UPDATE storages SET mount_path=?, driver=?, config=?, ord=?, enabled=? WHERE id=?`,
-		normMount(req.MountPath), req.Driver, string(cfgJSON), req.Ord, util.BoolInt(req.Enabled), id)
+		newPath, req.Driver, string(cfgJSON), req.Ord, util.BoolInt(req.Enabled), id)
 	if err != nil {
 		if db.IsUniqueViolation(err) {
 			Fail(c, 409, "该挂载路径已存在")
@@ -224,13 +280,42 @@ func (s *Server) storageUpdate(c *gin.Context) {
 		Fail500(c, err)
 		return
 	}
-	s.afterStorageChange(c)
+	s.afterStorageChange(c, func() bool {
+		switch {
+		case !req.Enabled:
+			// 停用：这个盘的内容不该再出现在搜索和媒体库里
+			s.index.DeletePrefix(oldPath)
+			if newPath != oldPath {
+				s.index.DeletePrefix(newPath)
+			}
+			return false
+		case oldEnabled == 0 || oldDriver != req.Driver || contentCfgChanged(oldCfg, req.Config):
+			// 换驱动、换账号、换根目录、由停用改启用：文件清单可能整个变了，重扫这一个盘
+			if newPath != oldPath {
+				s.index.DeletePrefix(oldPath)
+			}
+			return s.rescanMount(id)
+		case newPath != oldPath:
+			// 只是挪了挂载路径：内容没变，索引里整体改前缀即可，不必重扫
+			s.index.DeletePrefix(newPath) // 目标路径下若有残留先清掉（path 是主键，改名会撞）
+			s.index.RenamePrefix(oldPath, newPath)
+			return false
+		default:
+			return false // 排序、展示开关、代理加速：与索引无关
+		}
+	})
 }
 
 // DELETE /api/admin/storages/:id
 func (s *Server) storageDelete(c *gin.Context) {
 	id, ok := paramID(c)
 	if !ok {
+		return
+	}
+	// 挂载路径要在删之前取（删完就查不到了），删完把这个盘的索引行摘掉
+	var mp string
+	if err := s.db.QueryRow(`SELECT mount_path FROM storages WHERE id=?`, id).Scan(&mp); err != nil {
+		Fail(c, 404, "存储不存在")
 		return
 	}
 	res, err := s.db.Exec(`DELETE FROM storages WHERE id=?`, id)
@@ -242,12 +327,20 @@ func (s *Server) storageDelete(c *gin.Context) {
 		Fail(c, 404, "存储不存在")
 		return
 	}
-	s.afterStorageChange(c)
+	s.afterStorageChange(c, func() bool {
+		s.index.DeletePrefix(normMount(mp))
+		return false
+	})
 }
 
-// POST /api/admin/storages/:id/reload —— 重载全部挂载（驱动 Init 是全量重建）并重建索引。
-// 走与保存/删除同一条路径：重载的典型场景是"刚修好一个失败的挂载"，此时只 Reload 不 Rebuild
-// 的话挂载确实好了，索引里却仍然没有它的文件——搜索和媒体库依旧空着，看起来像没修好。
+// POST /api/admin/storages/:id/reload —— 重载全部挂载（驱动 Init 是全量重建），
+// 并把这一个盘的索引重扫一遍。
+// 重载的典型场景是"刚修好一个失败的挂载"：只 Reload 不扫的话挂载确实好了，索引里却仍然
+// 没有它的文件——搜索和媒体库依旧空着，看起来像没修好。别的存储的索引不动。
 func (s *Server) storageReload(c *gin.Context) {
-	s.afterStorageChange(c)
+	id, ok := paramID(c)
+	if !ok {
+		return
+	}
+	s.afterStorageChange(c, func() bool { return s.rescanMount(id) })
 }

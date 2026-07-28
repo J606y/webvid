@@ -8,7 +8,7 @@
 import { chromium } from 'playwright-core'
 
 const BASE = process.env.NL_BASE || 'http://localhost:5299'
-const VIDEO = process.env.NL_VIDEO || '/本地存储/电影/星际穿越.mp4'
+const VIDEO = process.env.NL_VIDEO || '/本地存储/电影/星际漫游.mp4'
 const segs = VIDEO.split('/').filter(Boolean)
 const TITLE = segs[segs.length - 1].replace(/\.[^.]+$/, '')
 const DIR = segs[segs.length - 2]

@@ -1,9 +1,9 @@
 // M10 转码播放验证：对 转码样片/ 目录逐个格式验证「能播能拖」，
-// mp4 验证 direct 不请求 HLS。用法: node hls-check.mjs（需服务在跑）
+// mp4 验证 direct 不请求 HLS。用法: node hls-check.mjs（需服务在跑，NL_BASE 可指隔离实例）
 import { chromium } from 'playwright-core'
 import { execSync } from 'node:child_process'
 
-const BASE = 'http://localhost:5243'
+const BASE = process.env.NL_BASE || 'http://localhost:5243'
 const CHROME = 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
 const OUT = '../_shots'
 const DIR = '/本地存储/电影/转码样片'

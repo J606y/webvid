@@ -118,9 +118,9 @@ func (s *Server) gdCallback(c *gin.Context) {
 		gdCallbackHTML(c, id, false, "授权成功，但保存失败，请回后台重试")
 		return
 	}
-	// 重载挂载让新 token 生效（失败不阻断，用户可回后台手动重载）。
+	// 重载挂载让新 token 生效（失败不阻断，用户可回后台手动重载），随后只扫这一个盘
 	if err := s.fs.Reload(c.Request.Context()); err == nil {
-		s.index.Rebuild()
+		s.rescanMount(id)
 	}
 	gdCallbackHTML(c, id, true, "授权成功！可以关闭此页面，回后台刷新即可看到该存储已就绪。")
 }

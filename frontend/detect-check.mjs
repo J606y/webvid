@@ -60,13 +60,13 @@ if (target < 0) {
 
   // 播放页首帧必须有可见反馈：player / detecting 占位 / unsupported 三者之一，不得空白
   const hasFeedback = await page.waitForFunction(() => {
-    return !!document.querySelector('.play-page .player, .play-page .detecting, .play-page .unsupported')
+    return !!document.querySelector('.play-page .player-slot, .play-page .detecting, .play-page .unsupported')
   }, null, { timeout: 3000 }).then(() => true).catch(() => false)
   ok('播放页立即有反馈（不空白）', hasFeedback)
 
   // 探测最终收敛为 player 或 unsupported（detecting 只是过渡）
   await page.waitForFunction(() => {
-    return !!document.querySelector('.play-page .player, .play-page .unsupported')
+    return !!document.querySelector('.play-page .player-slot, .play-page .unsupported')
   }, null, { timeout: 25000 }).catch(() => {})
 
   // ② card→play 全程该路径只探一次（共享 utils/videoInfo 记忆）
