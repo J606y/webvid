@@ -123,6 +123,10 @@ func main() {
 	}
 	th := thumb.New(f, dataDir)
 	md := media.New(f, dataDir, "http://127.0.0.1:"+port, secret, d)
+	// ffmpeg/ffprobe 总闸：抽封面与探源信息共用一个上限，后台「任务设置」可调。
+	// 不设闸时一屏封面就能把 CPU 榨干（每个进程另按 -threads 1 跑）。
+	th.SetJobs(cf.MediaJobs())
+	md.SetJobs(cf.MediaJobs())
 	// 云盘视频驱动无自带缩略图时，缩略图服务经此用 ffmpeg 抽帧兜底（走回环 /api/raw）
 	th.SetVideoFramer(md.FrameJPEG)
 	idx := index.New(d, f)
@@ -131,6 +135,9 @@ func main() {
 	// 用户点过「不是现在」则推迟一天，期间自动预载跳过（AutoRun 判定），到点自动继续。
 	pl := preload.New(d, cf, f, th, md)
 	idx.OnComplete(pl.AutoRun)
+	// 日常增删改（上传、复制、新挂载扫完）也要补预载，否则新放进来的视频永远等不到
+	// 后台那一轮，封面只能等浏览到它时当场生成。Schedule 自带防抖，且不打断在跑的一轮。
+	idx.OnChange(pl.Schedule)
 
 	// 线程数/限速均来自 settings（后台可热调整）；离线下载组与限速器在 server.New 内接线
 	srv := server.New(d, cf, users, f, th, md, idx, pl, task.New(cf.CopyWorkers()), secret)
@@ -168,6 +175,9 @@ func main() {
 			pl.AutoRun()
 		}
 	}
+	// 之后每 AutoEvery 兜一轮：日常新增走的是索引增量更新，不触发预载，
+	// 没有这一轮的话新文件的封面只能等浏览到时当场加载。
+	pl.StartAuto(ctx, preload.AutoEvery)
 
 	<-ctx.Done()
 	log.Println("正在关闭…")

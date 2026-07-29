@@ -56,10 +56,17 @@ type Service struct {
 	ffOnce            sync.Once
 	ffmpegP, ffprobeP string
 
+	// jobs 是 ffmpeg/ffprobe 的总闸：抽封面与探源信息共用（转码播放不受此限——
+	// 那是用户正在等的前台活）。后台可调，见 conf.MediaJobs。
+	jobs *util.Gate
+
 	mu       sync.Mutex
 	sessions map[string]*session
 	probes   map[string]Decision
 }
+
+// SetJobs 热调 ffmpeg/ffprobe 并发上限，下一件活起跑即生效。
+func (s *Service) SetJobs(n int) { s.jobs.SetLimit(n) }
 
 func New(f *fs.FS, dataDir, baseURL string, secret []byte, db *sql.DB) *Service {
 	root := filepath.Join(dataDir, "transcode")
@@ -67,7 +74,8 @@ func New(f *fs.FS, dataDir, baseURL string, secret []byte, db *sql.DB) *Service 
 	os.MkdirAll(root, 0o755)
 	s := &Service{fs: f, root: root, baseURL: baseURL, secret: secret,
 		internalToken: auth.RandomPassword(32), db: db,
-		sessions: map[string]*session{}, probes: map[string]Decision{}}
+		sessions: map[string]*session{}, probes: map[string]Decision{},
+		jobs: util.NewGate(2)} // 保守默认，main 随后按 conf.MediaJobs 调整
 	go s.janitor()
 	return s
 }
@@ -123,6 +131,11 @@ func (s *Service) FrameJPEG(ctx context.Context, u *user.User, logical, out stri
 	if err != nil {
 		return err
 	}
+	release, err := s.jobs.Acquire(ctx) // 与探测共用总闸，见 SetJobs
+	if err != nil {
+		return err
+	}
+	defer release()
 	return FrameAt(ctx, ff, in, out, width, s.internalToken, "3", "0")
 }
 
@@ -137,7 +150,8 @@ func FrameAt(ctx context.Context, ff, in, out string, width int, internalToken s
 	try := func(ss string) error {
 		cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
-		a := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-ss", ss}
+		// -threads 1：抽一帧而已，默认多线程解码会吃满所有核心（并发另有 jobs 闸把关）
+		a := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-ss", ss}
 		a = append(a, httpInputArgs(in, internalToken)...)
 		a = append(a, "-i", in, "-frames:v", "1",
 			"-vf", fmt.Sprintf("scale=%d:-2", width), "-q:v", "5", "-y", tmp)
@@ -182,6 +196,12 @@ func (s *Service) Decide(ctx context.Context, u *user.User, logical string, fi m
 	if err != nil {
 		return Decision{}, err
 	}
+	// 排队等 ffprobe 名额：缓存全落空时（如刚建完索引）这里会同时涌进成百上千个探测请求
+	release, err := s.jobs.Acquire(ctx)
+	if err != nil {
+		return Decision{}, err
+	}
+	defer release()
 	po, err := runProbe(ctx, ffprobe, input, s.internalToken)
 	if err != nil {
 		return Decision{}, err

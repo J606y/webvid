@@ -40,6 +40,7 @@ type Builder struct {
 	mu         sync.Mutex
 	prog       Progress
 	onComplete func() // 全量重建成功后回调（后台预载封面/源信息），可空
+	onChange   func() // 增量变动后回调（补跑预载），可空
 	// pending 重建进行中收到的增量写操作。整表替换会把它们一并抹掉
 	//（扫描开始时这些文件还不存在），所以替换提交后按序重放一遍。
 	pending []func()
@@ -64,6 +65,24 @@ func (b *Builder) OnComplete(fn func()) {
 	b.mu.Lock()
 	b.onComplete = fn
 	b.mu.Unlock()
+}
+
+// OnChange 注册增量变动后的回调（上传、复制、改名、新挂载扫完）。
+// 全量重建有 OnComplete，日常增删改过去谁也不通知——新放进来的视频于是永远等不到
+// 后台预载，封面只能等浏览到它时当场生成。回调方自行防抖（见 preload.Schedule）。
+func (b *Builder) OnChange(fn func()) {
+	b.mu.Lock()
+	b.onChange = fn
+	b.mu.Unlock()
+}
+
+func (b *Builder) notifyChange() {
+	b.mu.Lock()
+	fn := b.onChange
+	b.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 func (b *Builder) Progress() Progress {
@@ -252,6 +271,7 @@ func (b *Builder) queueOrRun(fn func()) {
 	}
 	b.mu.Unlock()
 	fn()
+	b.notifyChange() // 新文件进了索引，通知预载补封面（对方防抖，不怕连着来）
 }
 
 // replayPending 重放重建期间排队的增量写。须在 finish 之后调用——那时 Running 已置否，
@@ -363,6 +383,7 @@ func (b *Builder) startSubtree(root string) {
 			if err := b.scanReplace(root); err != nil {
 				log.Printf("[index] 重扫 %s 失败: %v", root, err)
 			}
+			b.notifyChange() // 这个盘扫完了，去给新内容补封面与源信息
 			b.mu.Lock()
 			again := b.subtree[root]
 			if !again {

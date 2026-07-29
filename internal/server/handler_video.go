@@ -1,15 +1,16 @@
 package server
 
 import (
+	"context"
 	"errors"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
-	"newlist/internal/driver"
 	"newlist/internal/fs"
 	"newlist/internal/media"
 )
@@ -31,7 +32,11 @@ func (s *Server) videoInfo(c *gin.Context) {
 		Fail(c, 400, "该路径不是文件")
 		return
 	}
-	OK(c, s.media.Info(c.Request.Context(), getUser(c), p, fi))
+	// 同 thumbHandler：探测一旦开跑就让它跑完并入库。用户等不及切走了，这次探测
+	// 也不该白费——否则下次点开同一个视频还得从头探一遍。
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 90*time.Second)
+	defer cancel()
+	OK(c, s.media.Info(ctx, getUser(c), p, fi))
 }
 
 var segNameRe = regexp.MustCompile(`^seg_\d+\.m4s$`)
@@ -115,14 +120,17 @@ func mediaError(c *gin.Context, err error) {
 // GET /api/thumb/*path?size=
 func (s *Server) thumbHandler(c *gin.Context) {
 	size, _ := strconv.Atoi(c.DefaultQuery("size", "400"))
-	url, file, err := s.thumbs.Get(c.Request.Context(), getUser(c), c.Param("path"), size)
+	// 生成过程脱离浏览器请求的生死：滚动、切页、懒加载都会取消图片请求，若把请求的
+	// ctx 传下去，正在抽的那一帧当场被杀、半成品丢弃、什么都没缓存——下次进主页
+	// 又得从头烧一遍 CPU 和带宽，永远收敛不了。摘掉取消信号后这张封面一定做完并落盘。
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Minute)
+	defer cancel()
+	url, file, err := s.thumbs.Get(ctx, getUser(c), c.Param("path"), size)
 	if err != nil {
-		// 缩略图不可用一律 404（前端回落占位图标），不暴露 501 细节
-		if errors.Is(err, driver.ErrNotSupported) || errors.Is(err, driver.ErrNotFound) {
-			Fail(c, 404, "无缩略图")
-			return
-		}
-		fsError(c, err)
+		// 缩略图不可用一律 404（前端回落占位图标），不暴露细节。抽帧失败、云盘报错
+		// 也走这里：一张封面出不来不该让前端收到 500，真正的原因写在服务端日志与
+		// 后台预载卡片上（见 preload 的失败计数）。
+		Fail(c, 404, "无缩略图")
 		return
 	}
 	if url != "" {

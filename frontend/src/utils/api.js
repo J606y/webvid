@@ -81,12 +81,14 @@ export const api = {
       authUrl: (id, body) => http.post(`/admin/googledrive/${id}/auth_url`, body),
     },
     index: {
-      progress: () => http.get('/admin/index/progress'),
+      // progress：轮询接口，silent=失败不弹 toast（1.5s 一次，连不上会刷屏），
+      // 由索引管理面板就地显示读取失败并给重试
+      progress: () => http.get('/admin/index/progress', { silent: true }),
       rebuild: () => http.post('/admin/index/rebuild'),
       clear: () => http.post('/admin/index/clear'),
     },
     preload: {
-      progress: () => http.get('/admin/preload/progress'),
+      progress: () => http.get('/admin/preload/progress', { silent: true }),
       run: () => http.post('/admin/preload/run'),
       clear: () => http.post('/admin/preload/clear'),
       snooze: () => http.post('/admin/preload/snooze'),

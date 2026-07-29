@@ -86,7 +86,9 @@ func httpInputArgs(input, internalToken string) []string {
 func runProbe(ctx context.Context, ffprobe, input, internalToken string) (*probeOut, error) {
 	cctx, cancel := context.WithTimeout(ctx, 45*time.Second)
 	defer cancel()
-	args := []string{"-hide_banner", "-v", "error"}
+	// -threads 1：读元数据不需要多核，默认值会让 ffprobe 占满全部核心；
+	// 一屏封面同时探测就能把机器榨干（并发另有 Service.jobs 闸把关）。
+	args := []string{"-hide_banner", "-v", "error", "-threads", "1"}
 	args = append(args, httpInputArgs(input, internalToken)...)
 	args = append(args, "-show_streams", "-show_format", "-of", "json", input)
 	cmd := exec.CommandContext(cctx, ffprobe, args...)

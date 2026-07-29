@@ -134,7 +134,7 @@ func writeImage(t *testing.T, p string) {
 	}
 }
 
-// TestCollectVisibility：collect 只收可见媒体——挂载勾掉「在照片墙/视频库展示」后排除对应类型。
+// TestCollectVisibility：visible 只收可见媒体——挂载勾掉「在照片墙/视频库展示」后排除对应类型。
 func TestCollectVisibility(t *testing.T) {
 	root := t.TempDir()
 	touch(t, filepath.Join(root, "a.png")) // 图片
@@ -142,19 +142,19 @@ func TestCollectVisibility(t *testing.T) {
 	d, f := mount(t, root, map[string]string{})
 	rebuild(t, d, f)
 
-	pl := New(d, store(t, d), f, nil, nil) // collect 不用 thumb/media
-	if got := len(pl.collect()); got != 2 {
+	pl := New(d, store(t, d), f, nil, nil) // visible 只做可见性过滤，不用 thumb/media
+	if got := len(pl.visible()); got != 2 {
 		t.Fatalf("默认全展示应收 2 项, got %d", got)
 	}
 
 	setCfg(t, d, f, root, map[string]string{"show_photo": "false"})
-	got := pl.collect()
+	got := pl.visible()
 	if len(got) != 1 || got[0].extType != "video" {
 		t.Fatalf("关照片墙后应只剩视频, got %+v", got)
 	}
 
 	setCfg(t, d, f, root, map[string]string{"show_photo": "false", "show_video": "false"})
-	if got := len(pl.collect()); got != 0 {
+	if got := len(pl.visible()); got != 0 {
 		t.Fatalf("两界面都关应收 0 项, got %d", got)
 	}
 }
@@ -272,7 +272,7 @@ func TestResumeContinuesPending(t *testing.T) {
 	pl := New(d, store(t, d), f, th, md)
 
 	// 造出「推迟时手头 1 项已跑完、还剩 1 项」的现场
-	files := pl.collect()
+	files := pl.collect().todo
 	if len(files) != 2 {
 		t.Fatalf("应收 2 项, got %d", len(files))
 	}
@@ -390,5 +390,205 @@ func genVideo(t *testing.T, ffmpeg, out string) {
 		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", out}
 	if o, err := exec.Command(ffmpeg, args...).CombinedOutput(); err != nil {
 		t.Fatalf("生成 %s: %v %s", out, err, o)
+	}
+}
+
+// TestCollectSkipsCached：已缓存的项不再进待办清单——这是进度条曾经「一开局就停在
+// 79%」的根子：已缓存的会被瞬间跳过，却照样算进总数，真活全挤在最后一小截里。
+// 跑完一轮后再收一次，待办应为空，而封面计数仍是真实的缓存量（不是这一轮做了多少）。
+func TestCollectSkipsCached(t *testing.T) {
+	root := t.TempDir()
+	writeImage(t, filepath.Join(root, "a.png"))
+	writeImage(t, filepath.Join(root, "b.jpg"))
+	d, f := mount(t, root, map[string]string{})
+	rebuild(t, d, f)
+
+	th := thumb.New(f, t.TempDir())
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
+	pl := New(d, store(t, d), f, th, md)
+
+	t1 := pl.collect()
+	todo, covers := t1.todo, t1.covers
+	if len(todo) != 2 || covers != 0 {
+		t.Fatalf("首次应有 2 项待办、0 张已缓存, got todo=%d covers=%d", len(todo), covers)
+	}
+	for _, fr := range todo {
+		if !fr.needCover {
+			t.Fatalf("%s 应标为缺封面", fr.path)
+		}
+	}
+
+	pl.Run()
+	if prog := waitPreload(t, pl); prog.Covers != 2 {
+		t.Fatalf("一轮过后应缓存 2 张封面, got %+v", prog)
+	}
+
+	t2 := pl.collect()
+	todo2, covers2 := t2.todo, t2.covers
+	if len(todo2) != 0 {
+		t.Fatalf("已缓存的不该再进待办, got %d 项: %+v", len(todo2), todo2)
+	}
+	if covers2 != 2 {
+		t.Fatalf("应认出 2 张已缓存封面, got %d", covers2)
+	}
+
+	// 再跑一轮：没活可干，总数为 0——进度条不会从任何百分比「开始」
+	pl.Run()
+	prog := waitPreload(t, pl)
+	if prog.Total != 0 || prog.Done != 0 {
+		t.Fatalf("无活可干时总数应为 0, got %+v", prog)
+	}
+	if prog.Covers != 2 {
+		t.Fatalf("卡片仍应显示真实缓存量 2, got %d", prog.Covers)
+	}
+}
+
+// TestCountCachedWhileSnoozed：推迟期间不预载，但仍要数出真实缓存量——
+// 计数是内存态，不数一遍的话重启后卡片会一直显示「封面 0」。
+func TestCountCachedWhileSnoozed(t *testing.T) {
+	root := t.TempDir()
+	writeImage(t, filepath.Join(root, "a.png"))
+	writeImage(t, filepath.Join(root, "b.jpg"))
+	d, f := mount(t, root, map[string]string{})
+	rebuild(t, d, f)
+
+	cf := store(t, d)
+	th := thumb.New(f, t.TempDir())
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
+	pl := New(d, cf, f, th, md)
+	pl.Run()
+	waitPreload(t, pl)
+
+	// 换一个进程视角：新建 Service，计数从 0 起，推迟状态从库里恢复
+	pl2 := New(d, cf, f, th, md)
+	pl2.Snooze()
+	if got := pl2.Progress().Covers; got != 0 {
+		t.Fatalf("新进程计数应从 0 起, got %d", got)
+	}
+	pl2.AutoRun() // 推迟中：不预载，但异步数一遍缓存
+
+	deadline := time.Now().Add(10 * time.Second)
+	for pl2.Progress().Covers != 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("推迟期间也应数出真实缓存量 2, got %+v", pl2.Progress())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if prog := pl2.Progress(); prog.Running || !prog.Snoozed {
+		t.Fatalf("数缓存不该开跑、也不该解除推迟: %+v", prog)
+	}
+}
+
+// TestStartAutoPicksUpNewFiles：日常新增走索引增量更新、不触发预载，全靠周期兜底的这一轮
+// 把新文件补上——没有它，新文件的封面只能等浏览到时当场加载（用户反馈「后台不干活」）。
+func TestStartAutoPicksUpNewFiles(t *testing.T) {
+	root := t.TempDir()
+	writeImage(t, filepath.Join(root, "a.png"))
+	d, f := mount(t, root, map[string]string{})
+	rebuild(t, d, f)
+
+	th := thumb.New(f, t.TempDir())
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
+	pl := New(d, store(t, d), f, th, md)
+	pl.Run()
+	if prog := waitPreload(t, pl); prog.Covers != 1 {
+		t.Fatalf("首轮应缓存 1 张封面, got %+v", prog)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	pl.StartAuto(ctx, 30*time.Millisecond)
+
+	// 新文件进索引（这里的 rebuild 没接 OnComplete，等价于日常增量写：索引有了，预载没被触发）
+	writeImage(t, filepath.Join(root, "b.jpg"))
+	rebuild(t, d, f)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for pl.Progress().Covers != 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("兜底轮应把新文件补上, got %+v", pl.Progress())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	cancel()
+}
+
+// TestScheduleDebounces：索引变动通知会连着来上千次（一次目录复制），
+// 攒成一轮跑；且手头正忙时不打断——打断了大库那一轮永远跑不到头。
+func TestScheduleDebounces(t *testing.T) {
+	root := t.TempDir()
+	writeImage(t, filepath.Join(root, "a.png"))
+	d, f := mount(t, root, map[string]string{})
+	rebuild(t, d, f)
+
+	th := thumb.New(f, t.TempDir())
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
+	pl := New(d, store(t, d), f, th, md)
+
+	old := scheduleDelayForTest(30 * time.Millisecond)
+	defer scheduleDelayForTest(old)
+
+	for i := 0; i < 500; i++ { // 模拟一次目录复制的连环通知
+		pl.Schedule()
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for pl.Progress().Covers != 1 {
+		if time.Now().After(deadline) {
+			t.Fatalf("防抖后应补跑一轮把封面做出来, got %+v", pl.Progress())
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	waitPreload(t, pl)
+}
+
+// TestRetryAfterFailure：有项目没做成就排重试——启动那一轮常撞上云盘还没连上，
+// 不重试的话这些封面永远只能等浏览时当场生成。
+func TestRetryAfterFailure(t *testing.T) {
+	root := t.TempDir()
+	// 空 .png：不是合法图片，缩略图生成必失败
+	touch(t, filepath.Join(root, "broken.png"))
+	d, f := mount(t, root, map[string]string{})
+	rebuild(t, d, f)
+
+	th := thumb.New(f, t.TempDir())
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
+	pl := New(d, store(t, d), f, th, md)
+	pl.Run()
+	prog := waitPreload(t, pl)
+
+	if prog.Failed == 0 {
+		t.Fatalf("坏图应记一笔失败: %+v", prog)
+	}
+	if prog.FailNote == "" {
+		t.Fatal("失败要留下人话原因，否则界面上只剩「跑完了」")
+	}
+	if !prog.WillRetry {
+		t.Fatalf("有没做成的就该排重试: %+v", prog)
+	}
+
+	// 手动重跑会作废旧的重试定时器（这一轮就是重试）
+	pl.mu.Lock()
+	armed := pl.retryTimer != nil
+	pl.mu.Unlock()
+	if !armed {
+		t.Fatal("重试定时器应已挂上")
+	}
+}
+
+// TestNoRetryWhenAllDone：全做成了就不排重试，退避也清零。
+func TestNoRetryWhenAllDone(t *testing.T) {
+	root := t.TempDir()
+	writeImage(t, filepath.Join(root, "a.png"))
+	d, f := mount(t, root, map[string]string{})
+	rebuild(t, d, f)
+
+	th := thumb.New(f, t.TempDir())
+	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
+	pl := New(d, store(t, d), f, th, md)
+	pl.Run()
+	prog := waitPreload(t, pl)
+
+	if prog.Failed != 0 || prog.WillRetry {
+		t.Fatalf("全做成了不该排重试: %+v", prog)
 	}
 }

@@ -8,7 +8,7 @@ import (
 	"sync"
 )
 
-const Version = "2.2.0"
+const Version = "2.3.0"
 
 // Store 是 settings 表的带缓存读写封装。
 type Store struct {
@@ -104,6 +104,13 @@ func (s *Store) CopyWorkers() int     { return s.intIn("copy_workers", 2, 1, 32)
 func (s *Store) CopyFileWorkers() int { return s.intIn("copy_file_workers", 4, 1, 32) }
 func (s *Store) OfflineWorkers() int  { return s.intIn("offline_workers", 2, 1, 32) }
 func (s *Store) UploadWorkers() int   { return s.intIn("upload_workers", 2, 1, 8) }
+
+// PreloadWorkers 后台预载同时处理几个文件；MediaJobs 是 ffmpeg/ffprobe 的总闸
+// （抽封面 + 探源信息共用，转码播放不受此限）。这两项直接决定预载期间机器还剩多少力气：
+// 每个 ffmpeg 都按 -threads 1 跑，闸值即约等于占用的核数。默认保守取 2。
+func (s *Store) PreloadWorkers() int { return s.intIn("preload_workers", 2, 1, 16) }
+func (s *Store) MediaJobs() int      { return s.intIn("media_jobs", 2, 1, 8) }
+
 func (s *Store) CopySpeedKB() int     { return s.intIn("copy_speed_kb", 0, 0, 1<<20) }
 func (s *Store) UploadSpeedKB() int   { return s.intIn("upload_speed_kb", 0, 0, 1<<20) }
 func (s *Store) DownloadSpeedKB() int { return s.intIn("download_speed_kb", 0, 0, 1<<20) }

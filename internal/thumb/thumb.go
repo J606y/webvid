@@ -28,6 +28,7 @@ import (
 	"newlist/internal/media"
 	"newlist/internal/model"
 	"newlist/internal/user"
+	"newlist/internal/util"
 )
 
 // remoteTTL 远端缩略图缓存有效期：键只含逻辑路径（远端 Stat 是网络调用，
@@ -41,7 +42,7 @@ const vframeWidth = 640
 type Service struct {
 	fs       *fs.FS
 	cacheDir string
-	sem      chan struct{} // 生成并发限制（CPU/ffmpeg）
+	jobs     *util.Gate    // 生成并发限制（CPU/ffmpeg），后台可调，见 conf.MediaJobs
 	dlSem    chan struct{} // 远端缩略图下载并发限制（网络）
 
 	mu     sync.Mutex
@@ -71,9 +72,12 @@ func textPreviewExt(logical string) bool {
 func New(f *fs.FS, dataDir string) *Service {
 	dir := filepath.Join(dataDir, "thumbs")
 	os.MkdirAll(dir, 0o755)
-	return &Service{fs: f, cacheDir: dir, sem: make(chan struct{}, 2),
+	return &Service{fs: f, cacheDir: dir, jobs: util.NewGate(2),
 		dlSem: make(chan struct{}, 6), flight: map[string]chan struct{}{}}
 }
+
+// SetJobs 热调封面生成（ffmpeg 抽帧 / 图片缩放）的并发上限，与 media 的探测闸同一个设置项。
+func (s *Service) SetJobs(n int) { s.jobs.SetLimit(n) }
 
 // FFmpeg 返回探测到的 ffmpeg 路径（可能为空 = 不可用）。
 // 探测逻辑（NL_FFMPEG / PATH / winget 兜底）与 media 共用一份，见 media.LookTool。
@@ -135,8 +139,14 @@ func (s *Service) Get(ctx context.Context, u *user.User, logical string, width i
 	// 远端盘视频无可信自带缩略图（OneDrive 对 flv/部分 mp4/ts 不生成或生成乱码）：
 	// 用 ffmpeg 走回环 /api/raw 抽帧兜底。本地盘视频走下方本地生成分支（能读绝对路径）。
 	if isVideo && !isLocal {
-		if file := s.remoteVideoFrame(ctx, u, logical); file != "" {
+		file, err := s.remoteVideoFrame(ctx, u, logical)
+		if file != "" {
 			return "", file, nil
+		}
+		// 抽帧真的失败了就照实说：再往下走只会撞上「该存储不支持此操作」，
+		// 把一次可修的故障（缺 ffmpeg、读不到文件）谎报成「这盘本来就没封面」。
+		if err != nil {
+			return "", "", err
 		}
 	}
 	lp, ok := drv.(driver.LocalPather)
@@ -171,12 +181,11 @@ func (s *Service) Get(ctx context.Context, u *user.User, logical string, width i
 	}
 	defer finish()
 
-	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
-	case <-ctx.Done():
-		return "", "", ctx.Err()
+	release, err := s.jobs.Acquire(ctx)
+	if err != nil {
+		return "", "", err
 	}
+	defer release()
 
 	switch model.ExtType(logical) {
 	case "image":
@@ -190,6 +199,86 @@ func (s *Service) Get(ctx context.Context, u *user.User, logical string, width i
 		return "", "", err
 	}
 	return "", out, nil
+}
+
+// CoverState 是某条路径的封面此刻在缓存里的处境。
+type CoverState int
+
+const (
+	CoverPending CoverState = iota // 缓存里没有或已过期，要真去下载/生成
+	CoverReady                     // 已缓存且未过期，无需再做
+	CoverNone                      // 这条路径出不了封面（驱动不支持、缺 ffmpeg 等），做也白做
+)
+
+// Cover 只读磁盘判断封面处境，绝不发网络请求、不生成任何文件。供后台预载在派活前
+// 把「没活可干」的项排除在进度总数之外——它们会被瞬间跳过，算进总数只会让进度条
+// 一开局就停在已缓存占比上，剩下的真活全挤在最后一小截里。
+//
+// 分支顺序与缓存键取法必须与 Get 一致（Get 改了这里要同步改），否则判断会与实际
+// 走的路径对不上：判成 Ready 却其实要下载 → 进度条少算活；反之则多算。
+func (s *Service) Cover(u *user.User, logical string, width int) CoverState {
+	if width <= 0 || width > 1600 {
+		width = 400
+	}
+	drv, rel, err := s.fs.Driver(u, logical)
+	if err != nil {
+		return CoverNone
+	}
+	isVideo := model.ExtType(logical) == "video"
+	_, isLocal := drv.(driver.LocalPather)
+
+	// ① 驱动自带缩略图：缓存在 TTL 内即完事；过期或没有都得走一趟网络（算活）
+	if _, ok := drv.(driver.Thumber); ok && !(isVideo && textPreviewExt(logical)) {
+		if s.freshWithin(cacheKey(logical+"|remote", time.Time{}, 0, 0), remoteTTL) {
+			return CoverReady
+		}
+		return CoverPending
+	}
+	// ② 远端盘视频：ffmpeg 经回环抽帧兜底；抽帧能力缺席就是做也白做
+	if isVideo && !isLocal {
+		if s.freshWithin(cacheKey(logical+"|vframe", time.Time{}, 0, 0), remoteTTL) {
+			return CoverReady
+		}
+		if s.videoFrame == nil || s.FFmpeg() == "" {
+			return CoverNone
+		}
+		return CoverPending
+	}
+	// ③ 本地盘：键含 mtime/size/宽度，源文件变了旧缓存自然不命中
+	lp, ok := drv.(driver.LocalPather)
+	if !ok {
+		return CoverNone
+	}
+	abs, err := lp.AbsPath(rel)
+	if err != nil {
+		return CoverNone
+	}
+	st, err := os.Stat(abs)
+	if err != nil || st.IsDir() {
+		return CoverNone
+	}
+	if s.freshWithin(cacheKey(logical, st.ModTime(), st.Size(), width), 0) {
+		return CoverReady
+	}
+	switch model.ExtType(logical) {
+	case "image":
+		return CoverPending
+	case "video":
+		if s.FFmpeg() == "" {
+			return CoverNone // 截不了帧
+		}
+		return CoverPending
+	}
+	return CoverNone
+}
+
+// freshWithin 报告该 key 的缓存文件是否存在；ttl>0 时还要求未超龄（远端缩略图用）。
+func (s *Service) freshWithin(key string, ttl time.Duration) bool {
+	st, err := os.Stat(filepath.Join(s.cacheDir, key+".jpg"))
+	if err != nil {
+		return false
+	}
+	return ttl <= 0 || time.Since(st.ModTime()) < ttl
 }
 
 // remote 取云盘缩略图：磁盘缓存 TTL 内直接用；未缓存/过期则取直链下载落盘，
@@ -241,44 +330,44 @@ func (s *Service) remote(ctx context.Context, t driver.Thumber, rel, logical str
 // remoteVideoFrame 远端视频兜底封面：驱动无自带缩略图时，用 videoFrame（media 抽帧，
 // 经回环 /api/raw）生成一帧落盘。缓存/TTL/并发与 remote() 同构：键只含逻辑路径，
 // 靠 remoteTTL 过期兜底刷新；生成失败沿用旧缓存（若有）。返回本地文件路径或 ""。
-func (s *Service) remoteVideoFrame(ctx context.Context, u *user.User, logical string) string {
+// 返回 (本地文件, error)：文件非空即成功；两者皆空 = 本就没有抽帧能力，交由调用方继续兜底。
+func (s *Service) remoteVideoFrame(ctx context.Context, u *user.User, logical string) (string, error) {
 	if s.videoFrame == nil {
-		return ""
+		return "", nil
 	}
 	key := cacheKey(logical+"|vframe", time.Time{}, 0, 0)
 	out := filepath.Join(s.cacheDir, key+".jpg")
 	if st, err := os.Stat(out); err == nil && time.Since(st.ModTime()) < remoteTTL {
-		return out
+		return out, nil
 	}
 
 	// singleflight：同 key 只抽一次
 	lead, finish, err := s.once(ctx, key)
 	if err != nil {
-		return ""
+		return "", err
 	}
 	if !lead {
 		if _, e := os.Stat(out); e == nil {
-			return out
+			return out, nil
 		}
-		return ""
+		return "", nil
 	}
 	defer finish()
 
-	// 抽帧走 ffmpeg（CPU）+ 网络拉流，占 sem 生成闸
-	select {
-	case s.sem <- struct{}{}:
-		defer func() { <-s.sem }()
-	case <-ctx.Done():
-		return ""
+	// 抽帧走 ffmpeg（CPU）+ 网络拉流，占生成闸
+	release, err := s.jobs.Acquire(ctx)
+	if err != nil {
+		return "", err
 	}
+	defer release()
 	if err := s.videoFrame(ctx, u, logical, out, vframeWidth); err != nil {
 		log.Printf("[thumb] 远端视频抽帧失败 %s: %v", logical, err)
 		if _, e := os.Stat(out); e == nil {
-			return out // 刷新失败沿用旧缓存
+			return out, nil // 刷新失败沿用旧缓存
 		}
-		return ""
+		return "", util.Messagef(err, "无法为云盘视频生成封面。请确认服务器装了 ffmpeg 且能读取该文件。")
 	}
-	return out
+	return out, nil
 }
 
 // Purge 删除全部封面缓存文件，返回删除的文件数与释放的字节数。
