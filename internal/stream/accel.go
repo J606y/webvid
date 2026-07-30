@@ -158,6 +158,11 @@ type MultiReader struct {
 	linkGen  int
 	linkInit bool
 
+	// 块 0 的流式直通（见 head.go）。构造后字段本身不再变动，可被 Close 并发访问；
+	// headDrained 只由读端（单读者）读写，无需加锁。
+	head        *headStream
+	headDrained bool
+
 	mu       sync.Mutex
 	cond     *sync.Cond
 	results  map[int]chunkResult
@@ -199,12 +204,17 @@ func NewMultiReader(ctx context.Context, provider LinkProvider, offset, length i
 		m.readErr = io.EOF
 		return m
 	}
-	if threads > chunks {
-		threads = chunks
-	}
-	m.wg.Add(threads)
-	for i := 0; i < threads; i++ {
-		go m.worker()
+	// 块 0 走流式直通（见 head.go），worker 从块 1 起并发预取。
+	// head 占掉一个并发名额，故 worker 数 = threads-1，总在途连接仍是 threads；
+	// 但至少留一个 worker——threads=1 时若一个不留，块 1 之后无人下载，读端会永远等下去。
+	m.head = newHeadStream(m)
+	m.nextJob = 1
+	if rest := chunks - 1; rest > 0 {
+		workers := min(max(threads-1, 1), rest)
+		m.wg.Add(workers)
+		for i := 0; i < workers; i++ {
+			go m.worker()
+		}
 	}
 	// ctx 取消时唤醒所有等待者（Read 阻塞在 Cond 上感知不到 ctx）
 	go func() {
@@ -327,10 +337,13 @@ func (m *MultiReader) pause(d time.Duration) bool {
 	}
 }
 
-// fetchChunk 下载一个分块：硬错误带退避重试、直链过期换链、限流按 Retry-After 等待。
-func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
-	start, end := m.chunkRange(idx)
-	size := end - start + 1
+// openWithRetry 按「直链过期换链 / 源限流按 Retry-After 等待 / 其它硬错误退避」的统一
+// 策略反复调用 open，直到成功或尝试次数耗尽。首块流式打开（head.go）与整块下载共用这一套：
+// 两处各写一份，迟早会在「哪些码换链、哪些码限流、等多久」上漂移。
+// open 的返回值语义同 doRange：(结果, 是否应换链重试, 限流等待时长, 错误)。
+func openWithRetry[T any](m *MultiReader,
+	open func(url string, hdr http.Header) (T, bool, time.Duration, error)) (T, error) {
+	var zero T
 	var lastErr error
 	gen := 0
 	refresh := false
@@ -342,36 +355,52 @@ func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
 			refresh = false
 			attempt++
 			if attempt <= chunkAttempts && !m.pause(retryBackoff*time.Duration(attempt-1)) {
-				return nil, m.ctx.Err()
+				return zero, m.ctx.Err()
 			}
 			continue
 		}
 		gen, refresh = g, false
-		buf, retryRefresh, wait, err := m.doRange(url, hdr, start, end, size, idx)
+		v, retryRefresh, wait, err := open(url, hdr)
 		if err == nil {
-			return buf, nil
+			return v, nil
 		}
 		lastErr = err
 		refresh = retryRefresh
 		if m.ctx.Err() != nil {
-			return nil, m.ctx.Err()
+			return zero, m.ctx.Err()
 		}
 		if errors.Is(err, errNoRange) {
-			return nil, err // 源不支持 Range，重试无意义
+			return zero, err // 源不支持 Range，重试无意义
 		}
 		if wait > 0 && throttled+wait <= throttleBudget {
 			throttled += wait // 限流等待不消耗尝试次数，流照常存活（这段时间无新数据而已）
 			if !m.pause(wait) {
-				return nil, m.ctx.Err()
+				return zero, m.ctx.Err()
 			}
 			continue
 		}
 		attempt++
 		if attempt <= chunkAttempts && !m.pause(retryBackoff*time.Duration(attempt-1)) {
-			return nil, m.ctx.Err()
+			return zero, m.ctx.Err()
 		}
 	}
-	err := fmt.Errorf("分块 %d [%d-%d] 下载失败（已重试）: %w", idx, start, end, lastErr)
+	return zero, fmt.Errorf("重试 %d 次仍失败: %w", chunkAttempts, lastErr)
+}
+
+// fetchChunk 下载一个分块。只用于块 1 及之后——块 0 归 headStream 流式直通。
+func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
+	start, end := m.chunkRange(idx)
+	size := end - start + 1
+	buf, err := openWithRetry(m, func(url string, hdr http.Header) ([]byte, bool, time.Duration, error) {
+		return m.doRange(url, hdr, start, end, size, idx)
+	})
+	if err == nil {
+		return buf, nil
+	}
+	if m.ctx.Err() != nil || errors.Is(err, errNoRange) {
+		return nil, err // 取消与「源不支持 Range」都不是故障，不污染日志
+	}
+	err = fmt.Errorf("分块 %d [%d-%d] 下载失败: %w", idx, start, end, err)
 	log.Printf("[stream] %v", err)
 	return nil, err
 }
@@ -380,7 +409,30 @@ func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
 func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int64, idx int) ([]byte, bool, time.Duration, error) {
 	rctx, cancel := context.WithTimeout(m.ctx, chunkDeadline(size))
 	defer cancel()
-	req, err := http.NewRequestWithContext(rctx, http.MethodGet, url, nil)
+	// 源不认 Range 而回 200 全量：仅当整个请求区间就是文件开头的唯一一块时可接受
+	rc, refresh, wait, err := m.openRange(rctx, url, hdr, start, end,
+		idx == 0 && m.chunks == 1 && m.offset == 0)
+	if err != nil {
+		return nil, refresh, wait, err
+	}
+	defer rc.Close()
+	// 响应体停滞监视：上游把连接挂住而不断开是跨国链路的常客，不必干等总时限耗尽
+	body := newStallReader(rc, stallTimeout, cancel)
+	defer body.stop()
+	buf := make([]byte, size)
+	if _, err := io.ReadFull(body, buf); err != nil {
+		return nil, false, 0, fmt.Errorf("分块读取中断: %w", err)
+	}
+	return buf, false, 0, nil
+}
+
+// openRange 发一次 Range 请求，交回已定位的响应体但不读取内容——调用方负责 Close。
+// 拆出来是为了让「整块读满」与「首块流式转发」共用同一套状态码判定。
+// acceptFull 报告「源不认 Range 而回 200 全量」是否可接受：仅当请求区间就是整个文件时成立。
+// 返回 (响应体, 是否应换链重试, 限流等待时长, 错误)。
+func (m *MultiReader) openRange(ctx context.Context, url string, hdr http.Header,
+	start, end int64, acceptFull bool) (io.ReadCloser, bool, time.Duration, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, false, 0, err
 	}
@@ -394,30 +446,17 @@ func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int6
 	if err != nil {
 		return nil, false, 0, err
 	}
-	defer resp.Body.Close()
-	// 响应体停滞监视只覆盖真正读取的那两个分支；非 2xx 分支不读体，无需监视。
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
-		body := newStallReader(resp.Body, stallTimeout, cancel)
-		defer body.stop()
-		buf := make([]byte, size)
-		if _, err := io.ReadFull(body, buf); err != nil {
-			return nil, false, 0, fmt.Errorf("分块读取中断: %w", err)
-		}
-		return buf, false, 0, nil
+		return resp.Body, false, 0, nil
 	case http.StatusOK:
-		// 服务器不认 Range：仅当整个请求区间就是文件开头的唯一一块时可接受
-		if idx == 0 && m.chunks == 1 && m.offset == 0 {
-			body := newStallReader(resp.Body, stallTimeout, cancel)
-			defer body.stop()
-			buf := make([]byte, size)
-			if _, err := io.ReadFull(body, buf); err != nil {
-				return nil, false, 0, fmt.Errorf("读取源失败: %w", err)
-			}
-			return buf, false, 0, nil
+		if acceptFull {
+			return resp.Body, false, 0, nil
 		}
+		resp.Body.Close()
 		return nil, false, 0, errNoRange
 	}
+	resp.Body.Close() // 非 2xx 分支不读体，无需停滞监视
 	switch classifyErrStatus(resp.StatusCode) {
 	case dispRelink:
 		return nil, true, 0, fmt.Errorf("直链疑似过期: HTTP %d", resp.StatusCode)
@@ -429,8 +468,24 @@ func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int6
 	}
 }
 
-// Read 按序输出分块内容；某块彻底失败后恒返回该错误。
+// Read 按序输出内容：先把块 0 的流式直通吐干，再走块 1 及之后的缓冲队列。
+// 某块彻底失败后恒返回该错误。
 func (m *MultiReader) Read(p []byte) (int, error) {
+	if m.head != nil && !m.headDrained {
+		n, err := m.head.Read(p)
+		if n > 0 {
+			return n, nil
+		}
+		if err != io.EOF {
+			m.mu.Lock()
+			if m.readErr == nil {
+				m.readErr = err
+			}
+			m.mu.Unlock()
+			return 0, err
+		}
+		m.finishHead()
+	}
 	if len(m.cur) == 0 {
 		m.mu.Lock()
 		for {
@@ -468,6 +523,17 @@ func (m *MultiReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
+// finishHead 块 0 吐完：释放它的连接，把读游标推到块 1 并放行 worker 窗口。
+// 只在读端（单读者）调用，headDrained 因此无需加锁。
+func (m *MultiReader) finishHead() {
+	m.headDrained = true
+	m.head.Close()
+	m.mu.Lock()
+	m.nextRead = 1
+	m.cond.Broadcast()
+	m.mu.Unlock()
+}
+
 // Close 幂等：取消在途请求、唤醒阻塞的 Read、等全部 worker 退出。
 func (m *MultiReader) Close() error {
 	m.mu.Lock()
@@ -479,6 +545,9 @@ func (m *MultiReader) Close() error {
 	m.mu.Unlock()
 	m.cancel()
 	m.cond.Broadcast()
+	if m.head != nil {
+		m.head.Close() // 幂等，可与读端的 finishHead 并发
+	}
 	m.wg.Wait()
 	return nil
 }

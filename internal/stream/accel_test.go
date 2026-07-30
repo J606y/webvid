@@ -303,23 +303,35 @@ func TestCancel(t *testing.T) {
 	}
 }
 
-// threads=1 顺序退化：内容正确、请求起点严格递增。
+// threads=1 顺序退化：内容正确，且块 1 之后仍由单个 worker 顺序取（起点严格递增）。
+// 块 0 不参与这条断言——它归首块流式直通，何时发出取决于读端何时开始读，
+// 与 worker 的启动是两条独立的时间线，断言它排第一就是在赌调度顺序。
 func TestSingleThread(t *testing.T) {
+	const off = 10
 	content := pattern(300 << 10)
 	srv := &rangeSrv{content: content}
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 
-	mr := NewMultiReader(context.Background(), fixedProvider(ts.URL), 10, int64(len(content))-10, 1, 64<<10)
+	mr := NewMultiReader(context.Background(), fixedProvider(ts.URL), off, int64(len(content))-off, 1, 64<<10)
 	got := readAll(t, mr)
-	if !bytes.Equal(got, content[10:]) {
+	if !bytes.Equal(got, content[off:]) {
 		t.Fatal("单线程内容不一致")
 	}
 	srv.mu.Lock()
 	defer srv.mu.Unlock()
-	for i := 1; i < len(srv.starts); i++ {
-		if srv.starts[i] <= srv.starts[i-1] {
-			t.Fatalf("单线程请求起点应递增: %v", srv.starts)
+	var rest []int64 // 块 0 起点即 off
+	for _, s := range srv.starts {
+		if s != off {
+			rest = append(rest, s)
+		}
+	}
+	if len(rest) != 4 { // 共 5 块（(307200-10)/65536 向上取整），除块 0 外 4 块
+		t.Fatalf("块 1 及之后应各请求一次，实际 %d 次：%v", len(rest), srv.starts)
+	}
+	for i := 1; i < len(rest); i++ {
+		if rest[i] <= rest[i-1] {
+			t.Fatalf("单 worker 请求起点应递增: %v", rest)
 		}
 	}
 }
