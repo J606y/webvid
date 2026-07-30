@@ -17,8 +17,6 @@ func (s *Server) settingsMap() gin.H {
 		"copy_file_workers": s.conf.CopyFileWorkers(),
 		"offline_workers":   s.conf.OfflineWorkers(),
 		"upload_workers":    s.conf.UploadWorkers(),
-		"preload_workers":   s.conf.PreloadWorkers(),
-		"media_jobs":        s.conf.MediaJobs(),
 		"copy_speed_kb":     s.conf.CopySpeedKB(),
 		"upload_speed_kb":   s.conf.UploadSpeedKB(),
 		"download_speed_kb": s.conf.DownloadSpeedKB(),
@@ -40,8 +38,6 @@ func (s *Server) settingsPut(c *gin.Context) {
 		CopyFileWorkers *int   `json:"copy_file_workers"`
 		OfflineWorkers  *int   `json:"offline_workers"`
 		UploadWorkers   *int   `json:"upload_workers"`
-		PreloadWorkers  *int   `json:"preload_workers"`
-		MediaJobs       *int   `json:"media_jobs"`
 		CopySpeedKB     *int   `json:"copy_speed_kb"`
 		UploadSpeedKB   *int   `json:"upload_speed_kb"`
 		DownloadSpeedKB *int   `json:"download_speed_kb"`
@@ -71,8 +67,6 @@ func (s *Server) settingsPut(c *gin.Context) {
 		{req.CopyFileWorkers, "copy_file_workers", 1, 32},
 		{req.OfflineWorkers, "offline_workers", 1, 32},
 		{req.UploadWorkers, "upload_workers", 1, 8},
-		{req.PreloadWorkers, "preload_workers", 1, 16},
-		{req.MediaJobs, "media_jobs", 1, 8},
 		{req.CopySpeedKB, "copy_speed_kb", 0, 1 << 20},
 		{req.UploadSpeedKB, "upload_speed_kb", 0, 1 << 20},
 		{req.DownloadSpeedKB, "download_speed_kb", 0, 1 << 20},
@@ -89,9 +83,6 @@ func (s *Server) settingsPut(c *gin.Context) {
 	s.tasks.SetWorkers(task.GroupCopy, s.conf.CopyWorkers())
 	s.fs.SetCopyFileWorkers(s.conf.CopyFileWorkers())
 	s.tasks.SetWorkers(task.GroupOffline, s.conf.OfflineWorkers())
-	// ffmpeg/ffprobe 总闸：抽封面与探源信息各一处，下一件活起跑即按新值排队
-	s.thumbs.SetJobs(s.conf.MediaJobs())
-	s.media.SetJobs(s.conf.MediaJobs())
 	s.limCopy.SetKBps(s.conf.CopySpeedKB())
 	s.limUp.SetKBps(s.conf.UploadSpeedKB())
 	s.limDown.SetKBps(s.conf.DownloadSpeedKB())

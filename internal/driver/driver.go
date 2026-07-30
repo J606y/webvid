@@ -63,6 +63,13 @@ type Thumber interface {
 	Thumb(ctx context.Context, relPath string) (string, error)
 }
 
+// ThumbFetcher 可选：存储能交出缩略图字节，但给不出 HTTP 直链。
+// Telegram 是这种——缩略图只能经 MTProto 的 upload.getFile 取，没有可下载的 URL。
+// 与 Thumber 二选一即可，thumb 层两条路共用同一份缓存键与 TTL（见 thumb.remoteBytes）。
+type ThumbFetcher interface {
+	ThumbBytes(ctx context.Context, relPath string) ([]byte, error)
+}
+
 // LocalPather 可选：能给出条目的宿主机绝对路径（供 ffmpeg 等外部进程使用）。
 type LocalPather interface {
 	AbsPath(relPath string) (string, error)

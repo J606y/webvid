@@ -128,11 +128,9 @@ func main() {
 	// 不设闸时一屏封面就能把 CPU 榨干（每个进程另按 -threads 1 跑）。
 	// 必须是同一把——两边各建一把的话，设置里写着 N，实际能同时跑的是 2N，
 	// 而云盘视频抽一张封面还会同时占住两把闸，把探测的名额也挤掉。
-	jobs := util.NewGate(cf.MediaJobs())
+	jobs := util.NewGate(conf.MediaJobs)
 	th.SetGate(jobs)
 	md.SetGate(jobs)
-	// 云盘视频驱动无自带缩略图时，缩略图服务经此用 ffmpeg 抽帧兜底（走回环 /api/raw）
-	th.SetVideoFramer(md.FrameJPEG)
 	idx := index.New(d, f)
 	// 索引就绪后后台预载：下载/生成封面 + 探测视频源信息写入 media_info。
 	// 存储变更（含新挂载/勾选展示开关）→ Reload 重建索引 → 完成即触发本轮预载。

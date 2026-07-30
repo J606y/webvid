@@ -99,12 +99,8 @@ const statTTL = 2 * time.Minute
 // var 以便测试调小，见 paceLeadFrom。
 var maxLead = 150
 
-// SetJobs 热调 ffmpeg/ffprobe 并发上限，下一件活起跑即生效。
-// main 接线后这与 thumb 的封面生成闸是同一把（见 SetGate），调任一边都即时生效。
-func (s *Service) SetJobs(n int) { s.jobs.SetLimit(n) }
-
 // SetGate 换用外部传入的 ffmpeg 总闸，仅供启动接线（此时尚无并发）。
-// 与 thumb 各建一把闸的话，后台设置项写着「总闸 N」，实际能同时跑的 ffmpeg 是 2N。
+// 与 thumb 各建一把闸的话，conf.MediaJobs 写着 N，实际能同时跑的 ffmpeg 是 2N。
 func (s *Service) SetGate(g *util.Gate) { s.jobs = g }
 
 func New(f *fs.FS, dataDir, baseURL string, secret []byte, db *sql.DB) *Service {
@@ -164,26 +160,6 @@ func encodePath(p string) string {
 		segs[i] = url.PathEscape(sg)
 	}
 	return strings.Join(segs, "/")
-}
-
-// FrameJPEG 抽取视频一帧写入 out（缩放到宽 width 的 JPEG），供缩略图兜底：
-// 云盘视频驱动无自带缩略图时（如 OneDrive 对 mkv/ts 等不生成预览），thumb 经此
-// 走本地回环 /api/raw 抽帧（-ss 输入端 seek，只 Range 拉取起始附近，不整片下载）。
-func (s *Service) FrameJPEG(ctx context.Context, u *user.User, logical, out string, width int) error {
-	ff, _ := s.tools()
-	if ff == "" {
-		return ErrNoFFmpeg
-	}
-	in, err := s.input(u, logical)
-	if err != nil {
-		return err
-	}
-	release, err := s.jobs.Acquire(ctx) // 与探测共用总闸，见 SetJobs
-	if err != nil {
-		return err
-	}
-	defer release()
-	return FrameAt(ctx, ff, in, out, width, s.internalToken, "3", "0")
 }
 
 // FrameFirst 取输入的第一帧写入 out（缩放到宽 width 的 JPEG），不做任何定位。

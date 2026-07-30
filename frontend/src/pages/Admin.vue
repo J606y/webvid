@@ -46,19 +46,8 @@
             <div class="dim field-help">网页端同时上传的文件数</div>
           </el-form-item>
 
-          <el-divider content-position="left" class="task-sect">封面与源信息</el-divider>
-          <el-form-item label="预载并发">
-            <el-input-number v-model="site.preload_workers" :min="1" :max="16" />
-            <div class="dim field-help">后台预载同时处理的文件数；下一轮预载生效</div>
-          </el-form-item>
-          <!-- 这项管的是抽封面/探测，不是播放转码；标题别写「转码」，否则与下面的说明打架 -->
-          <el-form-item label="占用核数">
-            <el-input-number v-model="site.media_jobs" :min="1" :max="8" />
-            <div class="dim field-help">
-              同时可以有几个 ffmpeg 在抽封面或探测源信息，每个占一个核。调小可以让预载期间机器轻一些；
-              播放时的转码不受此限。保存后立即生效
-            </div>
-          </el-form-item>
+          <!-- 「封面与源信息」那一组（预载并发 / 占用核数）已撤掉：合理区间很窄，调大换不来
+               速度、调小只是白等，改为代码里定好（见 conf.MediaJobs / conf.PreloadWorkers）。 -->
 
           <el-divider content-position="left" class="task-sect">速度限制（KB/s，0 为不限速）</el-divider>
           <el-form-item label="复制限速">
@@ -122,7 +111,6 @@ const tab = ref('site')
 // 后端：site_title 必填，worker/限速为指针字段、缺省保原值，保存即热生效。
 const site = ref({
   site_title: '', copy_workers: 2, copy_file_workers: 4, offline_workers: 2, upload_workers: 2,
-  preload_workers: 2, media_jobs: 2,
   copy_speed_kb: 0, upload_speed_kb: 0, download_speed_kb: 0, media_home_sort: 'random',
 })
 // 限速上限，与后端 handler_admin.go 的 1<<20 KB/s 一致。不设 :max 的话超出的值

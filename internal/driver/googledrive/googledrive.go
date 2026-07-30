@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,7 +26,9 @@ import (
 
 func init() {
 	driver.Register(driver.Meta{
-		Name: "googledrive", Label: "Google Drive", Remote: true,
+		// AlwaysProxy：Google 的直链必须带 Authorization，302 出去会丢授权头，
+		// 所以流量恒经服务器转发，代理模式开关对本驱动无意义（见 handler_raw）。
+		Name: "googledrive", Label: "Google Drive", Remote: true, AlwaysProxy: true,
 		Fields: []driver.FieldSpec{
 			{Name: "client_id", Label: "客户端 ID", Type: "string", Required: true,
 				Help: "Google Cloud OAuth 客户端 ID（类型选『Web 应用』）"},
@@ -288,6 +291,49 @@ func (d *GDrive) Stat(ctx context.Context, relPath string) (model.FileInfo, erro
 		f.isDir = true
 	}
 	return f.fileInfo(), nil
+}
+
+// thumbWidth 向 Drive 要的缩略图宽度。远端缩略图一份各请求尺寸共用（见 thumb.remoteTTL
+// 那套键），所以按卡片档位取，hero 大图轻微放大可接受。
+const thumbWidth = 640
+
+// thumbSizeSuffix 匹配 Drive 缩略图链尾部的尺寸参数，如 =s220、=w400-h300。
+var thumbSizeSuffix = regexp.MustCompile(`=[sw]\d+(-h\d+)?$`)
+
+// sizedThumb 把缩略图链的尺寸参数换成 w 宽。Drive 默认给的是 =s220，用在卡片上偏糊。
+// 只在真的匹配到尺寸后缀时改写；认不出的形式原样返回——改坏了就是一张 404，
+// 不如维持 Drive 的默认尺寸。
+func sizedThumb(link string, w int) string {
+	if !thumbSizeSuffix.MatchString(link) {
+		return link
+	}
+	return thumbSizeSuffix.ReplaceAllString(link, "=s"+strconv.Itoa(w))
+}
+
+// Thumb 返回 Drive 为该文件生成的缩略图链接（lh3 上的短时效签名链，由 thumb 层下载落盘）。
+//
+// 每次都现取一条新链，不复用 lookup 缓存里的：那个缓存按路径存、寿命比签名链长，
+// 拿到过期链只会白下一次。文件夹、Google 原生文档、以及 Drive 没生成缩略图的格式
+// 回 ErrNotFound，由 thumb 层落回 ffmpeg 抽帧兜底。
+func (d *GDrive) Thumb(ctx context.Context, relPath string) (string, error) {
+	f, err := d.lookup(ctx, relPath)
+	if err != nil {
+		return "", err
+	}
+	if f.isDir || f.native {
+		return "", driver.ErrNotFound
+	}
+	var tr struct {
+		ThumbnailLink string `json:"thumbnailLink"`
+	}
+	if err := d.cli.req(ctx, http.MethodGet, driveAPIBase+"/files/"+url.PathEscape(f.id),
+		url.Values{"fields": {"thumbnailLink"}, "supportsAllDrives": {"true"}}, nil, &tr); err != nil {
+		return "", err
+	}
+	if tr.ThumbnailLink == "" {
+		return "", driver.ErrNotFound
+	}
+	return sizedThumb(tr.ThumbnailLink, thumbWidth), nil
 }
 
 func (d *GDrive) Link(ctx context.Context, relPath string) (*driver.Link, error) {

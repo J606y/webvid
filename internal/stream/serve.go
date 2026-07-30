@@ -100,7 +100,21 @@ func Serve(w http.ResponseWriter, req *http.Request, name string, modtime time.T
 	mr := NewMultiReader(req.Context(), provider, rg.start, rg.length, threads, chunkBytes)
 	defer mr.Close()
 	w.WriteHeader(status)
+	// 立刻把响应头推上路。Go 的 ResponseWriter 带缓冲，WriteHeader 只记下状态码，
+	// 头要等第一次 Write 才随之发出——而第一次 Write 要等 MultiReader 凑满一整块。
+	// 跨国拉一块 4MB 期间客户端连响应头都收不到，Chrome 会判定请求已死、取消重发，
+	// 重发又从头拉块，于是永远播不出来：实测快进一次产生 20+ 条同 Range 的请求，
+	// 服务器全速下载而一个字节都没吐出去。
+	flush(w)
 	io.Copy(w, mr) // 客户端断开→req.Context 取消→MultiReader 退出；此处无法再改状态码
+}
+
+// flush 把已写内容推给客户端。包装过的 ResponseWriter 未必实现 Flusher
+// （见 server.limitedResponseWriter），实现不了就当无操作——退化为原来的行为。
+func flush(w http.ResponseWriter) {
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
 }
 
 // ServeSingle 单连接透传：整个响应只向源发一个请求，Range 语义与 Serve 一致。

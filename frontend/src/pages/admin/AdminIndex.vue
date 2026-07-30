@@ -4,7 +4,7 @@
       <h3 class="index-title">文件索引</h3>
       <template v-if="idxState.loaded && progress.running">
         <el-progress :percentage="100" :indeterminate="true" :show-text="false" :stroke-width="8" />
-        <p>正在扫描：<span class="dim">{{ progress.current || '…' }}</span></p>
+        <p class="path-line">正在扫描：<span class="dim">{{ progress.current || '…' }}</span></p>
         <p>已索引 <b>{{ progress.scanned }}</b> 项</p>
       </template>
       <template v-else>
@@ -37,7 +37,7 @@
         <!-- 清点阶段总数还没算出来，百分比恒为 0，走不确定态的条，别让人以为一开局就卡住 -->
         <el-progress v-if="counting" :percentage="100" :indeterminate="true" :show-text="false" :stroke-width="8" />
         <el-progress v-else :percentage="preloadPct" :stroke-width="8" />
-        <p>正在预载：<span class="dim">{{ preload.current || '…' }}</span></p>
+        <p class="path-line">正在预载：<span class="dim">{{ preload.current || '…' }}</span></p>
         <!-- 总数只含真要下载/探测的项，已缓存的不算——否则进度条一开局就停在缓存占比上 -->
         <p v-if="!counting">已处理 <b>{{ preload.done }}</b> / {{ preload.total }} 项<template
             v-if="elapsed">，本轮已跑 {{ elapsed }}</template>
@@ -285,16 +285,22 @@ onBeforeUnmount(stopPoll)
   padding: 24px; min-width: 380px; flex: 1 1 380px; max-width: 460px; min-height: 260px;
   display: flex; flex-direction: column; gap: 10px; align-items: flex-start;
 }
-.index-card p { margin: 0; font-size: 14px; }
-/* 「正在扫描 / 正在预载」后面的路径每 1.5 秒换一次，长路径一换行卡片就长高一截。
-   路径单行截断；前面的标签固定 5 个字，剩下的宽度都给它。 */
-.index-card p .dim {
-  display: inline-block; max-width: calc(100% - 5em); vertical-align: bottom;
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+/* 卡片是 align-items: flex-start 的纵向 flex，段落宽度会按内容撑开而不是跟满卡片，
+   所以百分比宽度必须自己声明——否则段落里任何 max-width:100% 都等于「文本自身宽度」，
+   截断永不生效，长路径直接顶出卡片。 */
+.index-card p { margin: 0; font-size: 14px; width: 100%; }
+/* 「正在扫描 / 正在预载」那行路径：换行显示，最多两行，超出即截断。
+   路径每 1.5 秒换一次，行数一变卡片就跳高，所以固定占两行的高度（min-height）。
+   word-break: break-all —— 云盘路径没有空格可断，不强断就会整段溢出。 */
+.index-card p.path-line {
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden; word-break: break-all; line-height: 1.5; min-height: 3em;
 }
 .index-title { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
 .index-card .el-progress { width: 100%; }
-.index-actions { display: flex; gap: 8px; }
+/* margin-top: auto —— 按钮排贴住卡片底边。卡内文字随状态多寡变化（清点态少两行、
+   出错态多一行），按钮跟着文字浮动的话同排卡片的按钮不在一条线上。 */
+.index-actions { display: flex; gap: 8px; margin-top: auto; flex-wrap: wrap; }
 .index-actions .el-button + .el-button { margin-left: 0; }
 .err { color: var(--el-color-error); }
 .pane-note { flex-basis: 100%; margin: 0; font-size: 13px; }

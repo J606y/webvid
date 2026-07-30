@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,9 +22,20 @@ type LinkProvider func(ctx context.Context) (url string, header http.Header, err
 
 // 可调常量（编译期固定，够用即可，不进配置）。
 const (
-	chunkAttempts = 4               // 每块硬错误最多尝试次数
+	chunkAttempts = 4                      // 每块硬错误最多尝试次数
 	retryBackoff  = 200 * time.Millisecond // 硬错误重试间隔基数（×attempt）
-	chunkTimeout  = 2 * time.Minute // 单块请求超时（防一块卡死堵住整个窗口）
+
+	// 挂住判定取激进值。读端严格按序等块，一块挂住就把整条流和它后面所有块一起堵死
+	// （后面的块下好了也只能在内存里排队），所以"早发现"的收益远大于"多重发一次"的成本。
+	// 重试只是重发一个 Range 请求；而发现得晚，播放器会先把整个响应判死。
+	// 限流等待不受这两道闸约束——那条路走 m.pause 与 throttleBudget，见下。
+	headerTimeout = 5 * time.Second // 响应头多久不来即认定挂住
+	stallTimeout  = 6 * time.Second // 响应体连续多久没有新字节即认定挂住
+
+	// 整块总时限按块大小折算，不再一刀切：慢链路上一个 64MB 的块本就需要时间，
+	// 而一个 512KB 的首块拖到十几秒就已经不正常了。
+	chunkBase    = 12 * time.Second // 固定开销（建连、TLS、寻址、服务端寻块）
+	chunkMinRate = 256 << 10        // 折算用的保底速率（字节/秒）
 
 	// 云盘按请求频率限流（OneDrive/SharePoint 429/503 + Retry-After 常达数十秒）。
 	// 限流等待不消耗尝试次数，只受累计预算约束——否则一个限流窗口就掐死整条流，
@@ -32,6 +44,60 @@ const (
 	throttleDefault = 2 * time.Second  // 无 Retry-After 头时的等待
 	throttleMax     = 30 * time.Second // 单次等待上限（防恶意/异常头长挂）
 )
+
+// chunkDeadline 单块请求的总时限：固定开销 + 按保底速率折算的传输时间。
+func chunkDeadline(size int64) time.Duration {
+	return chunkBase + time.Duration(size)*time.Second/chunkMinRate
+}
+
+// chunkClient 分块专用客户端，只为加上响应头超时——标准库默认不限，
+// 上游一挂起就只能等总时限耗尽。
+//
+// 刻意只改这一项：HTTP/2 协商、连接复用、连接池大小全部保持标准库默认。
+// 那几项是另一码事，不在本次范围内。
+var chunkClient = &http.Client{Transport: func() http.RoundTripper {
+	t, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return http.DefaultTransport
+	}
+	t2 := t.Clone()
+	t2.ResponseHeaderTimeout = headerTimeout
+	return t2
+}()}
+
+// stallReader 监视"响应体连续多久没有新字节"：每读到数据就重置计时，到点即取消请求，
+// 让上层落进既有的换链/退避重试。上游把连接挂住而不断开是跨国链路上的常客，
+// 只看总时限的话要等到时限耗尽才发现，中间全是白等。
+type stallReader struct {
+	r     io.Reader
+	d     time.Duration
+	timer *time.Timer
+	fired atomic.Bool
+}
+
+func newStallReader(r io.Reader, d time.Duration, cancel context.CancelFunc) *stallReader {
+	s := &stallReader{r: r, d: d}
+	s.timer = time.AfterFunc(d, func() {
+		s.fired.Store(true)
+		cancel()
+	})
+	return s
+}
+
+func (s *stallReader) Read(p []byte) (int, error) {
+	n, err := s.r.Read(p)
+	if n > 0 {
+		s.timer.Reset(s.d)
+	}
+	// 取消导致的读失败要报成"停滞"，否则日志里只剩一句 context canceled，
+	// 与客户端主动断开、整条流退出混在一起分不出来。
+	if err != nil && s.fired.Load() {
+		return n, fmt.Errorf("响应体停滞超过 %s", s.d)
+	}
+	return n, err
+}
+
+func (s *stallReader) stop() { s.timer.Stop() }
 
 // retryAfter 解析 Retry-After 秒数，钳制到 [throttleDefault, throttleMax]。
 func retryAfter(h string) time.Duration {
@@ -81,7 +147,7 @@ type MultiReader struct {
 	provider LinkProvider
 	offset   int64
 	length   int64
-	chunk    int64
+	plan     chunkPlan
 	chunks   int
 	window   int
 
@@ -114,15 +180,16 @@ func NewMultiReader(ctx context.Context, provider LinkProvider, offset, length i
 		chunkBytes = 64 * 1024
 	}
 	cctx, cancel := context.WithCancel(ctx)
-	chunks := int((length + chunkBytes - 1) / chunkBytes)
+	plan := newChunkPlan(length, chunkBytes)
+	chunks := plan.n
 	m := &MultiReader{
 		ctx:      cctx,
 		cancel:   cancel,
-		client:   http.DefaultClient,
+		client:   chunkClient,
 		provider: provider,
 		offset:   offset,
 		length:   length,
-		chunk:    chunkBytes,
+		plan:     plan,
 		chunks:   chunks,
 		window:   threads,
 		results:  map[int]chunkResult{},
@@ -178,12 +245,60 @@ func (m *MultiReader) worker() {
 
 // chunkRange 第 idx 块在源文件中的 [start, end]（end 含）。
 func (m *MultiReader) chunkRange(idx int) (start, end int64) {
-	start = m.offset + int64(idx)*m.chunk
-	end = start + m.chunk - 1
-	if last := m.offset + m.length - 1; end > last {
-		end = last
+	rel, size := m.plan.at(idx)
+	start = m.offset + rel
+	return start, start + size - 1
+}
+
+// firstChunk 递增分块的起点大小。读端必须等一整块下满才能吐出第一个字节（见 Read），
+// 所以起播与每次拖动都要先付一整块的等待——4MB 的块在跨国链路上就是好几秒白屏。
+const firstChunk = 512 << 10
+
+// chunkPlan 把 [0, length) 切成块：前几块从 firstChunk 逐块翻倍到 chunk，其余等长。
+// 首帧只等 512KB，稳态回到整块（大块才摊薄请求数与跨国握手开销）。
+// chunk <= firstChunk 时递增段为空，退化成均匀分块——小分块的配置行为一字不变。
+type chunkPlan struct {
+	ramp   []int64 // 递增段各块大小（512K、1M、2M…，均 < chunk）
+	prefix []int64 // ramp 的前缀和，len = len(ramp)+1，prefix[0] = 0
+	chunk  int64
+	length int64
+	n      int // 总块数
+}
+
+func newChunkPlan(length, chunk int64) chunkPlan {
+	p := chunkPlan{chunk: chunk, length: length, prefix: []int64{0}}
+	for sz := int64(firstChunk); sz < chunk; sz *= 2 {
+		p.ramp = append(p.ramp, sz)
+		p.prefix = append(p.prefix, p.prefix[len(p.prefix)-1]+sz)
 	}
-	return
+	// length 落在递增段内就到此为止，不必再补整块
+	for i := 1; i < len(p.prefix); i++ {
+		if p.prefix[i] >= length {
+			p.n = i
+			return p
+		}
+	}
+	rest := length - p.prefix[len(p.prefix)-1]
+	p.n = len(p.ramp) + int((rest+chunk-1)/chunk)
+	return p
+}
+
+// at 第 idx 块相对区间起点的偏移与大小（末块按 length 截断）。
+// idx 恒小于 n，故返回的 size 必 > 0。
+func (p chunkPlan) at(idx int) (start, size int64) {
+	if idx < len(p.ramp) {
+		start, size = p.prefix[idx], p.ramp[idx]
+	} else {
+		start = p.prefix[len(p.prefix)-1] + int64(idx-len(p.ramp))*p.chunk
+		size = p.chunk
+	}
+	if start >= p.length {
+		return p.length, 0
+	}
+	if start+size > p.length {
+		size = p.length - start
+	}
+	return start, size
 }
 
 // getLink 取当前直链；usedGen==当前 gen 且 force 时才真调 provider（换链单飞）。
@@ -263,7 +378,7 @@ func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
 
 // doRange 发一次 Range 请求读满分块；返回 (数据, 是否应换链重试, 限流等待时长, 错误)。
 func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int64, idx int) ([]byte, bool, time.Duration, error) {
-	rctx, cancel := context.WithTimeout(m.ctx, chunkTimeout)
+	rctx, cancel := context.WithTimeout(m.ctx, chunkDeadline(size))
 	defer cancel()
 	req, err := http.NewRequestWithContext(rctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -280,18 +395,23 @@ func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int6
 		return nil, false, 0, err
 	}
 	defer resp.Body.Close()
+	// 响应体停滞监视只覆盖真正读取的那两个分支；非 2xx 分支不读体，无需监视。
 	switch resp.StatusCode {
 	case http.StatusPartialContent:
+		body := newStallReader(resp.Body, stallTimeout, cancel)
+		defer body.stop()
 		buf := make([]byte, size)
-		if _, err := io.ReadFull(resp.Body, buf); err != nil {
+		if _, err := io.ReadFull(body, buf); err != nil {
 			return nil, false, 0, fmt.Errorf("分块读取中断: %w", err)
 		}
 		return buf, false, 0, nil
 	case http.StatusOK:
 		// 服务器不认 Range：仅当整个请求区间就是文件开头的唯一一块时可接受
 		if idx == 0 && m.chunks == 1 && m.offset == 0 {
+			body := newStallReader(resp.Body, stallTimeout, cancel)
+			defer body.stop()
 			buf := make([]byte, size)
-			if _, err := io.ReadFull(resp.Body, buf); err != nil {
+			if _, err := io.ReadFull(body, buf); err != nil {
 				return nil, false, 0, fmt.Errorf("读取源失败: %w", err)
 			}
 			return buf, false, 0, nil

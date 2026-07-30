@@ -12,6 +12,7 @@ type FieldSpec struct {
 	Options  []string `json:"options,omitempty"`
 	Secret   bool     `json:"secret"` // 回显时脱敏为 ***
 	Help     string   `json:"help,omitempty"`
+	Locked   bool     `json:"locked,omitempty"` // 前端渲染为禁用：取值由驱动决定，用户改不动
 }
 
 // Meta 描述一个已注册驱动。
@@ -20,6 +21,9 @@ type Meta struct {
 	Label  string      `json:"label"`
 	Remote bool        `json:"remote"` // 远端存储：追加代理/加速等通用字段
 	Fields []FieldSpec `json:"fields"`
+	// AlwaysProxy 该驱动的流量恒经服务器转发，代理模式开关无意义：Register 会把 proxy
+	// 字段换成锁定的「已开启」，fs 层也按 true 读（见 Mount.accelOpts / AlwaysProxy）。
+	AlwaysProxy bool `json:"-"`
 }
 
 type factory func() Driver
@@ -31,11 +35,15 @@ var registry = map[string]struct {
 
 // CommonRemoteFields 远端驱动统一追加的字段（fs 层读取，驱动可忽略）。
 var CommonRemoteFields = []FieldSpec{
-	{Name: "proxy", Label: "代理模式（服务器中转流量）", Type: "bool", Default: "false",
-		Help: "开启后下载/播放经服务器转发，可配合多线程加速"},
-	{Name: "threads", Label: "加速线程数", Type: "number", Default: "4",
-		Help: "代理模式下并发 Range 连接数，1=不加速"},
-	{Name: "chunk_mb", Label: "加速分块大小(MB)", Type: "number", Default: "4"},
+	// 标签只写四个字：表单的 label 宽度容不下带括号的长标签，会从括号中间裁断。
+	{Name: "proxy", Label: "代理模式", Type: "bool", Default: "false",
+		Help: "开启后下载/播放经服务器转发"},
+	// 键名保留 threads/chunk_mb（已存进挂载配置，改键即丢值）；标签只讲用户能感觉到的事：
+	// 缓冲多深。这个数字同时是窗口容量与并发连接数，见 stream.NewMultiReader。
+	{Name: "threads", Label: "缓冲块数", Type: "number", Default: "4",
+		Help: "缓冲大小 = 缓冲块数 × 每块大小"},
+	{Name: "chunk_mb", Label: "每块大小(MB)", Type: "number", Default: "4",
+		Help: "首次播放或拖动进度条需要加载完当前的一块，块越小首播和拖动越快，但相应的加载也越频繁"},
 }
 
 // CommonFields 所有驱动统一追加的字段（fs/server 层读取，驱动可忽略）。
@@ -48,10 +56,25 @@ var CommonFields = []FieldSpec{
 		Help: "关闭后此存储的全部内容不出现在搜索结果（文件管理不受影响）"},
 }
 
+// lockedProxyField 恒转发驱动的 proxy 字段：显示成已开启且改不动，别让用户以为关掉能省流量。
+var lockedProxyField = FieldSpec{
+	Name: "proxy", Label: "代理模式", Type: "bool", Default: "true", Locked: true,
+	Help: "此存储不支持直链下发，下载/播放始终经服务器转发，无法关闭",
+}
+
 // Register 注册驱动；在驱动包的 init() 中调用。
 func Register(meta Meta, fn factory) {
 	if meta.Remote {
-		meta.Fields = append(append([]FieldSpec{}, meta.Fields...), CommonRemoteFields...)
+		common := CommonRemoteFields
+		if meta.AlwaysProxy {
+			common = append([]FieldSpec{}, CommonRemoteFields...)
+			for i := range common {
+				if common[i].Name == "proxy" {
+					common[i] = lockedProxyField
+				}
+			}
+		}
+		meta.Fields = append(append([]FieldSpec{}, meta.Fields...), common...)
 	}
 	meta.Fields = append(append([]FieldSpec{}, meta.Fields...), CommonFields...)
 	registry[meta.Name] = struct {
@@ -81,4 +104,9 @@ func Metas() []Meta {
 func MetaOf(name string) (Meta, bool) {
 	e, ok := registry[name]
 	return e.meta, ok
+}
+
+// AlwaysProxy 该驱动是否恒经服务器转发（未注册的驱动按 false）。
+func AlwaysProxy(name string) bool {
+	return registry[name].meta.AlwaysProxy
 }

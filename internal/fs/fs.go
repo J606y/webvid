@@ -331,7 +331,10 @@ type AccelOpts struct {
 
 // accelOpts 解析挂载配置；缺省 threads=4、chunk_mb=4，钳制到安全区间。
 func (m *Mount) accelOpts() AccelOpts {
-	o := AccelOpts{Proxy: m.Cfg["proxy"] == "true", Threads: 4, ChunkBytes: 4 << 20}
+	// 恒转发的驱动（如 Google Drive）不看配置里的 proxy：老挂载里可能存着 false，
+	// 而它的直链根本带不了授权头，只能中转（见 driver.AlwaysProxy）。
+	o := AccelOpts{Proxy: m.Cfg["proxy"] == "true" || driver.AlwaysProxy(m.Driver),
+		Threads: 4, ChunkBytes: 4 << 20}
 	if n, err := strconv.Atoi(m.Cfg["threads"]); err == nil {
 		o.Threads = min(max(n, 1), 32)
 	}

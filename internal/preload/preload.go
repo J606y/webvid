@@ -22,17 +22,9 @@ import (
 	"newlist/internal/util"
 )
 
-// defaultWorkers 预载并发度的兜底值（conf 缺席时用，如测试）。实际取 conf.PreloadWorkers，
+// workers 预载并发度，取自 conf.PreloadWorkers（固定值，不开放给用户调）。
 // 每个 worker 一次处理一个文件；真正吃 CPU 的 ffmpeg/ffprobe 另有 media/thumb 的总闸把关。
-const defaultWorkers = 2
-
-// workers 本轮派几个 worker。每轮开跑时读一次设置，改完不必重启。
-func (s *Service) workers() int {
-	if s.conf == nil {
-		return defaultWorkers
-	}
-	return s.conf.PreloadWorkers()
-}
+const workers = conf.PreloadWorkers
 
 // coverWidth 预载封面的请求宽度。远端盘下载的那份与宽度无关、各尺寸共用；本地盘按
 // 此宽度生成，缓存键含宽度，所以这里的取值必须落在 thumb 的档位上（见 thumb.normWidth），
@@ -463,7 +455,7 @@ func (s *Service) run(ctx context.Context, gen int, files []fileRow, resume bool
 		s.probes.Store(t.probes)
 	}
 
-	sem := make(chan struct{}, s.workers())
+	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	i := 0
 	for ; i < len(files); i++ {

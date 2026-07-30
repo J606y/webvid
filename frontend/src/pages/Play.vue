@@ -35,8 +35,11 @@ import { useRoute } from 'vue-router'
 import { Back, VideoCamera, Download, Loading, RefreshRight } from '@element-plus/icons-vue'
 import Artplayer from 'artplayer'
 import { api } from '../utils/api'
-import { fetchVideoInfo } from '../utils/videoInfo'
+import { fetchVideoInfo, forgetVideoInfo } from '../utils/videoInfo'
 import { rawUrl, hlsUrl, fromParams } from '../utils/path'
+import { pipMode, isPipActive, enterPip, exitPip } from '../utils/pip'
+import { hevcCap, demoteHevc } from '../utils/codec'
+import { attachMediaSession } from '../utils/mediaSession'
 
 const route = useRoute()
 // path 冻结在进入播放页时的值（不跟 route 变）：离开时路由先改、组件后卸载，
@@ -62,6 +65,37 @@ let art = null
 let hls = null
 let resumeAt = 0        // 续播起点（秒），起播后定位到此处
 let reportTimer = null  // 进度定时上报句柄
+let pipAdded = false    // 画中画按钮是否已加（每次 mount 重置，能力要等元数据才准）
+let detachMS = null     // 系统「正在播放」会话的摘除句柄
+let curHevc = false     // 本次直出靠的是本机自报的 HEVC 能力（解码失败时据此降级）
+
+// 画中画图标：SF Symbols 的 pip.enter 形制（外框 + 右下角小窗）。
+// width/height 必须显式写死——只有 viewBox 的 svg 在 iOS WebKit 的百分比尺寸链里会解析成
+// 0 高，iPhone 上图标直接消失（同下方 .art-state 三角的教训）。
+const PIP_ICON = '<svg class="art-icon art-icon-pip" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">'
+  + '<path fill-rule="evenodd" d="M3 4.5h18A1.5 1.5 0 0 1 22.5 6v12a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 18V6A1.5 1.5 0 0 1 3 4.5Zm.2 1.7v11.6h17.6V6.2H3.2Z"></path>'
+  + '<rect x="11.8" y="10.8" width="8.4" height="6" rx="1"></rect>'
+  + '</svg>'
+
+// addPipControl 按真实能力加画中画按钮。Safari 进小窗失败不给可 catch 的 promise，
+// 所以按能力显隐，而不是先给按钮点了再报错（见 utils/pip.js）。
+// 小窗不跨页面存活：离开播放页播放器随组件销毁，小窗跟着关掉。
+function addPipControl() {
+  if (!art || pipAdded || !pipMode(art.video)) return
+  pipAdded = true
+  art.controls.add({
+    name: 'pip',
+    position: 'right',
+    index: 40,
+    html: PIP_ICON,
+    tooltip: '画中画',
+    click() {
+      const v = art.video
+      if (isPipActive(v)) exitPip(v)
+      else enterPip(v).catch(() => { art.notice.show = '当前设备不支持画中画' })
+    },
+  })
+}
 
 // start 起播全流程：取续播位置 → 定播放策略 → 挂播放器。
 // keepResume=true 时沿用当前 resumeAt（运行期中断后重试，从断点接着播），
@@ -72,6 +106,7 @@ async function start(keepResume = false) {
   message.value = ''
   reason.value = ''
   canRetry.value = false
+  curHevc = false
 
   // 起播前取续播位置，与 /video/info 并行请求，不额外拖慢起播；
   // ?restart=1（详情卡「从头播放」）跳过续播定位
@@ -102,17 +137,31 @@ async function start(keepResume = false) {
   reason.value = d.reason || ''
   if (d.strategy === 'unsupported') return
   if (d.strategy === 'direct') await mount(rawUrl(path.value), false)
-  else await mount(hlsUrl(path.value), true)
+  else {
+    // hevcCap 必须与上面那次探测报的是同一个值：会话按它区分（见后端 sessionKey），
+    // 不然播放列表与分片会落到两个不同的转码会话上。
+    curHevc = !!d.hevc
+    await mount(hlsUrl(path.value, hevcCap()), true)
+  }
 }
 onMounted(() => start())
 
 // fail 运行期播放中断 → 落到可重试、可下载的兜底面板。
 // 探测期失败一直有 unsupported 兜底，运行期（转码会话被回收、分片报错、断流）却没有，
 // 播放器只会无尽转圈。断点记在 resumeAt 上，重试从中断处接着播。
-function fail(msg) {
+function fail(msg, decodeErr = false) {
   const at = art && isFinite(art.currentTime) ? art.currentTime : 0
   // 切断 ArtPlayer 自带的断流重连，别让它在实例销毁后继续重设 url
   if (art) art.off('video:error')
+  // HEVC 直出解不动：本机自报支持、实际播不了。这是能力探测唯一测不准的情况，
+  // 降级成重编码后原地重试一次，别把一次能自愈的误判做成兜底面板。
+  // demoteHevc 记在本次会话里且只降一次，第二次进来返回 false，自然落到下面的面板。
+  if (decodeErr && curHevc && demoteHevc()) {
+    forgetVideoInfo(path.value) // 旧结论按旧能力算的，必须重探
+    resumeAt = at
+    start(true)
+    return
+  }
   teardown()
   resumeAt = at
   strategy.value = 'unsupported'
@@ -123,6 +172,8 @@ function fail(msg) {
 // teardown 收掉播放器与转码流，并补记一次末次进度。离页与重试共用。
 function teardown() {
   if (reportTimer) { clearTimeout(reportTimer); reportTimer = null }
+  // 先摘系统会话再销毁播放器：否则片名与封面会留在灵动岛上，指着一个已经不在播的视频
+  if (detachMS) { detachMS(); detachMS = null }
   if (art) {
     try { report(art.currentTime) } catch { /* 末次进度，忽略异常 */ }
     art.destroy(true)
@@ -161,7 +212,9 @@ async function mount(url, isHls) {
     setting: true,
     playbackRate: true,
     aspectRatio: true,
-    pip: true,
+    // 关掉自带 pip：它只走标准 W3C 的 requestPictureInPicture，iPhone 上没有这个 API，
+    // 按钮点了没反应。改用下方 addPipControl 按真实能力加按钮（见 utils/pip.js）。
+    pip: false,
     fullscreen: true,
     fullscreenWeb: true,
     hotkey: true,
@@ -201,9 +254,10 @@ async function mount(url, isHls) {
               hls.recoverMediaError()
               return
             }
-            fail(data.type === Hls.ErrorTypes.NETWORK_ERROR
+            const netErr = data.type === Hls.ErrorTypes.NETWORK_ERROR
+            fail(netErr
               ? '播放已中断：视频流断开，可能是网络不稳或转码会话已结束。'
-              : '播放已中断：视频流无法解码，该文件可能已损坏。')
+              : '播放已中断：视频流无法解码，该文件可能已损坏。', !netErr)
           })
           hls.loadSource(src)
           hls.attachMedia(video)
@@ -214,6 +268,9 @@ async function mount(url, isHls) {
     }
   }
   art = new Artplayer(opts)
+  pipAdded = false
+  // 接上系统「正在播放」：iOS 锁屏与灵动岛拿到片名、封面、进度与控件
+  detachMS = attachMediaSession(art, path.value)
 
   // 续播定位：direct / Safari 原生 HLS 走 video.currentTime；hls.js 已在 startPosition 处理
   art.on('ready', () => {
@@ -221,7 +278,10 @@ async function mount(url, isHls) {
     report(art.currentTime || 0) // 起播即记一次最近播放
   })
   // 元数据就绪后补记一次，确保 duration 落库（ready 可能早于 metadata，dur 尚为 0）
-  art.on('video:loadedmetadata', () => report(art.currentTime || 0))
+  art.on('video:loadedmetadata', () => {
+    report(art.currentTime || 0)
+    addPipControl() // 能力判定要等元数据，构造时判会漏掉按钮
+  })
   // 播放中每 10s 上报一次；暂停/跳转/播完各补一次
   art.on('video:timeupdate', () => {
     if (reportTimer) return

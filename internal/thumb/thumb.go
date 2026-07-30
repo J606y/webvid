@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"image"
 	"image/jpeg"
@@ -34,10 +35,6 @@ import (
 // remoteTTL 远端缩略图缓存有效期：键只含逻辑路径（远端 Stat 是网络调用，
 // 不能拿 mtime 进键），同路径换内容只能靠过期刷新兜底；刷新失败沿用旧文件。
 const remoteTTL = 30 * 24 * time.Hour
-
-// vframeWidth 远端视频兜底封面的生成宽度：一次生成、各请求尺寸共用（免每尺寸都网络抽帧）；
-// 640 足够卡片/网格显示，hero 大图轻微放大也可接受。
-const vframeWidth = 640
 
 // 本地盘封面的宽度档位：卡片/网格一档，hero 大图一档。
 const (
@@ -68,7 +65,7 @@ const dlLimit = 6
 type Service struct {
 	fs       *fs.FS
 	cacheDir string
-	jobs     *util.Gate // 生成并发限制（CPU/ffmpeg），后台可调，见 conf.MediaJobs
+	jobs     *util.Gate // 生成并发限制（CPU/ffmpeg），见 conf.MediaJobs
 	dl       *util.Gate // 云盘自带缩略图并发限制（网络），见 dlLimit
 
 	mu     sync.Mutex
@@ -76,15 +73,6 @@ type Service struct {
 
 	ffOnce sync.Once
 	ffPath string
-
-	// videoFrame：远端视频抽帧兜底（由 media.Service 提供，见 SetVideoFramer）。
-	// 云盘视频驱动无自带缩略图时，经此走回环 /api/raw 用 ffmpeg 抽一帧。nil = 不兜底。
-	videoFrame func(ctx context.Context, u *user.User, logical, out string, width int) error
-}
-
-// SetVideoFramer 注入远端视频抽帧函数（main 在 media 建好后接线，解耦免包依赖）。
-func (s *Service) SetVideoFramer(fn func(ctx context.Context, u *user.User, logical, out string, width int) error) {
-	s.videoFrame = fn
 }
 
 // textPreviewExts 是会被云盘（OneDrive）误当源码/文本、把文件字节渲染成文本生成乱码
@@ -102,13 +90,8 @@ func New(f *fs.FS, dataDir string) *Service {
 		dl: util.NewGate(dlLimit), flight: map[string]chan struct{}{}}
 }
 
-// SetJobs 热调封面生成（ffmpeg 抽帧 / 图片缩放）的并发上限。
-// main 接线后这与 media 的探测闸是同一把（见 SetGate），调任一边都即时生效。
-func (s *Service) SetJobs(n int) { s.jobs.SetLimit(n) }
-
 // SetGate 换用外部传入的 ffmpeg 总闸，仅供启动接线（此时尚无并发）。
-// thumb 与 media 各建一把闸的话，后台设置项写着「总闸 N」，实际能同时跑的 ffmpeg
-// 是 2N；云盘视频抽一张封面还会同时占住两把，把探测的名额一并挤掉。
+// thumb 与 media 各建一把闸的话，conf.MediaJobs 写着 N，实际能同时跑的 ffmpeg 是 2N。
 func (s *Service) SetGate(g *util.Gate) { s.jobs = g }
 
 // FFmpeg 返回探测到的 ffmpeg 路径（可能为空 = 不可用）。
@@ -123,7 +106,7 @@ func (s *Service) FFmpeg() string {
 	return s.ffPath
 }
 
-// once 是 Get/remote/remoteVideoFrame 三处共用的 singleflight 前置：同一 key 已有在途
+// once 是 Get/remote 两处共用的 singleflight 前置：同一 key 已有在途
 // 计算时，本调用挂起等待其完成（ctx 取消则 err 非空，调用方应立即返回）；
 // 抢到 leader 身份（lead=true）的调用方负责实际计算，算完必须 defer finish() 唤醒等待者
 // 并从 flight 表摘除 key——无论成功与否，「是否有旧缓存可沿用」由各自读盘判断，
@@ -158,27 +141,24 @@ func (s *Service) Get(ctx context.Context, u *user.User, logical string, width i
 		return "", "", err
 	}
 	isVideo := model.ExtType(logical) == "video"
-	_, isLocal := drv.(driver.LocalPather)
 	// .ts 等与源码撞扩展名的视频会被 OneDrive 误当文本、生成「把文件字节渲染成文本」的
-	// 乱码预览缩略图，必须跳过自带缩略图改用 ffmpeg 抽帧（见 textPreviewExt）。
+	// 乱码预览缩略图，必须跳过自带缩略图（本地盘的 .ts 仍能靠下方抽帧出封面，
+	// 远端盘的 .ts 则没有封面 —— 远端抽帧兜底已砍）。
 	if t, ok := drv.(driver.Thumber); ok && !(isVideo && textPreviewExt(logical)) {
 		if url, file := s.remote(ctx, t, rel, logical); url != "" || file != "" {
 			return url, file, nil
 		}
 	}
-	// 远端盘视频无可信自带缩略图（OneDrive 对 flv/部分 mp4/ts 不生成或生成乱码）：
-	// 用 ffmpeg 走回环 /api/raw 抽帧兜底。本地盘视频走下方本地生成分支（能读绝对路径）。
-	if isVideo && !isLocal {
-		file, err := s.remoteVideoFrame(ctx, u, logical)
-		if file != "" {
+	// 给不出直链但能交出字节的存储（Telegram 走 MTProto）：落盘后与上面那条同样本地服务。
+	if t, ok := drv.(driver.ThumbFetcher); ok && !(isVideo && textPreviewExt(logical)) {
+		if file := s.remoteBytes(ctx, t, rel, logical); file != "" {
 			return "", file, nil
 		}
-		// 抽帧真的失败了就照实说：再往下走只会撞上「该存储不支持此操作」，
-		// 把一次可修的故障（缺 ffmpeg、读不到文件）谎报成「这盘本来就没封面」。
-		if err != nil {
-			return "", "", err
-		}
 	}
+	// 远端盘视频到此为止：没有自带缩略图就是没有封面。曾经这里用 ffmpeg 走回环 /api/raw
+	// 抽帧兜底，实测在 Google Drive 上一小时跑 355 项、产出 0 张——每张都要把视频经服务器
+	// 中转拉回来再解一帧，代价与收益完全不成比例，已整条砍掉。本地盘视频走下方本地生成
+	// 分支（读绝对路径，几十毫秒，仍然抽帧）。
 	lp, ok := drv.(driver.LocalPather)
 	if !ok {
 		return "", "", driver.ErrNotSupported
@@ -255,30 +235,19 @@ func (s *Service) Cover(u *user.User, logical string, width int) CoverState {
 	isVideo := model.ExtType(logical) == "video"
 	_, isLocal := drv.(driver.LocalPather)
 
-	// ① 驱动自带缩略图：缓存在 TTL 内即完事；过期或没有都得走一趟网络（算活）
-	if _, ok := drv.(driver.Thumber); ok && !(isVideo && textPreviewExt(logical)) {
+	// ① 驱动自带缩略图：缓存在 TTL 内即完事；过期或没有都得走一趟网络（算活）。
+	// 两条取法（URL 下载 / 问驱动要字节）落同一个 |remote 键，这里一并判。
+	_, byURL := drv.(driver.Thumber)
+	_, byBytes := drv.(driver.ThumbFetcher)
+	if (byURL || byBytes) && !(isVideo && textPreviewExt(logical)) {
 		if s.freshWithin(cacheKey(logical+"|remote", time.Time{}, 0, 0), remoteTTL) {
-			return CoverReady
-		}
-		// Get 在自带缩略图取不到时不会就此收手，而是接着走抽帧兜底，产物落在 |vframe 键
-		// （见 Get 的远端视频分支）。这里不跟着看一眼，抽好的封面就永远判成 Pending：
-		// 每轮重新进待办、每轮再向云盘要一次它根本给不出的缩略图、每轮记一次失败，
-		// 退避重试越拉越长，进度条一直停在原地——「后台一直在忙却什么也没变」。
-		if isVideo && !isLocal &&
-			s.freshWithin(cacheKey(logical+"|vframe", time.Time{}, 0, 0), remoteTTL) {
 			return CoverReady
 		}
 		return CoverPending
 	}
-	// ② 远端盘视频：ffmpeg 经回环抽帧兜底；抽帧能力缺席就是做也白做
-	if isVideo && !isLocal {
-		if s.freshWithin(cacheKey(logical+"|vframe", time.Time{}, 0, 0), remoteTTL) {
-			return CoverReady
-		}
-		if s.videoFrame == nil || s.FFmpeg() == "" {
-			return CoverNone
-		}
-		return CoverPending
+	// ② 远端盘且驱动不给缩略图：做也白做。远端抽帧兜底已砍（见 Get），没有第二条路。
+	if !isLocal {
+		return CoverNone
 	}
 	// ③ 本地盘：键含 mtime/size/宽度，源文件变了旧缓存自然不命中
 	lp, ok := drv.(driver.LocalPather)
@@ -365,47 +334,57 @@ func (s *Service) remote(ctx context.Context, t driver.Thumber, rel, logical str
 	return "", out
 }
 
-// remoteVideoFrame 远端视频兜底封面：驱动无自带缩略图时，用 videoFrame（media 抽帧，
-// 经回环 /api/raw）生成一帧落盘。缓存/TTL/并发与 remote() 同构：键只含逻辑路径，
-// 靠 remoteTTL 过期兜底刷新；生成失败沿用旧缓存（若有）。返回本地文件路径或 ""。
-// 返回 (本地文件, error)：文件非空即成功；两者皆空 = 本就没有抽帧能力，交由调用方继续兜底。
-func (s *Service) remoteVideoFrame(ctx context.Context, u *user.User, logical string) (string, error) {
-	if s.videoFrame == nil {
-		return "", nil
-	}
-	key := cacheKey(logical+"|vframe", time.Time{}, 0, 0)
+// remoteBytes 取存储交出的缩略图字节并落盘（driver.ThumbFetcher，如 Telegram）。
+// 缓存键、TTL、网络闸与 singleflight 全部与 remote() 共用同一套，只是取法从「下载一个
+// URL」换成「问驱动要字节」。返回本地文件路径，空 = 该文件没有缩略图。
+// 没有 302 兜底那条路：字节取不到就是真取不到，没有可交给浏览器的地址。
+func (s *Service) remoteBytes(ctx context.Context, t driver.ThumbFetcher, rel, logical string) string {
+	key := cacheKey(logical+"|remote", time.Time{}, 0, 0)
 	out := filepath.Join(s.cacheDir, key+".jpg")
 	if st, err := os.Stat(out); err == nil && time.Since(st.ModTime()) < remoteTTL {
-		return out, nil
+		return out
 	}
 
-	// singleflight：同 key 只抽一次
 	lead, finish, err := s.once(ctx, key)
 	if err != nil {
-		return "", err
+		return ""
 	}
 	if !lead {
 		if _, e := os.Stat(out); e == nil {
-			return out, nil
+			return out
 		}
-		return "", nil
+		return ""
 	}
 	defer finish()
 
-	// 抽帧走 ffmpeg（CPU）+ 网络拉流，占生成闸
-	release, err := s.jobs.Acquire(ctx)
+	release, err := s.dl.Acquire(ctx)
 	if err != nil {
-		return "", err
+		return ""
 	}
 	defer release()
-	if err := s.videoFrame(ctx, u, logical, out, vframeWidth); err != nil {
-		log.Printf("[thumb] 远端视频抽帧失败 %s: %v", logical, err)
+
+	b, err := t.ThumbBytes(ctx, rel)
+	if err != nil || len(b) == 0 {
 		if _, e := os.Stat(out); e == nil {
-			return out, nil // 刷新失败沿用旧缓存
+			return out // 过期刷新失败：沿用旧缓存
 		}
-		return "", util.Messagef(err, "无法为云盘视频生成封面。请确认服务器装了 ffmpeg 且能读取该文件。")
+		if err != nil && !errors.Is(err, driver.ErrNotFound) {
+			log.Printf("[thumb] 取存储缩略图失败 %s: %v", logical, err)
+		}
+		return ""
 	}
-	return out, nil
+	// 先写临时文件再改名：半截文件被当成有效缓存的话，那张破图会一直挂到 TTL 到期
+	tmp := out + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		log.Printf("[thumb] 写缩略图缓存失败 %s: %v", logical, err)
+		return ""
+	}
+	if err := os.Rename(tmp, out); err != nil {
+		os.Remove(tmp)
+		log.Printf("[thumb] 缩略图缓存改名失败 %s: %v", logical, err)
+		return ""
+	}
+	return out
 }
 
 // Purge 删除全部封面缓存文件，返回删除的文件数与释放的字节数。

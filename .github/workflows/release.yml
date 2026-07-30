@@ -37,18 +37,25 @@ jobs:
           cache: true
 
       # 3) 交叉编译（modernc sqlite 纯 Go，CGO=0，无需交叉编译器）并打包。
+      #    版本号由标签注入 conf.Version（那是个 var，const 注不进去），
+      #    所以发版不必再手改代码里的版本号——标签就是唯一的事实来源。
       - name: 交叉编译 + 打包
         env:
           CGO_ENABLED: '0'
           GOOS: linux
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
           mkdir -p dist
+          version="${TAG#v}"   # v2.4.0 → 2.4.0
+          echo ">> version = $version"
           build() {
             local name=$1 goarch=$2 goarm=${3:-}
             echo ">> building linux/$name"
             GOARCH="$goarch" GOARM="$goarm" \
-              go build -trimpath -ldflags "-s -w" -o webvid .
+              go build -trimpath \
+                -ldflags "-s -w -X newlist/internal/conf.Version=${version}" \
+                -o webvid .
             tar -czf "dist/webvid-linux-${name}.tar.gz" webvid
             rm -f webvid
           }

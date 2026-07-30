@@ -44,8 +44,9 @@
         </el-form-item>
         <template v-for="f in currentFields" :key="f.name">
           <el-form-item :label="f.label" :prop="'config.' + f.name" :required="f.required">
-            <el-switch v-if="f.type === 'bool'"
-              :model-value="storageForm.config[f.name] === 'true'"
+            <!-- locked：取值由驱动决定（如 Google Drive 恒中转），显示成已开启且点不动 -->
+            <el-switch v-if="f.type === 'bool'" :disabled="f.locked"
+              :model-value="f.locked ? f.default === 'true' : storageForm.config[f.name] === 'true'"
               @update:model-value="storageForm.config[f.name] = $event ? 'true' : 'false'" />
             <el-select v-else-if="f.type === 'select'" v-model="storageForm.config[f.name]"
               style="width: 100%">

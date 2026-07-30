@@ -212,6 +212,59 @@ func (d *Telegram) Link(ctx context.Context, relPath string) (*driver.Link, erro
 	}, nil
 }
 
+// ThumbBytes 取该消息文件的缩略图字节（driver.ThumbFetcher）。Telegram 给不出可下载的
+// URL，缩略图同样要经 upload.getFile —— 但 InputDocumentFileLocation 的 thumb size 参数
+// 一填，拉回来的就是缩略图而不是原文件（见 Link 里传空串取原文件那处）。
+// 缩略图只有几十 KB，一次 getFile 就够，不必走分块读。
+func (d *Telegram) ThumbBytes(ctx context.Context, relPath string) ([]byte, error) {
+	id, err := parseMsgID(relPath)
+	if err != nil {
+		return nil, err
+	}
+	_, doc, err := d.message(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	typ, cached, ok := pickThumb(doc.Thumbs)
+	if !ok {
+		return nil, driver.ErrNotFound // 没有可用缩略图（非媒体文档等），交由上层判定为无封面
+	}
+	if cached != nil {
+		return cached, nil // PhotoCachedSize 自带字节，省一次往返
+	}
+	return d.getFile(ctx, doc.DCID, doc.AsInputDocumentFileLocation(typ), 0)
+}
+
+// pickThumb 从缩略图档位里挑最大的一档，返回 (档位类型, 内联字节, 是否可用)。
+// 内联字节非空时直接用，不必再调 getFile。
+//
+// 只认这三种档位：
+//   - PhotoSize / PhotoSizeProgressive —— 常规档，拿 Type 去 getFile
+//   - PhotoCachedSize —— 字节就在响应里
+//
+// 刻意跳过 PhotoStrippedSize 与 PhotoPathSize：前者是去掉了 JPEG 头的十几字节缩略，
+// 得自己拼回标准头才能解码；后者是矢量轮廓。两者都小到没有作为封面的价值。
+func pickThumb(sizes []tg.PhotoSizeClass) (typ string, cached []byte, ok bool) {
+	best := -1
+	for _, s := range sizes {
+		switch v := s.(type) {
+		case *tg.PhotoSize:
+			if v.W > best {
+				best, typ, cached, ok = v.W, v.Type, nil, true
+			}
+		case *tg.PhotoSizeProgressive:
+			if v.W > best {
+				best, typ, cached, ok = v.W, v.Type, nil, true
+			}
+		case *tg.PhotoCachedSize:
+			if v.W > best {
+				best, typ, cached, ok = v.W, v.Type, v.Bytes, true
+			}
+		}
+	}
+	return typ, cached, ok
+}
+
 // getFile 对指定 DC 调 upload.getFile 拉一块（不带 cdn_supported，服务器不会 CDN 重定向）。
 func (d *Telegram) getFile(ctx context.Context, dc int, loc *tg.InputDocumentFileLocation, offset int64) ([]byte, error) {
 	c, err := d.currentConn()

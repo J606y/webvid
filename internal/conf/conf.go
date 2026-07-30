@@ -8,7 +8,14 @@ import (
 	"sync"
 )
 
-const Version = "2.3.1"
+// Version 由发布流水线在编译期注入，取自 git 标签（见 .github/workflows/release.yml）。
+//
+// 必须是 var 而不是 const —— `-ldflags -X` 注不进 const，这正是过去每次发版都得手改
+// 这一行、还得记着与标签保持一致的原因。现在标签是唯一的事实来源。
+//
+// 未注入时保持 "dev"：本地 go build 出来的东西本就不是发布产物，界面上如实标出来比
+// 冒充某个版本号安全——发错版本号会让人拿着 dev 构建去对照发布说明排查。
+var Version = "dev"
 
 // Store 是 settings 表的带缓存读写封装。
 type Store struct {
@@ -105,11 +112,18 @@ func (s *Store) CopyFileWorkers() int { return s.intIn("copy_file_workers", 4, 1
 func (s *Store) OfflineWorkers() int  { return s.intIn("offline_workers", 2, 1, 32) }
 func (s *Store) UploadWorkers() int   { return s.intIn("upload_workers", 2, 1, 8) }
 
-// PreloadWorkers 后台预载同时处理几个文件；MediaJobs 是 ffmpeg/ffprobe 的总闸
-// （抽封面 + 探源信息共用，转码播放不受此限）。这两项直接决定预载期间机器还剩多少力气：
-// 每个 ffmpeg 都按 -threads 1 跑，闸值即约等于占用的核数。默认保守取 2。
-func (s *Store) PreloadWorkers() int { return s.intIn("preload_workers", 2, 1, 16) }
-func (s *Store) MediaJobs() int      { return s.intIn("media_jobs", 2, 1, 8) }
+// 预载的两个并发不开放给用户调，直接在这里定好。合理区间很窄：调大换不来速度
+// （云盘会限流、CPU 互相争抢），调小只是白等，而选错的代价全落在"机器卡住了"上。
+//
+// MediaJobs 是 ffmpeg/ffprobe 的总闸，本地盘封面生成与视频源信息探测共用，播放转码不受此限。
+// 每个进程按 -threads 1 跑，闸值约等于占用的核数，取 2 给最小的双核机器也留一个核。
+//
+// PreloadWorkers 是预载同时处理几个文件。封面已改为下载云盘自带缩略图（网络侧另有
+// thumb.dlLimit 兜着），探测那半仍排在 MediaJobs 后面，所以 4 只是调度宽度，压不满机器。
+const (
+	MediaJobs      = 2
+	PreloadWorkers = 4
+)
 
 func (s *Store) CopySpeedKB() int     { return s.intIn("copy_speed_kb", 0, 0, 1<<20) }
 func (s *Store) UploadSpeedKB() int   { return s.intIn("upload_speed_kb", 0, 0, 1<<20) }
