@@ -72,6 +72,8 @@ export function useMediaLibrary(opts) {
       if (isHome.value) {
         // 首页这一屏的取法由后台设置决定：随机抽样（每次换一批）或最新在前。
         // 无论哪种，完整有序列表都在「查看全部」里。
+        await app.ensurePublic()
+        if (g !== gen) return
         params.sort = app.mediaHomeSort
         if (params.sort === 'modified') params.order = 'desc'
       } else {

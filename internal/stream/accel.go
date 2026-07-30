@@ -35,9 +35,12 @@ const (
 	// 云盘按请求频率限流（OneDrive/SharePoint 429/503 + Retry-After 常达数十秒）。
 	// 限流等待不消耗尝试次数，只受累计预算约束——否则一个限流窗口就掐死整条流，
 	// 播放器重试又加剧限流，表现为"一直重连播放不出来"。
-	throttleBudget  = 2 * time.Minute  // 单块累计限流等待预算
-	throttleDefault = 2 * time.Second  // 无 Retry-After 头时的等待
-	throttleMax     = 30 * time.Second // 单次等待上限（防恶意/异常头长挂）
+	throttleBudget = 2 * time.Minute  // 单块累计限流等待预算
+	throttleMax    = 30 * time.Second // 单次等待上限（防恶意/异常头长挂）
+
+	// noteLimit 附进错误的上游响应体上限（字符数）。云盘把真正的原因写在体里，
+	// 但那是给机器看的 JSON，日志里留个开头足以定性。
+	noteLimit = 160
 
 	minChunkBytes = 64 << 10 // 分块大小下限
 	drainLimit    = 32 << 10 // 读满后为复用连接而清尾的字节上限（见 readBody）
@@ -51,6 +54,10 @@ const (
 
 // stallTimeout 响应体连续无字节到达即判失速（见 headerTimeout）。var 以便测试调小。
 var stallTimeout = 20 * time.Second
+
+// throttleDefault 上游没给 Retry-After 时的首次限流等待，之后逐次翻倍（见 throttleWait）。
+// var 以便测试调小。
+var throttleDefault = 2 * time.Second
 
 // chunkClient 并发分块拉流专用客户端。
 //
@@ -105,10 +112,14 @@ func (o Opts) normalize() Opts {
 	return o
 }
 
-// window 滑动窗口容量（块数）：由预读缓冲推导，但不少于线程数——
-// 窗口比线程还小会让 worker 领不到活白白空转。
+// window 滑动窗口容量（块数）：只由预读缓冲推导。窗口 × 分块就是这条流的常驻内存，
+// 而预读上限正是使用者用来表达「一条流最多占多少内存」的那个旋钮。
+//
+// 原先还要 max 一个线程数，等于让线程数架空这个旋钮：极值配置（32 线程 × 64MB 分块）
+// 下单条流就是 2GB，而使用者填的预读可能只有 32MB。线程多于窗口时确实会有 worker
+// 领不到活，但那是配置本身自相矛盾——内存预算就这么点，多开的连接也无处放数据。
 func (o Opts) window() int {
-	return max(int(o.ReadaheadBytes/o.ChunkBytes), o.Threads)
+	return max(int(o.ReadaheadBytes/o.ChunkBytes), 1)
 }
 
 // rampOffsets 返回渐进段各块相对区间起点的偏移，末项 = 渐进段总长度。
@@ -140,21 +151,38 @@ func chunkCount(length int64, rampOff []int64, chunkBytes int64) int {
 	return rampN + int((rem+chunkBytes-1)/chunkBytes)
 }
 
-// retryAfter 解析 Retry-After 秒数，钳制到 [throttleDefault, throttleMax]。
-func retryAfter(h string) time.Duration {
-	if n, err := strconv.Atoi(strings.TrimSpace(h)); err == nil && n > 0 {
-		return min(time.Duration(n)*time.Second, throttleMax)
+// throttleWait 算出被限流后该等多久：上游给了 Retry-After 就听它的，钳到 throttleMax；
+// 没给（Google 的 403 限流就不给）则按第 n 次退避 2s→4s→8s… 递增，同样钳到上限。
+// 固定间隔死磕只会把限流窗口一直续上——等待本身就是这条流唯一能做的事。n 从 1 起。
+func throttleWait(h string, n int) time.Duration {
+	if v, ok := retryAfterHeader(h); ok {
+		return v
 	}
-	return throttleDefault
+	if n < 1 {
+		n = 1
+	}
+	if n > 8 { // 先挡住移位溢出，再大也会被下面钳到上限
+		n = 8
+	}
+	return min(throttleDefault<<(n-1), throttleMax)
+}
+
+// retryAfterHeader 解析 Retry-After 秒数（仅 delta-seconds 形式）。
+func retryAfterHeader(h string) (time.Duration, bool) {
+	if n, err := strconv.Atoi(strings.TrimSpace(h)); err == nil && n > 0 {
+		return min(time.Duration(n)*time.Second, throttleMax), true
+	}
+	return 0, false
 }
 
 // disposition 是一个非成功上游状态码的处置动作。
+// 零值恒为 dispHard：网络层错误（连响应都没拿到）拿不到状态码，正该走退避重试。
 type disposition int
 
 const (
-	dispRelink   disposition = iota // 401/403/404/410：直链疑似过期 → 换链重试
+	dispHard     disposition = iota // 其它非 2xx：硬错误 → 退避重试
+	dispRelink                      // 401/403/404/410：直链疑似过期 → 换链重试
 	dispThrottle                    // 429/503：源限流 → 按 Retry-After 等待（预算内不计次）
-	dispHard                        // 其它非 2xx：硬错误 → 退避重试
 )
 
 // classifyErrStatus 把一个非 2xx（且非可接受的 200-Range）上游状态码归类到处置动作。
@@ -171,7 +199,44 @@ func classifyErrStatus(code int) disposition {
 	}
 }
 
-var errNoRange = errors.New("源不支持 Range 分块")
+// escalate 把"已经换过链、同一段却依然被拒"的 dispRelink 降级为 dispThrottle。
+//
+// 403 对 OneDrive 是直链失效，对 Google Drive 却是限流的主力返回码
+// （rateLimitExceeded / userRateLimitExceeded），单看状态码分不出这两者。当成链过期
+// 处理的代价是：4 次尝试配 0/200/400/600ms 退避，1.2 秒烧完整块判死，2 分钟的限流
+// 预算一秒没用上，播放器那边就是"播着播着断了"。
+//
+// 换一条全新的链再被同样拒绝，就不是链的问题。此后一律按限流退避——真过期的链换一次
+// 就活了，走不到这里。
+func escalate(d disposition, relinked bool) disposition {
+	if d == dispRelink && relinked {
+		return dispThrottle
+	}
+	return d
+}
+
+// 上游拒绝的两类原因，供 Serve 在首块失败时给用户一句人话（见 openFailMessage）。
+// 错误文案与原先逐字一致，日志不变。
+var (
+	errRelink    = errors.New("直链疑似过期")
+	errThrottled = errors.New("源限流")
+	errNoRange   = errors.New("源不支持 Range 分块")
+)
+
+// upstreamNote 从非 2xx 响应体里取一小段原文附进错误。云盘把真正的原因只写在体里
+// （Google 的 rateLimitExceeded / downloadQuotaExceeded 都是如此），丢掉它就只剩一个
+// 光秃秃的 403——限流和没权限在日志里长得一模一样，线上只能靠猜。
+func upstreamNote(body io.Reader) string {
+	b, _ := io.ReadAll(io.LimitReader(body, 4<<10))
+	s := strings.Join(strings.Fields(string(b)), " ") // 压平换行，日志一行放得下
+	if s == "" {
+		return ""
+	}
+	if r := []rune(s); len(r) > noteLimit {
+		s = string(r[:noteLimit]) + "…"
+	}
+	return " (" + s + ")"
+}
 
 // chunkResult 一个分块的下载结果。
 type chunkResult struct {
@@ -250,7 +315,6 @@ func NewMultiReader(ctx context.Context, provider LinkProvider, offset, length i
 		length:   length,
 		chunk:    o.ChunkBytes,
 		chunks:   chunkCount(length, rampOff, o.ChunkBytes),
-		window:   o.window(),
 		rampOff:  rampOff,
 		rampN:    len(rampOff) - 1,
 		dbg:      newStreamStats(o, length),
@@ -260,6 +324,13 @@ func NewMultiReader(ctx context.Context, provider LinkProvider, offset, length i
 	if length <= 0 {
 		m.readErr = io.EOF
 		return m
+	}
+	// 窗口向全局预算申请（见 budget.go）：一条流的窗口已由预读钳住，但同时在播/在传的
+	// 流数没有闸，加起来仍能吃掉整台机器。预算不够时窗口变小，流照跑。
+	want := min(o.window(), m.chunks) // 超过总块数的窗口是白占
+	m.window = reserveWindow(want, m.chunk)
+	if m.window < want {
+		log.Printf("[stream] 预读预算吃紧：本条流的窗口由 %d 块降为 %d 块", want, m.window)
 	}
 	threads := min(o.Threads, m.chunks)
 	m.wg.Add(threads)
@@ -352,7 +423,9 @@ func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
 	var lastErr error
 	gen := 0
 	refresh := false
+	relinked := false // 本块已换过一次链（见 escalate）
 	var throttled time.Duration
+	throttleN := 0
 	for attempt := 1; attempt <= chunkAttempts; {
 		url, hdr, g, err := m.getLink(gen, refresh)
 		if err != nil {
@@ -365,12 +438,11 @@ func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
 			continue
 		}
 		gen, refresh = g, false
-		buf, retryRefresh, wait, err := m.doRange(url, hdr, start, end, size, idx, attempt)
+		buf, disp, retryHdr, err := m.doRange(url, hdr, start, end, size, idx, attempt)
 		if err == nil {
 			return buf, nil
 		}
 		lastErr = err
-		refresh = retryRefresh
 		if m.ctx.Err() != nil {
 			return nil, m.ctx.Err()
 		}
@@ -378,12 +450,19 @@ func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
 			return nil, err // 源不支持 Range，重试无意义
 		}
 		m.dbg.retry()
-		if wait > 0 && throttled+wait <= throttleBudget {
-			throttled += wait // 限流等待不消耗尝试次数，流照常存活（这段时间无新数据而已）
-			if !m.pause(wait) {
-				return nil, m.ctx.Err()
+		switch escalate(disp, relinked) {
+		case dispRelink:
+			relinked, refresh = true, true
+		case dispThrottle:
+			throttleN++
+			wait := throttleWait(retryHdr, throttleN)
+			if throttled+wait <= throttleBudget {
+				throttled += wait // 限流等待不消耗尝试次数，流照常存活（这段时间无新数据而已）
+				if !m.pause(wait) {
+					return nil, m.ctx.Err()
+				}
+				continue
 			}
-			continue
 		}
 		attempt++
 		if attempt <= chunkAttempts && !m.pause(retryBackoff*time.Duration(attempt-1)) {
@@ -395,14 +474,15 @@ func (m *MultiReader) fetchChunk(idx int) ([]byte, error) {
 	return nil, err
 }
 
-// doRange 发一次 Range 请求读满分块；返回 (数据, 是否应换链重试, 限流等待时长, 错误)。
-func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int64, idx, attempt int) ([]byte, bool, time.Duration, error) {
+// doRange 发一次 Range 请求读满分块；
+// 返回 (数据, 失败处置, 上游给的 Retry-After 头, 错误)。
+func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int64, idx, attempt int) ([]byte, disposition, string, error) {
 	rctx, cancel := context.WithTimeout(m.ctx, chunkTimeout)
 	defer cancel()
 	tctx, tr := m.dbg.begin(rctx, idx, start, end, attempt)
 	req, err := http.NewRequestWithContext(tctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, false, 0, err
+		return nil, dispHard, "", err
 	}
 	for k, vs := range hdr {
 		for _, v := range vs {
@@ -413,7 +493,7 @@ func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int6
 	resp, err := m.client.Do(req)
 	if err != nil {
 		tr.fail(err)
-		return nil, false, 0, err
+		return nil, dispHard, "", err
 	}
 	defer resp.Body.Close()
 	tr.gotHeader(resp.StatusCode)
@@ -423,38 +503,36 @@ func (m *MultiReader) doRange(url string, hdr http.Header, start, end, size int6
 		buf, err := m.readBody(resp.Body, size, cancel)
 		if err != nil {
 			tr.fail(err)
-			return nil, false, 0, fmt.Errorf("分块读取中断: %w", err)
+			return nil, dispHard, "", fmt.Errorf("分块读取中断: %w", err)
 		}
 		tr.done(size)
-		return buf, false, 0, nil
+		return buf, dispHard, "", nil
 	case http.StatusOK:
 		// 服务器不认 Range：仅当整个请求区间就是文件开头的唯一一块时可接受
 		if idx == 0 && m.chunks == 1 && m.offset == 0 {
 			buf, err := m.readBody(resp.Body, size, cancel)
 			if err != nil {
 				tr.fail(err)
-				return nil, false, 0, fmt.Errorf("读取源失败: %w", err)
+				return nil, dispHard, "", fmt.Errorf("读取源失败: %w", err)
 			}
 			tr.done(size)
-			return buf, false, 0, nil
+			return buf, dispHard, "", nil
 		}
 		tr.fail(errNoRange)
-		return nil, false, 0, errNoRange
+		return nil, dispHard, "", errNoRange
 	}
-	switch classifyErrStatus(resp.StatusCode) {
+	disp := classifyErrStatus(resp.StatusCode)
+	note := upstreamNote(resp.Body)
+	switch disp {
 	case dispRelink:
-		err := fmt.Errorf("直链疑似过期: HTTP %d", resp.StatusCode)
-		tr.fail(err)
-		return nil, true, 0, err
+		err = fmt.Errorf("%w: HTTP %d%s", errRelink, resp.StatusCode, note)
 	case dispThrottle:
-		err := fmt.Errorf("源限流: HTTP %d", resp.StatusCode)
-		tr.fail(err)
-		return nil, false, retryAfter(resp.Header.Get("Retry-After")), err
+		err = fmt.Errorf("%w: HTTP %d%s", errThrottled, resp.StatusCode, note)
 	default:
-		err := fmt.Errorf("拉取分块失败: HTTP %d", resp.StatusCode)
-		tr.fail(err)
-		return nil, false, 0, err
+		err = fmt.Errorf("拉取分块失败: HTTP %d%s", resp.StatusCode, note)
 	}
+	tr.fail(err)
+	return nil, disp, resp.Header.Get("Retry-After"), err
 }
 
 // readBody 读满 size 字节，全程挂失速看门狗。
@@ -524,6 +602,7 @@ func (m *MultiReader) Close() error {
 	m.cancel()
 	m.cond.Broadcast()
 	m.wg.Wait()
+	releaseWindow(m.window, m.chunk) // worker 已全部退出，这条流的缓冲到此为止
 	m.dbg.summary()
 	return nil
 }

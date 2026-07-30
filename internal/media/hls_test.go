@@ -62,6 +62,9 @@ func samples(t *testing.T) string {
 		gen("audiofix.mkv", "10", "320x240", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "ac3")
 		gen("long.mkv", "60", "640x480", "-c:v", "mpeg4", "-c:a", "mp3")
 		gen("adts.ts", "10", "320x240", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac")
+		// HEVC：能解的设备原样封装直出，解不动的重编码（见 hevc_test.go）
+		gen("hevc.mkv", "10", "320x240", "-c:v", "libx265", "-x265-params", "log-level=none",
+			"-pix_fmt", "yuv420p", "-c:a", "aac")
 	})
 	if genErr != nil {
 		t.Fatalf("样片生成失败: %v", genErr)
@@ -107,7 +110,7 @@ func waitPlaylist(t *testing.T, svc *Service, u *user.User, p, needle string, ti
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		b, err := svc.Playlist(context.Background(), u, p)
+		b, err := svc.Playlist(context.Background(), u, p, 0)
 		if err != nil {
 			t.Fatalf("Playlist(%s): %v", p, err)
 		}
@@ -163,7 +166,7 @@ func TestEventSessionRemux(t *testing.T) {
 	if !bytes.Contains(b, []byte(`#EXT-X-MAP:URI="init.mp4"`)) {
 		t.Fatalf("播放列表缺 EXT-X-MAP:\n%s", b)
 	}
-	sess := svc.sessions[p]
+	sess := svc.sessions[sessionKey(p, 0)]
 	if sess == nil || sess.vod || !sess.dec.VideoCopy || !sess.dec.AudioCopy {
 		t.Fatalf("期望 event 模式纯 remux 会话，实际 %+v", sess)
 	}
@@ -171,7 +174,7 @@ func TestEventSessionRemux(t *testing.T) {
 	waitPlaylist(t, svc, u, p, "#EXT-X-ENDLIST", 20*time.Second)
 
 	for _, name := range []string{"init.mp4", "seg_0.m4s"} {
-		fp, err := svc.Segment(ctx, u, p, name)
+		fp, err := svc.Segment(ctx, u, p, name, 0)
 		if err != nil {
 			t.Fatalf("Segment(%s): %v", name, err)
 		}
@@ -190,7 +193,7 @@ func TestEventSessionRemuxADTS(t *testing.T) {
 	ctx := context.Background()
 	p := "/vid/adts.ts"
 	waitPlaylist(t, svc, u, p, "#EXTINF", 15*time.Second)
-	sess := svc.sessions[p]
+	sess := svc.sessions[sessionKey(p, 0)]
 	if sess == nil || sess.vod || !sess.dec.VideoCopy || !sess.dec.AudioCopy || !sess.dec.AudioAAC {
 		t.Fatalf("期望 event 纯 remux 且 AudioAAC 会话，实际 %+v", sess.dec)
 	}
@@ -212,11 +215,11 @@ func TestEventSessionRemuxADTS(t *testing.T) {
 	}
 
 	// 产物必须含音频流且时长≈全片（无 bsf 的失败产物是 0.28s 纯视频截断片）
-	initFp, err := svc.Segment(ctx, u, p, "init.mp4")
+	initFp, err := svc.Segment(ctx, u, p, "init.mp4", 0)
 	if err != nil {
 		t.Fatalf("Segment(init.mp4): %v", err)
 	}
-	segFp, err := svc.Segment(ctx, u, p, "seg_0.m4s")
+	segFp, err := svc.Segment(ctx, u, p, "seg_0.m4s", 0)
 	if err != nil {
 		t.Fatalf("Segment(seg_0): %v", err)
 	}
@@ -255,7 +258,7 @@ func TestAudioOnlyTranscodeIsEventMode(t *testing.T) {
 	svc, u := newSvc(t, samples(t))
 	p := "/vid/audiofix.mkv" // h264+ac3 → 视频 copy 只转音频
 	waitPlaylist(t, svc, u, p, "#EXTINF", 15*time.Second)
-	sess := svc.sessions[p]
+	sess := svc.sessions[sessionKey(p, 0)]
 	if sess == nil || sess.vod || !sess.dec.VideoCopy || sess.dec.AudioCopy {
 		t.Fatalf("期望 event 模式视频 copy+音频转码，实际 vod=%v dec=%+v", sess.vod, sess.dec)
 	}
@@ -266,7 +269,7 @@ func TestVodTranscode(t *testing.T) {
 	ctx := context.Background()
 	p := "/vid/transcode.mkv" // mpeg4 → libx264 全转码，vod 模式
 
-	b, err := svc.Playlist(ctx, u, p)
+	b, err := svc.Playlist(ctx, u, p, 0)
 	if err != nil {
 		t.Fatalf("Playlist: %v", err)
 	}
@@ -278,16 +281,16 @@ func TestVodTranscode(t *testing.T) {
 	if n := strings.Count(s, "#EXTINF"); n != 3 {
 		t.Fatalf("期望 3 个分片，实际 %d:\n%s", n, s)
 	}
-	sess := svc.sessions[p]
+	sess := svc.sessions[sessionKey(p, 0)]
 	if sess == nil || !sess.vod {
 		t.Fatal("期望 vod 模式会话")
 	}
 
-	initFp, err := svc.Segment(ctx, u, p, "init.mp4")
+	initFp, err := svc.Segment(ctx, u, p, "init.mp4", 0)
 	if err != nil {
 		t.Fatalf("Segment(init.mp4): %v", err)
 	}
-	segFp, err := svc.Segment(ctx, u, p, "seg_0.m4s")
+	segFp, err := svc.Segment(ctx, u, p, "seg_0.m4s", 0)
 	if err != nil {
 		t.Fatalf("Segment(seg_0): %v", err)
 	}
@@ -298,10 +301,10 @@ func TestVodTranscode(t *testing.T) {
 	if start > 0.5 {
 		t.Fatalf("首分片 start_time %v，期望 ≈0", start)
 	}
-	if _, err := svc.Segment(ctx, u, p, "seg_2.m4s"); err != nil {
+	if _, err := svc.Segment(ctx, u, p, "seg_2.m4s", 0); err != nil {
 		t.Fatalf("Segment(seg_2): %v", err)
 	}
-	if _, err := svc.Segment(ctx, u, p, "seg_3.m4s"); err == nil {
+	if _, err := svc.Segment(ctx, u, p, "seg_3.m4s", 0); err == nil {
 		t.Fatal("越界分片应报错")
 	}
 }
@@ -312,10 +315,10 @@ func TestInitSegmentNotEmptyOnFreshSession(t *testing.T) {
 	svc, u := newSvc(t, samples(t))
 	ctx := context.Background()
 	p := "/vid/transcode.mkv"
-	if _, err := svc.Playlist(ctx, u, p); err != nil {
+	if _, err := svc.Playlist(ctx, u, p, 0); err != nil {
 		t.Fatalf("Playlist: %v", err)
 	}
-	fp, err := svc.Segment(ctx, u, p, "init.mp4") // 紧随其后，命中占位窗口
+	fp, err := svc.Segment(ctx, u, p, "init.mp4", 0) // 紧随其后，命中占位窗口
 	if err != nil {
 		t.Fatalf("Segment(init.mp4): %v", err)
 	}
@@ -330,15 +333,15 @@ func TestVodSeekRestart(t *testing.T) {
 	ctx := context.Background()
 	p := "/vid/long.mkv" // 60s → 15 分片
 
-	if _, err := svc.Playlist(ctx, u, p); err != nil {
+	if _, err := svc.Playlist(ctx, u, p, 0); err != nil {
 		t.Fatalf("Playlist: %v", err)
 	}
 	// 立刻请求最后一个分片：远超窗口 → -ss 重启
-	fp, err := svc.Segment(ctx, u, p, "seg_14.m4s")
+	fp, err := svc.Segment(ctx, u, p, "seg_14.m4s", 0)
 	if err != nil {
 		t.Fatalf("Segment(seg_14): %v", err)
 	}
-	sess := svc.sessions[p]
+	sess := svc.sessions[sessionKey(p, 0)]
 	sess.mu.Lock()
 	runFrom := sess.runFrom
 	sess.mu.Unlock()
@@ -346,7 +349,7 @@ func TestVodSeekRestart(t *testing.T) {
 		t.Fatalf("期望重启于分片 14，实际 runFrom=%d", runFrom)
 	}
 	// output_ts_offset：seek 后分片时间戳应落在绝对时间轴（≈56s）
-	initFp, err := svc.Segment(ctx, u, p, "init.mp4")
+	initFp, err := svc.Segment(ctx, u, p, "init.mp4", 0)
 	if err != nil {
 		t.Fatalf("Segment(init.mp4): %v", err)
 	}
@@ -355,7 +358,7 @@ func TestVodSeekRestart(t *testing.T) {
 		t.Fatalf("seek 分片 start_time=%v，期望 ≈56", start)
 	}
 	// 回拖到早段：本轮起点之前 → 再次重启
-	if _, err := svc.Segment(ctx, u, p, "seg_5.m4s"); err != nil {
+	if _, err := svc.Segment(ctx, u, p, "seg_5.m4s", 0); err != nil {
 		t.Fatalf("Segment(seg_5): %v", err)
 	}
 	sess.mu.Lock()
@@ -370,13 +373,13 @@ func TestEvictionAndSweep(t *testing.T) {
 	svc, u := newSvc(t, samples(t))
 	ctx := context.Background()
 	for _, p := range []string{"/vid/remux.mkv", "/vid/audiofix.mkv", "/vid/transcode.mkv"} {
-		if _, err := svc.Playlist(ctx, u, p); err != nil {
+		if _, err := svc.Playlist(ctx, u, p, 0); err != nil {
 			t.Fatalf("Playlist(%s): %v", p, err)
 		}
 		time.Sleep(20 * time.Millisecond) // 拉开 lastUsed
 	}
 	svc.mu.Lock()
-	_, hasFirst := svc.sessions["/vid/remux.mkv"]
+	_, hasFirst := svc.sessions[sessionKey("/vid/remux.mkv", 0)]
 	n := len(svc.sessions)
 	svc.mu.Unlock()
 	if n != maxSessions || hasFirst {
@@ -421,17 +424,17 @@ func TestEvictionAndSweep(t *testing.T) {
 
 func TestSegmentBadName(t *testing.T) {
 	svc, u := newSvc(t, samples(t))
-	if _, err := svc.Segment(context.Background(), u, "/vid/remux.mkv", "../evil"); err == nil {
+	if _, err := svc.Segment(context.Background(), u, "/vid/remux.mkv", "../evil", 0); err == nil {
 		t.Fatal("非法分片名应报错")
 	}
-	if _, err := svc.Segment(context.Background(), u, "/vid/remux.mkv", "seg_x.m4s"); err == nil {
+	if _, err := svc.Segment(context.Background(), u, "/vid/remux.mkv", "seg_x.m4s", 0); err == nil {
 		t.Fatal("非法分片名应报错")
 	}
 }
 
 func TestDriverErrPassthrough(t *testing.T) {
 	svc, u := newSvc(t, samples(t))
-	if _, err := svc.Playlist(context.Background(), u, "/vid/不存在.mkv"); !errors.Is(err, driver.ErrNotFound) {
+	if _, err := svc.Playlist(context.Background(), u, "/vid/不存在.mkv", 0); !errors.Is(err, driver.ErrNotFound) {
 		t.Fatalf("期望 ErrNotFound，实际 %v", err)
 	}
 }

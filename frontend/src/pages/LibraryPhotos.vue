@@ -128,8 +128,11 @@ import { thumbUrl } from '../utils/path'
 import { formatTime, hideImg, stripExt } from '../utils/file'
 import { openLightbox } from '../utils/lightbox'
 import { useMediaLibrary } from '../composables/useMediaLibrary'
+import { useApp } from '../stores/app'
 
 defineOptions({ name: 'LibraryPhotos' }) // App.vue keep-alive include 按此名匹配
+
+const app = useApp()
 
 const hero = ref([])   // Featured 随机推荐
 const recent = ref([]) // 最近添加货架
@@ -137,10 +140,15 @@ const viewed = ref([]) // 最近查看（本用户查看历史）
 
 async function loadStatic() {
   try {
+    // Featured 的取法跟随后台「媒体库首页」设置：早先这里恒发 random，
+    // 后台设成「最新在前」也关不掉它，同一个开关在网格和横幅上两种表现。
+    await app.ensurePublic()
+    const feat = { kind: 'image', limit: 5, sort: app.mediaHomeSort }
+    if (feat.sort === 'modified') feat.order = 'desc'
     // Featured/最近添加/最近查看三路互不依赖，并发请求缩短首屏等待
     const [r, d, h] = await Promise.all([
-      // Featured：整库随机抽 5 张（封面 object-fit:cover，竖图也能铺满横幅）
-      api.media.list({ kind: 'image', limit: 5, sort: 'random' }),
+      // 整库抽 5 张（封面 object-fit:cover，竖图也能铺满横幅）
+      api.media.list(feat),
       api.media.list({ kind: 'image', limit: 12, sort: 'modified', order: 'desc' }),
       // 最近查看：本用户查看历史（灯箱打开照片时上报，见 utils/lightbox），文件删/移后自然消失
       api.media.history({ kind: 'image', limit: 12 }),

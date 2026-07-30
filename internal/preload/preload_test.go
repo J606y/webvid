@@ -22,6 +22,7 @@ import (
 	"newlist/internal/index"
 	"newlist/internal/media"
 	"newlist/internal/thumb"
+	"newlist/internal/user"
 )
 
 // mount 建库并挂载 /m -> root（cfg 需含 root_path）；返回 db 与 fs。
@@ -38,6 +39,13 @@ func mount(t *testing.T, root string, cfg map[string]string) (*sql.DB, *fs.FS) {
 		 VALUES('/m', 'local', ?, 0, 1, '', '2026-07-07T00:00:00Z')`, string(cfgJSON)); err != nil {
 		t.Fatalf("插入存储: %v", err)
 	}
+	// 预载要一个库里真实存在的管理员：云盘上的活经 ffmpeg 走回环 /api/raw，令牌由这个
+	// 身份的 ID 签出并被回查 users 表，捏一个 ID 为零的假身份只会换来一整轮 401。
+	if _, err := d.Exec(
+		`INSERT INTO users(username, password_hash, role, base_path, can_write, enabled, created_at)
+		 VALUES('admin', 'x', 'admin', '/', 1, 1, '2026-07-07T00:00:00Z')`); err != nil {
+		t.Fatalf("插入管理员: %v", err)
+	}
 	f := fs.New(d)
 	if err := f.Reload(context.Background()); err != nil {
 		t.Fatalf("fs.Reload: %v", err)
@@ -50,6 +58,16 @@ func mount(t *testing.T, root string, cfg map[string]string) (*sql.DB, *fs.FS) {
 		d.Close()
 	})
 	return d, f
+}
+
+// mustAdmin 取预载身份（collect 判封面缓存要它，云盘回环鉴权也靠它签令牌）。
+func mustAdmin(t *testing.T, s *Service) *user.User {
+	t.Helper()
+	u, err := s.adminUser()
+	if err != nil {
+		t.Fatalf("取预载身份: %v", err)
+	}
+	return u
 }
 
 // store 打开 settings 表读写封装（预载用它持久化「不是现在」的推迟到点）。
@@ -180,7 +198,11 @@ func TestPreloadWarmsCovers(t *testing.T) {
 		t.Fatalf("预载报错: %s", prog.Err)
 	}
 	// 缩略图已落盘：再次 Get 直接命中缓存文件
-	if _, file, err := th.Get(context.Background(), admin, "/m/a.png", 400); err != nil || file == "" {
+	u, err := pl.adminUser()
+	if err != nil {
+		t.Fatalf("取预载身份: %v", err)
+	}
+	if _, file, err := th.Get(context.Background(), u, "/m/a.png", coverWidth); err != nil || file == "" {
 		t.Fatalf("预热后缩略图应已缓存: file=%q err=%v", file, err)
 	}
 }
@@ -272,7 +294,7 @@ func TestResumeContinuesPending(t *testing.T) {
 	pl := New(d, store(t, d), f, th, md)
 
 	// 造出「推迟时手头 1 项已跑完、还剩 1 项」的现场
-	files := pl.collect().todo
+	files := pl.collect(mustAdmin(t, pl)).todo
 	if len(files) != 2 {
 		t.Fatalf("应收 2 项, got %d", len(files))
 	}
@@ -407,7 +429,7 @@ func TestCollectSkipsCached(t *testing.T) {
 	md := media.New(f, t.TempDir(), "http://127.0.0.1:0", []byte("s"), d)
 	pl := New(d, store(t, d), f, th, md)
 
-	t1 := pl.collect()
+	t1 := pl.collect(mustAdmin(t, pl))
 	todo, covers := t1.todo, t1.covers
 	if len(todo) != 2 || covers != 0 {
 		t.Fatalf("首次应有 2 项待办、0 张已缓存, got todo=%d covers=%d", len(todo), covers)
@@ -423,7 +445,7 @@ func TestCollectSkipsCached(t *testing.T) {
 		t.Fatalf("一轮过后应缓存 2 张封面, got %+v", prog)
 	}
 
-	t2 := pl.collect()
+	t2 := pl.collect(mustAdmin(t, pl))
 	todo2, covers2 := t2.todo, t2.covers
 	if len(todo2) != 0 {
 		t.Fatalf("已缓存的不该再进待办, got %d 项: %+v", len(todo2), todo2)

@@ -11,7 +11,12 @@
 
 /* ---- 目录视图大标题 ---- */
 .lib-head { display: flex; align-items: center; gap: 12px; margin: 6px 0 22px; }
-.lib-title { font-size: 28px; font-weight: 800; margin: 0; }
+/* 大标题是 flex 子项：min-width:0 才允许它缩到内容宽度以下，长目录名单行截断，
+   不换行撑高整个页头（缺 min-width:0 时 flex 子项的最小尺寸是内容宽度，压不下去）。 */
+.lib-title {
+  font-size: 28px; font-weight: 800; margin: 0;
+  min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .back-btn {
   display: flex; align-items: center; justify-content: center;
   width: 36px; height: 36px; border-radius: 50%;

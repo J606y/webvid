@@ -29,6 +29,7 @@ import (
 	"newlist/internal/task"
 	"newlist/internal/thumb"
 	"newlist/internal/user"
+	"newlist/internal/util"
 )
 
 func init() {
@@ -125,8 +126,11 @@ func main() {
 	md := media.New(f, dataDir, "http://127.0.0.1:"+port, secret, d)
 	// ffmpeg/ffprobe 总闸：抽封面与探源信息共用一个上限，后台「任务设置」可调。
 	// 不设闸时一屏封面就能把 CPU 榨干（每个进程另按 -threads 1 跑）。
-	th.SetJobs(cf.MediaJobs())
-	md.SetJobs(cf.MediaJobs())
+	// 必须是同一把——两边各建一把的话，设置里写着 N，实际能同时跑的是 2N，
+	// 而云盘视频抽一张封面还会同时占住两把闸，把探测的名额也挤掉。
+	jobs := util.NewGate(cf.MediaJobs())
+	th.SetGate(jobs)
+	md.SetGate(jobs)
 	// 云盘视频驱动无自带缩略图时，缩略图服务经此用 ffmpeg 抽帧兜底（走回环 /api/raw）
 	th.SetVideoFramer(md.FrameJPEG)
 	idx := index.New(d, f)

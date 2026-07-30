@@ -158,7 +158,7 @@ func TestSlidingWindowBound(t *testing.T) {
 	ts := httptest.NewServer(srv.handler())
 	defer ts.Close()
 
-	threads := 2 // 预读缓冲取 threads×chunk → window=2（窗口下限即线程数）
+	threads := 2 // tOpts 的预读 = threads×chunk → 窗口 2 块
 	mr := NewMultiReader(context.Background(), fixedProvider(ts.URL), 0, int64(len(content)), tOpts(threads, chunk))
 	defer mr.Close()
 
@@ -363,6 +363,57 @@ func TestThrottleRetryAfter(t *testing.T) {
 	defer srv.mu.Unlock()
 	if srv.tries[0] < 2 || srv.tries[chunk] < 2 {
 		t.Fatalf("被限流的块应在等待后重试: tries=%v", srv.tries)
+	}
+}
+
+// 换链之后仍是 403：必须改按限流退避，不能继续当"链过期"烧重试次数。
+// 403 是 Google Drive 限流的主力返回码（rateLimitExceeded），当成链过期处理的话，
+// 4 次尝试配 0/200/400/600ms 退避，1.2 秒就把整块判死，2 分钟的限流预算一秒没用上——
+// 用户那边就是"只有 Google Drive 的片子播着播着断了"。
+func TestForbiddenAfterRelinkBecomesThrottle(t *testing.T) {
+	old := throttleDefault
+	throttleDefault = 10 * time.Millisecond
+	defer func() { throttleDefault = old }()
+
+	const chunk = 64 << 10
+	content := pattern(2 * chunk)
+	srv := &rangeSrv{content: content}
+	var mu sync.Mutex
+	var n403, provN int
+	srv.hook = func(w http.ResponseWriter, r *http.Request, start, end int64, try int) bool {
+		if start != 0 {
+			return false
+		}
+		mu.Lock()
+		n403++
+		n := n403
+		mu.Unlock()
+		if n <= 6 { // 远超 chunkAttempts，只有走限流预算才活得下来
+			w.WriteHeader(http.StatusForbidden)
+			return true
+		}
+		return false
+	}
+	ts := httptest.NewServer(srv.handler())
+	defer ts.Close()
+
+	provider := func(ctx context.Context) (string, http.Header, error) {
+		mu.Lock()
+		provN++
+		g := provN
+		mu.Unlock()
+		return fmt.Sprintf("%s/g%d", ts.URL, g), nil, nil
+	}
+	mr := NewMultiReader(context.Background(), provider, 0, int64(len(content)), tOpts(1, chunk))
+	if got := readAll(t, mr); !bytes.Equal(got, content) {
+		t.Fatal("持续 403 下应靠限流退避读完，内容不一致")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// 首次取链 1 次 + 换链 1 次。每次 403 都换链等于每次都去强刷一遍 token，
+	// 而 token 刷新是持锁做网络 I/O 的，该存储上的一切操作会跟着串行阻塞。
+	if provN != 2 {
+		t.Fatalf("换链应只发生一次，provider 实际被调用 %d 次", provN)
 	}
 }
 
@@ -645,14 +696,19 @@ func TestOptsWindow(t *testing.T) {
 	if got := (Opts{Threads: 4, ChunkBytes: 4 << 20, ReadaheadBytes: 32 << 20}).window(); got != 8 {
 		t.Fatalf("窗口应为 8，实际 %d", got)
 	}
-	// 预读算出来比线程还少时以线程数兜底，否则 worker 领不到活白白空转
-	if got := (Opts{Threads: 8, ChunkBytes: 4 << 20, ReadaheadBytes: 8 << 20}).window(); got != 8 {
-		t.Fatalf("窗口应回落到线程数 8，实际 %d", got)
+	// 窗口只认预读：线程再多也不能把这条流的常驻内存顶上去（8 线程 × 4MB 分块，
+	// 预读只给 8MB → 就是 2 块，不是 8 块）
+	if got := (Opts{Threads: 8, ChunkBytes: 4 << 20, ReadaheadBytes: 8 << 20}).window(); got != 2 {
+		t.Fatalf("窗口应按预读算出 2，实际 %d", got)
+	}
+	// 极值配置也得守住预读：32 线程 × 64MB 分块，预读 128MB → 2 块（128MB），而非 2GB
+	if got := (Opts{Threads: 32, ChunkBytes: 64 << 20, ReadaheadBytes: 128 << 20}).window(); got != 2 {
+		t.Fatalf("极值配置窗口应为 2，实际 %d", got)
 	}
 }
 
 // 预读缓冲放大窗口：worker 得以跑在读端前面，某块慢不再让整条流停摆。
-// 与 TestSlidingWindowBound（窗口下限=线程数）合起来覆盖 window() 的两半。
+// 与 TestSlidingWindowBound 合起来覆盖 window() 的两头。
 func TestReadaheadWidensWindow(t *testing.T) {
 	const chunk = 64 << 10
 	content := pattern(32 * chunk)

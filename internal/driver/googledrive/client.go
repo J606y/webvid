@@ -33,8 +33,9 @@ var (
 	tokenURL        = "https://oauth2.googleapis.com/token"
 )
 
-// 长耗时请求（上传/拉流）共用；不设全局 Timeout，超时全靠 ctx。
-var httpClient = &http.Client{}
+// 长耗时请求（上传/拉流）共用；不设全局 Timeout（会把大文件传输一起砍断），超时全靠 ctx。
+// Transport 必须自己建，默认那条每 host 只留 2 条空闲连接，见 util.NewHTTPTransport。
+var httpClient = &http.Client{Transport: util.NewHTTPTransport()}
 
 // client 封装 Drive 访问：token 缓存与刷新、统一请求、错误映射。
 type client struct {
@@ -45,6 +46,7 @@ type client struct {
 	refreshToken string
 	accessToken  string
 	expiresAt    time.Time
+	refreshedAt  time.Time // 上次成功换到 access_token 的时刻，见 forceRefresh
 
 	persist func(driver.Config) error // 配置回写（refresh_token 轮换，Google 很少触发但保留）
 	cfg     driver.Config
@@ -102,9 +104,21 @@ func (c *client) token(ctx context.Context) (string, error) {
 	return "", lastErr
 }
 
-// forceRefresh 丢弃缓存的 access_token（收到 401 时用）。
+// minRefreshInterval 两次强制刷新之间的最小间隔。
+const minRefreshInterval = 5 * time.Second
+
+// forceRefresh 丢弃缓存的 access_token（收到 401/403 换链时用）。
+//
+// 刚换来的令牌不再重复丢弃：拉流有 4 个 worker，撞上限流时会各喊一次换链，而 token()
+// 是持着锁做网络 I/O 的（refreshLocked 里一个 15 秒超时的 HTTP 请求），无脑丢弃等于把
+// 一次 OAuth 交换变成四次串行，期间该存储上的一切操作——列目录、抽封面、另一部片的
+// 起播——全部堵在这把锁后面。
 func (c *client) forceRefresh() {
 	c.mu.Lock()
+	if c.accessToken != "" && time.Since(c.refreshedAt) < minRefreshInterval {
+		c.mu.Unlock()
+		return
+	}
 	c.accessToken = ""
 	c.mu.Unlock()
 }
@@ -153,6 +167,7 @@ func (c *client) refreshLocked(ctx context.Context) error {
 	}
 	c.accessToken = tr.AccessToken
 	c.expiresAt = time.Now().Add(time.Duration(tr.ExpiresIn) * time.Second)
+	c.refreshedAt = time.Now()
 	if tr.RefreshToken != "" && tr.RefreshToken != c.refreshToken { // Google 一般不轮换，兜底处理
 		c.refreshToken = tr.RefreshToken
 		if c.cfg != nil {
@@ -197,6 +212,12 @@ func mapDriveError(status int, ge *gError) error {
 	case status == 403 && (reason == "insufficientPermissions" ||
 		reason == "insufficientFilePermissions" || reason == "appNotAuthorizedToFile"):
 		return driver.ErrDenied
+	// 下载配额与「可疑文件」两种拒绝：都是 403，和权限不足长得一样，但用户该做的事
+	// 完全不同——一个是等，一个是没得等。不点破就只剩一句"存储返回错误"。
+	case reason == "downloadQuotaExceeded":
+		return fmt.Errorf("%w：该文件的下载配额已用尽，通常 24 小时后自动恢复", driver.ErrUpstream)
+	case reason == "cannotDownloadAbusiveFile":
+		return fmt.Errorf("%w：Google 将该文件标记为可疑内容，拒绝下载", driver.ErrUpstream)
 	}
 	code := reason
 	if code == "" {

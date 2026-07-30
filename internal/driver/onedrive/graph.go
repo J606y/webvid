@@ -44,8 +44,9 @@ func regionEndpoints(region string) endpoints {
 	}
 }
 
-// 上传/轮询等长耗时请求共用；不设全局 Timeout，超时全靠 ctx。
-var httpClient = &http.Client{}
+// 上传/轮询等长耗时请求共用；不设全局 Timeout（会把大文件传输一起砍断），超时全靠 ctx。
+// Transport 必须自己建，默认那条每 host 只留 2 条空闲连接，见 util.NewHTTPTransport。
+var httpClient = &http.Client{Transport: util.NewHTTPTransport()}
 
 // client 封装 Graph 访问：token 缓存与刷新、统一请求、错误映射。
 type client struct {

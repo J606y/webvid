@@ -39,11 +39,37 @@ const remoteTTL = 30 * 24 * time.Hour
 // 640 足够卡片/网格显示，hero 大图轻微放大也可接受。
 const vframeWidth = 640
 
+// 本地盘封面的宽度档位：卡片/网格一档，hero 大图一档。
+const (
+	widthCard = 640
+	widthHero = 1280
+)
+
+// normWidth 把请求宽度归到固定档位。
+//
+// 本地盘的缓存键含宽度（见 cacheKey），调用方各写一个数字的话，同一张图会按 320、
+// 400、480、1200 各生成一份，谁也命中不了谁。后台预载踩的就是这个坑：它按一个自己
+// 挑的宽度生成、落盘、报完成，而前端请求的宽度没有一个对得上——预载说做完了，
+// 封面却一张也看不见。归档之后前端怎么写都只落在这两个键上。
+func normWidth(w int) int {
+	if w <= widthCard {
+		return widthCard
+	}
+	return widthHero
+}
+
+// dlLimit 是云盘自带缩略图这条路的并发上限（取直链 + 下载图片）。
+//
+// 全程是网络等待、不吃 CPU，所以单独一把闸，不与 ffmpeg 的总闸混用——混在一起的话
+// 一屏封面会排在抽帧和探测后面，首屏得干等，两边还互相饿死。
+// 6 条足够跑满家用带宽，也不至于一屏两百张卡片就朝云盘打出两百条 TLS 连接。
+const dlLimit = 6
+
 type Service struct {
 	fs       *fs.FS
 	cacheDir string
-	jobs     *util.Gate    // 生成并发限制（CPU/ffmpeg），后台可调，见 conf.MediaJobs
-	dlSem    chan struct{} // 远端缩略图下载并发限制（网络）
+	jobs     *util.Gate // 生成并发限制（CPU/ffmpeg），后台可调，见 conf.MediaJobs
+	dl       *util.Gate // 云盘自带缩略图并发限制（网络），见 dlLimit
 
 	mu     sync.Mutex
 	flight map[string]chan struct{} // 同 key singleflight
@@ -73,11 +99,17 @@ func New(f *fs.FS, dataDir string) *Service {
 	dir := filepath.Join(dataDir, "thumbs")
 	os.MkdirAll(dir, 0o755)
 	return &Service{fs: f, cacheDir: dir, jobs: util.NewGate(2),
-		dlSem: make(chan struct{}, 6), flight: map[string]chan struct{}{}}
+		dl: util.NewGate(dlLimit), flight: map[string]chan struct{}{}}
 }
 
-// SetJobs 热调封面生成（ffmpeg 抽帧 / 图片缩放）的并发上限，与 media 的探测闸同一个设置项。
+// SetJobs 热调封面生成（ffmpeg 抽帧 / 图片缩放）的并发上限。
+// main 接线后这与 media 的探测闸是同一把（见 SetGate），调任一边都即时生效。
 func (s *Service) SetJobs(n int) { s.jobs.SetLimit(n) }
+
+// SetGate 换用外部传入的 ffmpeg 总闸，仅供启动接线（此时尚无并发）。
+// thumb 与 media 各建一把闸的话，后台设置项写着「总闸 N」，实际能同时跑的 ffmpeg
+// 是 2N；云盘视频抽一张封面还会同时占住两把，把探测的名额一并挤掉。
+func (s *Service) SetGate(g *util.Gate) { s.jobs = g }
 
 // FFmpeg 返回探测到的 ffmpeg 路径（可能为空 = 不可用）。
 // 探测逻辑（NL_FFMPEG / PATH / winget 兜底）与 media 共用一份，见 media.LookTool。
@@ -120,9 +152,7 @@ func (s *Service) once(ctx context.Context, key string) (lead bool, finish func(
 
 // Get 返回 (302 重定向 URL, 本地缓存文件路径, error)，二者最多一个非空。
 func (s *Service) Get(ctx context.Context, u *user.User, logical string, width int) (string, string, error) {
-	if width <= 0 || width > 1600 {
-		width = 400
-	}
+	width = normWidth(width)
 	drv, rel, err := s.fs.Driver(u, logical)
 	if err != nil {
 		return "", "", err
@@ -189,7 +219,7 @@ func (s *Service) Get(ctx context.Context, u *user.User, logical string, width i
 
 	switch model.ExtType(logical) {
 	case "image":
-		err = s.genImage(abs, out, width)
+		err = s.genImage(ctx, abs, out, width)
 	case "video":
 		err = s.genVideo(ctx, abs, out, width)
 	default:
@@ -217,9 +247,7 @@ const (
 // 分支顺序与缓存键取法必须与 Get 一致（Get 改了这里要同步改），否则判断会与实际
 // 走的路径对不上：判成 Ready 却其实要下载 → 进度条少算活；反之则多算。
 func (s *Service) Cover(u *user.User, logical string, width int) CoverState {
-	if width <= 0 || width > 1600 {
-		width = 400
-	}
+	width = normWidth(width)
 	drv, rel, err := s.fs.Driver(u, logical)
 	if err != nil {
 		return CoverNone
@@ -230,6 +258,14 @@ func (s *Service) Cover(u *user.User, logical string, width int) CoverState {
 	// ① 驱动自带缩略图：缓存在 TTL 内即完事；过期或没有都得走一趟网络（算活）
 	if _, ok := drv.(driver.Thumber); ok && !(isVideo && textPreviewExt(logical)) {
 		if s.freshWithin(cacheKey(logical+"|remote", time.Time{}, 0, 0), remoteTTL) {
+			return CoverReady
+		}
+		// Get 在自带缩略图取不到时不会就此收手，而是接着走抽帧兜底，产物落在 |vframe 键
+		// （见 Get 的远端视频分支）。这里不跟着看一眼，抽好的封面就永远判成 Pending：
+		// 每轮重新进待办、每轮再向云盘要一次它根本给不出的缩略图、每轮记一次失败，
+		// 退避重试越拉越长，进度条一直停在原地——「后台一直在忙却什么也没变」。
+		if isVideo && !isLocal &&
+			s.freshWithin(cacheKey(logical+"|vframe", time.Time{}, 0, 0), remoteTTL) {
 			return CoverReady
 		}
 		return CoverPending
@@ -304,18 +340,20 @@ func (s *Service) remote(ctx context.Context, t driver.Thumber, rel, logical str
 	}
 	defer finish()
 
+	// 取直链和下载都要过网络闸。此前只有下载那一步过闸，向云盘要直链的 t.Thumb 一点闸
+	// 不过——并发数等于同时到达的 HTTP 请求数，主页一屏卡片就能朝云盘打出几百条连接。
+	release, err := s.dl.Acquire(ctx)
+	if err != nil {
+		return "", ""
+	}
+	defer release()
+
 	url, err := t.Thumb(ctx, rel)
 	if err != nil || url == "" {
 		if _, e := os.Stat(out); e == nil {
 			return "", out // 过期刷新失败：沿用旧缓存
 		}
 		return "", ""
-	}
-	select {
-	case s.dlSem <- struct{}{}:
-		defer func() { <-s.dlSem }()
-	case <-ctx.Done():
-		return url, ""
 	}
 	if err := download(ctx, url, out); err != nil {
 		log.Printf("[thumb] 远端缩略图下载失败 %s: %v", logical, err)
@@ -398,6 +436,10 @@ func (s *Service) Purge() (files int64, bytes int64, err error) {
 	return files, bytes, nil
 }
 
+// dlClient 下载云盘缩略图专用：http.DefaultClient 每 host 只留 2 条空闲连接，
+// 一屏封面下来大半是新建连接又立刻丢弃，全堆在 TIME_WAIT 里。
+var dlClient = &http.Client{Transport: util.NewHTTPTransport()}
+
 func download(ctx context.Context, url, out string) error {
 	cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -439,7 +481,22 @@ func cacheKey(p string, mod time.Time, size int64, w int) string {
 	return hex.EncodeToString(h[:])
 }
 
-func (s *Service) genImage(abs, out string, width int) error {
+// maxDecodePixels 进程内解码的像素上限。imaging 解出来是 NRGBA、4 字节一个像素，
+// 16MP 就是 64MB，方向校正还会再复制一份，而生成闸放行 2 个并发——一张全景图或
+// 扫描件就能让常驻内存翻几倍。超过上限的交给 ffmpeg：解码在子进程里，用的是
+// 1.5 字节一个像素的 YUV，真撑爆了也只死那一个进程。
+const maxDecodePixels = 16 << 20 // ≈ 1677 万像素，比 5000 万像素的手机全景小一档
+
+func (s *Service) genImage(ctx context.Context, abs, out string, width int) error {
+	if w, h, big := hugeImage(abs); big {
+		ff := s.FFmpeg()
+		if ff == "" {
+			return fmt.Errorf("图片 %d×%d 太大，本机没有 ffmpeg，无法生成缩略图", w, h)
+		}
+		// 与视频抽帧共用一份实现（本地输入无 http 旗标）。静态图只有一帧，不能定位，
+		// 见 media.FrameFirst。
+		return media.FrameFirst(ctx, ff, abs, out, width)
+	}
 	src, err := imaging.Open(abs, imaging.AutoOrientation(true))
 	if err != nil {
 		return err
@@ -448,6 +505,22 @@ func (s *Service) genImage(abs, out string, width int) error {
 		src = imaging.Resize(src, width, 0, imaging.Lanczos)
 	}
 	return saveJPEG(src, out)
+}
+
+// hugeImage 只读图片头拿尺寸，判断整张解码会不会超出 maxDecodePixels。
+// 读不出头（格式不认识、文件损坏）一律当作不超——让后面的正常解码去报真正的错，
+// 这里不替它下结论。
+func hugeImage(abs string) (w, h int, big bool) {
+	f, err := os.Open(abs)
+	if err != nil {
+		return 0, 0, false
+	}
+	defer f.Close()
+	cfg, _, err := image.DecodeConfig(f)
+	if err != nil {
+		return 0, 0, false
+	}
+	return cfg.Width, cfg.Height, int64(cfg.Width)*int64(cfg.Height) > maxDecodePixels
 }
 
 func saveJPEG(img image.Image, out string) error {

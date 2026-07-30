@@ -5,6 +5,7 @@ import (
 	"errors"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"newlist/internal/db"
@@ -53,9 +54,34 @@ func NormBasePath(p string) string {
 	return path.Clean("/" + p)
 }
 
-type Store struct{ db *sql.DB }
+// idCacheTTL GetByID 的缓存有效期。每个 HTTP 请求都要过一次鉴权中间件、每次鉴权都
+// 查一遍 users：媒体库首页一屏两百张封面就是两百多次 SELECT 挤在 4 条 SQLite 连接上，
+// HLS 播放期间每 4 秒一个分片请求也各查一次。
+//
+// 缓存只在本进程读到旧数据，写操作（改资料/改密/停用/删号）会当场清掉整表缓存，
+// 所以后台改完立即生效。真正会迟的只有绕过本进程直接改数据库的情形。
+const idCacheTTL = 30 * time.Second
 
-func NewStore(db *sql.DB) *Store { return &Store{db: db} }
+type Store struct {
+	db *sql.DB
+
+	mu     sync.Mutex
+	cache  map[int64]User // 按值存：交出去的是副本，调用方改不到缓存里的对象
+	cachAt map[int64]time.Time
+}
+
+func NewStore(db *sql.DB) *Store {
+	return &Store{db: db, cache: map[int64]User{}, cachAt: map[int64]time.Time{}}
+}
+
+// invalidate 清空 GetByID 缓存。任何写操作之后都要调——用户数量小，整表清最省心，
+// 也不会漏掉「改了 A 却只清了 B」这类错。
+func (s *Store) invalidate() {
+	s.mu.Lock()
+	s.cache = map[int64]User{}
+	s.cachAt = map[int64]time.Time{}
+	s.mu.Unlock()
+}
 
 const cols = `id, username, password_hash, role, base_path, can_write, enabled, created_at`
 
@@ -96,11 +122,39 @@ func (s *Store) Create(username, passwordHash, role, basePath string, canWrite b
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	s.invalidate()
 	return s.GetByID(id)
 }
 
+// GetByID 按 ID 取用户，带 idCacheTTL 的内存缓存。返回的始终是一份独立副本。
 func (s *Store) GetByID(id int64) (*User, error) {
-	return scan(s.db.QueryRow(`SELECT `+cols+` FROM users WHERE id=?`, id))
+	if u, ok := s.cached(id); ok {
+		return u, nil
+	}
+	u, err := scan(s.db.QueryRow(`SELECT ` + cols + ` FROM users WHERE id=?`, id))
+	if err != nil {
+		return nil, err // 不缓存失败：删号后重建同 ID 的场景不该被负缓存挡住
+	}
+	s.mu.Lock()
+	s.cache[id] = *u
+	s.cachAt[id] = time.Now()
+	s.mu.Unlock()
+	return u, nil
+}
+
+func (s *Store) cached(id int64) (*User, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	at, ok := s.cachAt[id]
+	if !ok || time.Since(at) > idCacheTTL {
+		if ok { // 过期即删，别让停用过的账号一直占着位置
+			delete(s.cache, id)
+			delete(s.cachAt, id)
+		}
+		return nil, false
+	}
+	u := s.cache[id]
+	return &u, true
 }
 
 func (s *Store) GetByUsername(name string) (*User, error) {
@@ -142,6 +196,7 @@ func (s *Store) Update(u *User) error {
 	_, err = s.db.Exec(
 		`UPDATE users SET username=?, role=?, base_path=?, can_write=?, enabled=? WHERE id=?`,
 		u.Username, u.Role, NormBasePath(u.BasePath), util.BoolInt(u.CanWrite), util.BoolInt(u.Enabled), u.ID)
+	s.invalidate() // 出错也清：部分语句可能已生效，宁可多查一次
 	if err != nil && db.IsUniqueViolation(err) {
 		return ErrExists
 	}
@@ -150,6 +205,7 @@ func (s *Store) Update(u *User) error {
 
 func (s *Store) UpdatePassword(id int64, hash string) error {
 	_, err := s.db.Exec(`UPDATE users SET password_hash=? WHERE id=?`, hash, id)
+	s.invalidate()
 	return err
 }
 
@@ -168,6 +224,7 @@ func (s *Store) Delete(id int64) error {
 		}
 	}
 	_, err = s.db.Exec(`DELETE FROM users WHERE id=?`, id)
+	s.invalidate()
 	return err
 }
 

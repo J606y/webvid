@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"newlist/internal/driver"
+	"newlist/internal/util"
 )
 
 // fixedNow 提供确定性时间源（captcha 签名/缓存 TTL 用）。
@@ -147,7 +148,8 @@ func newTestDriver(t *testing.T, srv *httptest.Server, ms *mockServer) *PikPak {
 	// 直接构造 client：
 	d.now = fixedNow
 	d.cacheTTL = 2 * time.Minute
-	d.cache = map[string]cacheEntry{}
+	d.cache = util.NewTTLCache[pkFile](d.cacheTTL, pathCacheEntries, missCacheEntries)
+	d.cache.SetNow(d.now)
 	d.root = ""
 	c := &client{
 		authBase: srv.URL, driveBase: srv.URL, pf: platforms["web"],
@@ -201,7 +203,8 @@ func TestLoginFlow(t *testing.T) {
 	cfg := driver.Config{"platform": "web", "username": "u@example.com", "password": "pass"}
 	// 手动构造以指向 mock（Init 会用真实 base，故直接建 client）。
 	d.cacheTTL = time.Minute
-	d.cache = map[string]cacheEntry{}
+	d.cache = util.NewTTLCache[pkFile](d.cacheTTL, pathCacheEntries, missCacheEntries)
+	d.cache.SetNow(d.now)
 	c := &client{authBase: srv.URL, driveBase: srv.URL, pf: platforms["web"],
 		username: "u@example.com", password: "pass", deviceID: "dev", cfg: cfg,
 		persist: d.persist, now: fixedNow}

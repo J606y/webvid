@@ -26,6 +26,13 @@ var adminIdent = &user.User{Role: "admin", BasePath: "/"}
 // ErrBusy 重建进行中，此时不接受清空（handler 映射 409）。
 var ErrBusy = errors.New("索引重建进行中")
 
+const (
+	// scanSubtreeLimit 同时在跑的子树扫描数上限。
+	scanSubtreeLimit = 2
+	// subtreeScanBatch 子树扫描每多少行提交一次事务。
+	subtreeScanBatch = 500
+)
+
 type Progress struct {
 	Running bool   `json:"running"`
 	Scanned int64  `json:"scanned"`
@@ -46,8 +53,17 @@ type Builder struct {
 	pending []func()
 	// subtree 正在后台重扫的挂载路径 → 扫完是否还要再来一轮（见 startSubtree）。
 	subtree map[string]bool
+	// scanning 正在后台扫描的子树（复制目录后触发）→ 扫完是否还要再来一轮。
+	scanning map[string]bool
+	// scanSem 子树扫描的并发闸，见 scanSubtreeLimit。
+	scanSem chan struct{}
 	// dirty 增量写改过条数、进度里的数字还没跟上（见 refreshCount）。
 	dirty bool
+	// counting 后台正在重数条数，别再起第二个（1.5 秒一次的轮询会连着来）。
+	counting bool
+	// countGen 条数的代际。重建与清空都会给出权威条数，此时在途的后台计数作废——
+	// 它读到的是改动之前的表。
+	countGen int
 }
 
 func New(db *sql.DB, f *fs.FS) *Builder {
@@ -100,6 +116,7 @@ func (b *Builder) Rebuild() bool {
 		return false
 	}
 	b.prog = Progress{Running: true}
+	b.countGen++ // 在途的后台计数作废：重建自己会给出权威条数
 	b.mu.Unlock()
 	go b.run()
 	return true
@@ -121,6 +138,7 @@ func (b *Builder) Clear() error {
 	b.pending = nil     // 尚未重放的增量写一并作废（索引已空，重放无意义）
 	b.prog = Progress{} // scanned 归零，顺带清掉上次重建的报错
 	b.dirty = false     // 表已清空，归零就是真实条数
+	b.countGen++        // 在途的后台计数数的是清空前的表，作废
 	log.Println("[index] 索引已删除")
 	return nil
 }
@@ -192,6 +210,14 @@ func (b *Builder) replaceAll(rows []row) error {
 	if _, err := tx.Exec(`DELETE FROM files`); err != nil {
 		return err
 	}
+	if err := writeRows(tx, rows); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// writeRows 在给定事务内批量写入索引行。
+func writeRows(tx *sql.Tx, rows []row) error {
 	stmt, err := tx.Prepare(upsertSQL)
 	if err != nil {
 		return err
@@ -203,7 +229,7 @@ func (b *Builder) replaceAll(rows []row) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
 // replaceSubtree 在单个事务内替换某挂载子树的全部索引行：清掉旧行 + 写入新行。
@@ -218,18 +244,30 @@ func (b *Builder) replaceSubtree(root string, rows []row) error {
 	if _, err := tx.Exec(delPrefixSQL, root, root, root); err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(upsertSQL)
+	if err := writeRows(tx, rows); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// upsertBatch 在单个事务内批量 upsert 一批行（不删旧行），成功后标脏。
+func (b *Builder) upsertBatch(rows []row) error {
+	if len(rows) == 0 {
+		return nil
+	}
+	tx, err := b.db.Begin()
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
-	for _, r := range rows {
-		if _, err := stmt.Exec(r.path, r.parent, r.name, strings.ToLower(r.name),
-			util.BoolInt(r.isDir), r.size, r.modified, r.extType); err != nil {
-			return err
-		}
+	defer tx.Rollback()
+	if err := writeRows(tx, rows); err != nil {
+		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	b.markDirty()
+	return nil
 }
 
 // markDirty 记下"索引条数已经变了"。上传、删除、重扫都只打这个标记。
@@ -242,24 +280,36 @@ func (b *Builder) markDirty() {
 // refreshCount 有过增量改动才重数一遍 files 表，让「共 N 项」跟得上。
 // 只在读进度时数：批量删除、目录复制是热路径，每笔都扫一遍全表不值当。
 // 重建进行中不动，那会儿的条数由重建自己维护。
+//
+// 数在后台、不在请求线程里：几万行的 COUNT(*) 要和预载、媒体库查询抢那 4 条 SQLite
+// 连接，最坏排到 busy_timeout 的 5 秒，后台索引页一进去就先卡在这。本次先返回上一次
+// 的数字，下一次读进度（轮询 1.5 秒一轮）就是新的。
 func (b *Builder) refreshCount() {
 	b.mu.Lock()
-	need := b.dirty && !b.prog.Running
-	b.mu.Unlock()
-	if !need {
+	if !b.dirty || b.prog.Running || b.counting {
+		b.mu.Unlock()
 		return
 	}
-	var n int64
-	if err := b.db.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&n); err != nil {
-		log.Printf("[index] 读取索引条数失败: %v", err)
-		return
-	}
-	b.mu.Lock()
-	if !b.prog.Running {
-		b.prog.Scanned = n
-		b.dirty = false
-	}
+	b.counting = true
+	gen := b.countGen
 	b.mu.Unlock()
+
+	go func() {
+		var n int64
+		err := b.db.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&n)
+		b.mu.Lock()
+		b.counting = false
+		// 代际对不上说明数的过程中表被重建或清空过，这个数字已经作不得数。
+		// 出错则不清 dirty，下次读进度自会再数一遍。
+		if err == nil && gen == b.countGen && !b.prog.Running {
+			b.prog.Scanned = n
+			b.dirty = false
+		}
+		b.mu.Unlock()
+		if err != nil {
+			log.Printf("[index] 读取索引条数失败: %v", err)
+		}
+	}()
 }
 
 // queueOrRun 执行一次增量写。重建进行中时同时排进 pending：这一笔既要作用于当前
@@ -500,37 +550,99 @@ func (b *Builder) ScanSubtree(logical string) {
 	b.queueOrRun(func() { b.scanSubtree(logical) })
 }
 
+// scanSubtree 起一轮后台子树扫描。同一子树已在扫时只打标记，等这轮扫完再补一轮；
+// 同时在跑的扫描数受 scanSubtreeLimit 约束——早先是每次调用无条件新起一个 goroutine，
+// 既不去重也不限并发，批量复制目录时十几条一起 BFS 云盘。
 func (b *Builder) scanSubtree(logical string) {
+	b.mu.Lock()
+	if b.scanning == nil {
+		b.scanning = map[string]bool{}
+	}
+	if _, busy := b.scanning[logical]; busy {
+		b.scanning[logical] = true
+		b.mu.Unlock()
+		return
+	}
+	b.scanning[logical] = false
+	if b.scanSem == nil {
+		b.scanSem = make(chan struct{}, scanSubtreeLimit)
+	}
+	sem := b.scanSem
+	b.mu.Unlock()
+
 	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("[index] ScanSubtree %s panic: %v", logical, r)
+		for {
+			if err := runGated(sem, func() error { return b.walkSubtree(logical) }); err != nil {
+				log.Printf("[index] 扫描 %s 失败: %v", logical, err)
 			}
-		}()
-		ctx := context.Background()
-		fi, err := b.fs.Get(ctx, adminIdent, logical)
-		if err != nil {
-			return
+			b.mu.Lock()
+			if !b.scanning[logical] {
+				delete(b.scanning, logical)
+				b.mu.Unlock()
+				return
+			}
+			b.scanning[logical] = false
+			b.mu.Unlock()
 		}
-		b.upsert(logical, fi)
-		if !fi.IsDir {
-			return
+	}()
+}
+
+// runGated 占一个名额跑 fn，无论 fn 如何收场都把名额还回去。
+func runGated(sem chan struct{}, fn func() error) error {
+	sem <- struct{}{}
+	defer func() { <-sem }()
+	return fn()
+}
+
+// walkSubtree BFS 扫描一棵子树并写进索引，每 subtreeScanBatch 行提交一次事务。
+// 早先是在 BFS 循环里逐条裸 Exec，每行一个独立事务——复制一个几千文件的目录就是
+// 几千次提交。分批而不是整棵一个事务：扫云盘要几分钟，长事务会把写锁攥住那么久，
+// 期间任何一次上传或播放记录都得在 busy_timeout 上干等。
+func (b *Builder) walkSubtree(logical string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("索引扫描内部错误: %v", r)
+			log.Printf("[index] ScanSubtree %s panic: %v\n%s", logical, r, debug.Stack())
 		}
+	}()
+	ctx := context.Background()
+	fi, err := b.fs.Get(ctx, adminIdent, logical)
+	if err != nil {
+		return err
+	}
+	rows := make([]row, 0, subtreeScanBatch)
+	rows = append(rows, newRow(logical, fi))
+	flush := func(force bool) error {
+		if len(rows) == 0 || (!force && len(rows) < subtreeScanBatch) {
+			return nil
+		}
+		if err := b.upsertBatch(rows); err != nil {
+			return err
+		}
+		rows = rows[:0]
+		return nil
+	}
+	if fi.IsDir {
 		queue := []string{logical}
 		for len(queue) > 0 {
 			dir := queue[0]
 			queue = queue[1:]
 			items, err := b.fs.List(ctx, adminIdent, dir)
 			if err != nil {
+				log.Printf("[index] 列目录失败 %s: %v", dir, err)
 				continue
 			}
 			for _, it := range items {
 				full := util.JoinLogical(dir, it.Name)
-				b.upsert(full, it)
+				rows = append(rows, newRow(full, it))
 				if it.IsDir {
 					queue = append(queue, full)
 				}
 			}
+			if err := flush(false); err != nil {
+				return err
+			}
 		}
-	}()
+	}
+	return flush(true)
 }

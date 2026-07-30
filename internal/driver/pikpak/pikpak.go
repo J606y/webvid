@@ -10,7 +10,6 @@ import (
 	"path"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"newlist/internal/driver"
@@ -49,15 +48,16 @@ type PikPak struct {
 	now      func() time.Time
 	cacheTTL time.Duration
 
-	mu    sync.Mutex
-	cache map[string]cacheEntry // rel 路径 → 解析结果
+	cache *util.TTLCache[pkFile] // rel 路径 → 解析结果（TTL + LRU 上限，自带锁）
 }
 
-type cacheEntry struct {
-	f       pkFile
-	at      time.Time
-	missing bool // 已确认不存在，见 cacheMissing
-}
+// 路径缓存条数上限。全量索引会 BFS 整个挂载，每列一次目录就把全部子项写进缓存——
+// 不设上限等于把云盘上每一条路径都留在内存里。负条目（已确认不存在）单独限额，
+// 免得把有用的正条目挤光。
+const (
+	pathCacheEntries = 20000
+	missCacheEntries = 5000
+)
 
 // pkFile 是 PikPak 文件条目的最小投影。
 type pkFile struct {
@@ -113,7 +113,8 @@ func (d *PikPak) Init(ctx context.Context, cfg driver.Config) error {
 	if d.cacheTTL == 0 {
 		d.cacheTTL = 2 * time.Minute
 	}
-	d.cache = map[string]cacheEntry{}
+	d.cache = util.NewTTLCache[pkFile](d.cacheTTL, pathCacheEntries, missCacheEntries)
+	d.cache.SetNow(d.now)
 	d.root = strings.TrimSpace(cfg["root_folder_id"])
 
 	pf, ok := platforms[cfg["platform"]]
@@ -206,11 +207,11 @@ func (d *PikPak) lookup(ctx context.Context, rel string) (pkFile, error) {
 	if rel == "" {
 		return pkFile{id: d.root, isDir: true, name: ""}, nil
 	}
-	if e, ok := d.cacheGet(rel); ok {
-		if e.missing {
+	if f, missing, ok := d.cache.Get(rel); ok {
+		if missing {
 			return pkFile{}, driver.ErrNotFound
 		}
-		return e.f, nil
+		return f, nil
 	}
 	parentRel := path.Dir(rel)
 	if parentRel == "." {
@@ -234,41 +235,16 @@ func (d *PikPak) lookup(ctx context.Context, rel string) (pkFile, error) {
 			return ch, nil
 		}
 	}
-	d.cacheMissing(rel)
+	// 记住「这个路径不存在」。只缓存找得到的路径时，每查一次不存在的路径都要把父目录
+	// 整个重列一遍。所有让路径由无变有的写操作（MakeDir/Rename/Move/Copy）成功后都会
+	// cacheClear，负缓存不会盖住新建的条目；外部改动与正缓存一样受 TTL 约束。
+	d.cache.PutMissing(rel)
 	return pkFile{}, driver.ErrNotFound
 }
 
-// cacheGet 返回缓存条目；条目可能是「已确认不存在」，调用方须查 missing 后再用 f。
-func (d *PikPak) cacheGet(rel string) (cacheEntry, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	e, ok := d.cache[rel]
-	if !ok || d.now().Sub(e.at) > d.cacheTTL {
-		return cacheEntry{}, false
-	}
-	return e, true
-}
+func (d *PikPak) cachePut(rel string, f pkFile) { d.cache.Put(rel, f) }
 
-// cacheMissing 记住「这个路径不存在」。只缓存找得到的路径时，每查一次不存在的路径
-// 都要把父目录整个重列一遍。所有让路径由无变有的写操作（MakeDir/Rename/Move/Copy）
-// 成功后都会 cacheClear，负缓存不会盖住新建的条目；外部改动与正缓存一样受 TTL 约束。
-func (d *PikPak) cacheMissing(rel string) {
-	d.mu.Lock()
-	d.cache[rel] = cacheEntry{at: d.now(), missing: true}
-	d.mu.Unlock()
-}
-
-func (d *PikPak) cachePut(rel string, f pkFile) {
-	d.mu.Lock()
-	d.cache[rel] = cacheEntry{f: f, at: d.now()}
-	d.mu.Unlock()
-}
-
-func (d *PikPak) cacheClear() {
-	d.mu.Lock()
-	d.cache = map[string]cacheEntry{}
-	d.mu.Unlock()
-}
+func (d *PikPak) cacheClear() { d.cache.Clear() }
 
 func (d *PikPak) List(ctx context.Context, relPath string) ([]model.FileInfo, error) {
 	f, err := d.lookup(ctx, relPath)

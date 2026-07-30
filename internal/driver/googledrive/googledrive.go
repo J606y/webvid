@@ -46,6 +46,14 @@ const (
 	folderMime        = "application/vnd.google-apps.folder"
 )
 
+// 路径缓存条数上限。全量索引会 BFS 整个挂载，每列一次目录就把全部子项写进缓存——
+// 不设上限等于把云盘上每一条路径都留在内存里。负条目（已确认不存在）单独限额，
+// 免得把有用的正条目挤光。按每条约 300 字节算，两项合计不到 8MB。
+const (
+	pathCacheEntries = 20000
+	missCacheEntries = 5000
+)
+
 // GDrive 是 Google Drive 驱动（ID 寻址，内部做路径→ID 解析与 TTL 缓存）。
 type GDrive struct {
 	cli      *client
@@ -55,14 +63,17 @@ type GDrive struct {
 	cacheTTL time.Duration
 	chunk    int64
 
-	mu    sync.Mutex
-	cache map[string]cacheEntry // rel 路径 → 解析结果
+	cache *util.TTLCache[gdFile] // rel 路径 → 解析结果（TTL + LRU 上限，自带锁）
+
+	mu     sync.Mutex
+	flight map[string]*lookupWait // rel 路径 → 正在跑的解析，同路径只跑一趟
 }
 
-type cacheEntry struct {
-	f       gdFile
-	at      time.Time
-	missing bool // 已确认不存在，见 cacheMissing
+// lookupWait 是一次在途的路径解析：后到的调用等它出结果，不重复翻页。
+type lookupWait struct {
+	done chan struct{}
+	f    gdFile
+	err  error
 }
 
 // gdFile 是 Drive 文件条目的最小投影。
@@ -109,12 +120,17 @@ func (d *GDrive) Init(ctx context.Context, cfg driver.Config) error {
 		d.now = time.Now
 	}
 	if d.cacheTTL == 0 {
-		d.cacheTTL = 2 * time.Minute
+		// 路径缓存过期后，解析一条路径要把每一级父目录重列一遍（listAll 按 1000 条
+		// 顺序翻页）。2 分钟太短：隔一会儿再点一次视频，就得先把整个父目录翻完才能
+		// 开始拉流。本进程内的写操作都会 cacheClear 兜底，外部改动最多迟这么久看到。
+		d.cacheTTL = 15 * time.Minute
 	}
 	if d.chunk == 0 {
 		d.chunk = defaultChunkSize
 	}
-	d.cache = map[string]cacheEntry{}
+	d.cache = util.NewTTLCache[gdFile](d.cacheTTL, pathCacheEntries, missCacheEntries)
+	d.cache.SetNow(d.now)
+	d.flight = map[string]*lookupWait{}
 
 	clientID := strings.TrimSpace(cfg["client_id"])
 	clientSecret := strings.TrimSpace(cfg["client_secret"])
@@ -183,17 +199,66 @@ func (d *GDrive) listAll(ctx context.Context, parentID string) ([]gdFile, error)
 }
 
 // lookup 把相对路径解析为 gdFile；"" = 根目录。递归解析父级 + TTL 缓存（镜像 pikpak）。
+//
+// 同一路径的并发解析只跑一趟：一屏封面、预载 worker 与播放请求会在同一瞬间打到同一个
+// 目录上，各解析各的就是 N 份完整翻页。后到的等在途那次的结果。
 func (d *GDrive) lookup(ctx context.Context, rel string) (gdFile, error) {
 	rel = strings.Trim(rel, "/")
 	if rel == "" {
 		return gdFile{id: d.root, isDir: true, name: ""}, nil
 	}
-	if e, ok := d.cacheGet(rel); ok {
-		if e.missing {
-			return gdFile{}, driver.ErrNotFound
+	for {
+		if f, missing, ok := d.cache.Get(rel); ok {
+			if missing {
+				return gdFile{}, driver.ErrNotFound
+			}
+			return f, nil
 		}
-		return e.f, nil
+		w, lead := d.beginLookup(rel)
+		if lead {
+			f, err := d.resolve(ctx, rel)
+			d.endLookup(rel, w, f, err)
+			return f, err
+		}
+		select {
+		case <-w.done:
+		case <-ctx.Done():
+			return gdFile{}, ctx.Err()
+		}
+		if !errors.Is(w.err, context.Canceled) {
+			return w.f, w.err
+		}
+		// 领跑者是被它自己的 ctx 掐掉的，与本次调用无关（本次的 ctx 还活着，
+		// 上面的 select 已经验过），重来一趟：要么这次命中缓存，要么自己领跑。
 	}
+}
+
+// beginLookup 登记一次解析，lead=true 表示由本次调用负责真去解析。
+func (d *GDrive) beginLookup(rel string) (*lookupWait, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.flight == nil { // 测试可能不经 Init 直接构造
+		d.flight = map[string]*lookupWait{}
+	}
+	if w, ok := d.flight[rel]; ok {
+		return w, false
+	}
+	w := &lookupWait{done: make(chan struct{})}
+	d.flight[rel] = w
+	return w, true
+}
+
+// endLookup 交出结果并唤醒等待者。等待者只在 done 关闭之后读 f/err，故此处赋值安全。
+func (d *GDrive) endLookup(rel string, w *lookupWait, f gdFile, err error) {
+	d.mu.Lock()
+	delete(d.flight, rel)
+	d.mu.Unlock()
+	w.f, w.err = f, err
+	close(w.done)
+}
+
+// resolve 真去解析一次：递归解析父级 → 列出父目录 → 顺带缓存全部同级项。
+func (d *GDrive) resolve(ctx context.Context, rel string) (gdFile, error) {
 	parentRel := path.Dir(rel)
 	if parentRel == "." {
 		parentRel = ""
@@ -220,43 +285,18 @@ func (d *GDrive) lookup(ctx context.Context, rel string) (gdFile, error) {
 	if match != nil {
 		return *match, nil
 	}
-	d.cacheMissing(rel)
+	// 记住「这个路径不存在」。只缓存找得到的路径时，每查一次不存在的路径都要把父目录
+	// 整个重列一遍——上传前的探测、播放前的 Stat 都在这条路径上，目标目录一大就是
+	// 成千上万次列举。
+	// 安全性：所有让路径由无变有的写操作（Put/MakeDir/Rename/Move/Copy）成功后都会
+	// cacheClear，负缓存不会盖住刚建好的文件；外部改动则和正缓存一样受 TTL 约束。
+	d.cache.PutMissing(rel)
 	return gdFile{}, driver.ErrNotFound
 }
 
-// cacheGet 返回缓存条目；条目可能是「已确认不存在」，调用方须查 missing 后再用 f。
-func (d *GDrive) cacheGet(rel string) (cacheEntry, bool) {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	e, ok := d.cache[rel]
-	if !ok || d.now().Sub(e.at) > d.cacheTTL {
-		return cacheEntry{}, false
-	}
-	return e, true
-}
+func (d *GDrive) cachePut(rel string, f gdFile) { d.cache.Put(rel, f) }
 
-// cacheMissing 记住「这个路径不存在」。只缓存找得到的路径时，每查一次不存在的路径
-// 都要把父目录整个重列一遍——上传前的探测、播放前的 Stat 都在这条路径上，
-// 目标目录一大就是成千上万次列举。
-// 安全性：所有让路径由无变有的写操作（Put/MakeDir/Rename/Move/Copy）成功后都会
-// cacheClear，负缓存不会盖住刚建好的文件；外部改动则和正缓存一样受 TTL 约束。
-func (d *GDrive) cacheMissing(rel string) {
-	d.mu.Lock()
-	d.cache[rel] = cacheEntry{at: d.now(), missing: true}
-	d.mu.Unlock()
-}
-
-func (d *GDrive) cachePut(rel string, f gdFile) {
-	d.mu.Lock()
-	d.cache[rel] = cacheEntry{f: f, at: d.now()}
-	d.mu.Unlock()
-}
-
-func (d *GDrive) cacheClear() {
-	d.mu.Lock()
-	d.cache = map[string]cacheEntry{}
-	d.mu.Unlock()
-}
+func (d *GDrive) cacheClear() { d.cache.Clear() }
 
 func (d *GDrive) List(ctx context.Context, relPath string) ([]model.FileInfo, error) {
 	f, err := d.lookup(ctx, relPath)
@@ -305,7 +345,10 @@ func (d *GDrive) Link(ctx context.Context, relPath string) (*driver.Link, error)
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+tok)
 	// alt=media 需带 Bearer 头 → 上层被迫走代理中转（见 handler_raw：带 Header 的直链不 302）。
-	u := driveAPIBase + "/files/" + url.PathEscape(f.id) + "?alt=media&supportsAllDrives=true"
+	// acknowledgeAbuse：Google 把某些文件（多为体积大、传播广的压缩包/媒体）标记为可疑，
+	// 不带这个参数就直接 403 拒绝下载。这里挂载的是用户自己的云盘，风险由本人承担。
+	u := driveAPIBase + "/files/" + url.PathEscape(f.id) +
+		"?alt=media&supportsAllDrives=true&acknowledgeAbuse=true"
 	return &driver.Link{URL: u, Header: h, Size: f.size, Mod: f.modified}, nil
 }
 

@@ -61,7 +61,12 @@ defineExpose({
   font-size: 12px; letter-spacing: 3px; color: var(--text-dim);
   text-transform: uppercase; margin-bottom: 8px;
 }
-.feat-title { font-size: 34px; font-weight: 800; margin-bottom: 8px; text-shadow: 0 2px 14px rgba(0, 0, 0, .6); }
+/* 横幅高度固定（420px）且 overflow:hidden：34px 的标题一旦换到第三行，
+   上面的 kicker 会被顶出可视区。长文件名一律两行封顶。 */
+.feat-title {
+  font-size: 34px; font-weight: 800; margin-bottom: 8px; text-shadow: 0 2px 14px rgba(0, 0, 0, .6);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
 .feat-meta { margin-bottom: 18px; font-size: 13px; }
 .feat :deep(.el-carousel__indicators--horizontal) {
   left: auto; right: 26px; bottom: 14px; transform: none;

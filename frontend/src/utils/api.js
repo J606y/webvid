@@ -36,7 +36,8 @@ export const api = {
     played: (body) => http.post('/media/played', body, { silent: true }),
   },
   video: {
-    info: (path) => http.get('/video/info', { params: { path } }),
+    // hevc：本机的 HEVC 解码能力，决定服务端直出还是重编码（见 utils/codec）
+    info: (path, hevc) => http.get('/video/info', { params: { path, hevc } }),
   },
 
   tasks: {

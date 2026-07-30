@@ -1,6 +1,7 @@
 package server
 
 import (
+	"math/rand/v2"
 	"path"
 	"strconv"
 	"time"
@@ -55,7 +56,117 @@ func (s *Server) mediaVisFilter(sql string, args []any, kind, col string) (strin
 	return sql, args
 }
 
-// GET /api/media/list?kind=video|image&sort=modified|name&order=asc|desc&limit=&offset=&parent=
+const (
+	// randomSampleWindows 随机取样切几段。一段 = 索引上连续的一截；切成多段是为了让抽到的
+	// 片子散布全库，而不是同一批时间里连着的几十个——那往往就是同一部剧的同一季。
+	randomSampleWindows = 8
+	// randomSampleRetries 窗口撞车后的补抽次数上限。别为凑满最后一条无限查下去。
+	randomSampleRetries = 8
+)
+
+// randomFullFetch 候选集不超过这个数就整个取回来在内存里洗：一次索引有序扫描而已，
+// 抽样绝对均匀，也不用操心窗口撞车。绝大多数库都在这一支。测试会调小它以覆盖切窗口那支。
+var randomFullFetch = 2000
+
+// mediaFilter 拼出「本用户可见的、该类型的媒体文件」条件，作用于 files 单表（列名 path）。
+func (s *Server) mediaFilter(c *gin.Context, kind, parent string) (string, []any) {
+	sql := ` WHERE is_dir=0 AND ext_type=?`
+	args := []any{kind}
+	sql, args = baseFilter(sql, args, getUser(c).VisibleBase(), "path")
+	sql, args = s.mediaVisFilter(sql, args, kind, "path")
+	if parent != "" {
+		sql += ` AND substr(path,1,length(?)+1)=?||'/'`
+		args = append(args, parent, parent)
+	}
+	return sql, args
+}
+
+// mediaSelect 取一页媒体。
+//
+// 分页与排序压进子查询、只作用于 files 单表，取回那几行之后才 LEFT JOIN 播放历史。
+// 早先是先 JOIN 再 ORDER BY ... OFFSET，SQLite 得把跳过的每一行都连一次历史表：
+// 60 万行的库上「查看全部」往后翻实测要 177~560ms，压进子查询后是 4.6ms。
+//
+// LEFT JOIN 播放历史带出续播位置：网格卡片与「最近播放」货架用同一套进度条，
+// 同一个视频不该在货架上有进度、进网格就没有。无历史的行 COALESCE 成 0。
+//
+// 外层必须再写一次 ORDER BY：子查询的行序不保证透传到外层。这层只排 limit 行，可忽略。
+func (s *Server) mediaSelect(c *gin.Context, where string, wargs []any, orderBy string, limit, offset int) ([]mediaItem, error) {
+	q := `SELECT f.path, f.name, f.size, f.modified,
+			COALESCE(h.position, 0), COALESCE(h.duration, 0)
+		FROM (SELECT path, name, size, modified FROM files` + where +
+		` ORDER BY ` + orderBy + ` LIMIT ? OFFSET ?) f
+		LEFT JOIN play_history h ON h.path=f.path AND h.user_id=?
+		ORDER BY f.` + orderBy
+	args := append(append([]any{}, wargs...), limit, offset, getUser(c).ID)
+	rows, err := s.db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []mediaItem{}
+	for rows.Next() {
+		var it mediaItem
+		if err := rows.Scan(&it.Path, &it.Name, &it.Size, &it.Modified, &it.Position, &it.Duration); err != nil {
+			return nil, err
+		}
+		items = append(items, it)
+	}
+	return items, rows.Err()
+}
+
+// mediaRandom 随机抽一批媒体（Featured 推荐位与「随机抽样」首页）。
+//
+// 早先是 ORDER BY RANDOM()：SQLite 得把候选集整个读出来排一遍，代价与 LIMIT 无关——
+// 60 万行的库实测 670ms，且随行数超线性恶化。现在先数一次候选集，再在
+// idx_files_ext_type 上按 modified 有序切几段随机窗口取回，同一条件下实测 34ms。
+func (s *Server) mediaRandom(c *gin.Context, kind, parent string, limit int) ([]mediaItem, error) {
+	where, wargs := s.mediaFilter(c, kind, parent)
+	var total int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM files`+where, wargs...).Scan(&total); err != nil {
+		return nil, err
+	}
+	if total == 0 {
+		return []mediaItem{}, nil
+	}
+	// 取回的每一段仍是索引序，洗一遍才像随机
+	shuffle := func(items []mediaItem) []mediaItem {
+		rand.Shuffle(len(items), func(i, j int) { items[i], items[j] = items[j], items[i] })
+		if len(items) > limit {
+			items = items[:limit]
+		}
+		return items
+	}
+	if total <= randomFullFetch {
+		all, err := s.mediaSelect(c, where, wargs, "modified DESC", total, 0)
+		if err != nil {
+			return nil, err
+		}
+		return shuffle(all), nil
+	}
+	// 候选集够大才切窗口。此时 total > randomFullFetch >= limit >= want，偏移量恒有效。
+	windows := min(limit, randomSampleWindows)
+	per := (limit + windows - 1) / windows
+	seen := make(map[string]bool, limit)
+	out := make([]mediaItem, 0, limit)
+	for attempt := 0; len(out) < limit && attempt < windows+randomSampleRetries; attempt++ {
+		want := min(per, limit-len(out))
+		batch, err := s.mediaSelect(c, where, wargs, "modified DESC", want, rand.IntN(total-want+1))
+		if err != nil {
+			return nil, err
+		}
+		for _, it := range batch {
+			if !seen[it.Path] { // 窗口可能撞在一起
+				seen[it.Path] = true
+				out = append(out, it)
+			}
+		}
+	}
+	return shuffle(out), nil
+}
+
+// GET /api/media/list?kind=video|image&sort=modified|name|random&order=asc|desc&limit=&offset=&parent=
+// sort=random 不认 offset：随机抽样没有「下一页」，前端首页也不翻页。
 func (s *Server) mediaList(c *gin.Context) {
 	kind := c.Query("kind")
 	if kind != "video" && kind != "image" {
@@ -70,54 +181,39 @@ func (s *Server) mediaList(c *gin.Context) {
 	if offset < 0 {
 		offset = 0
 	}
-	sortCol := "f.modified"
+	parent := ""
+	if raw := c.Query("parent"); raw != "" {
+		p, err := fs.NormPath(raw)
+		if err != nil {
+			fsError(c, err)
+			return
+		}
+		parent = p
+	}
+
+	if c.Query("sort") == "random" {
+		items, err := s.mediaRandom(c, kind, parent, limit)
+		if err != nil {
+			Fail500(c, err)
+			return
+		}
+		OK(c, gin.H{"items": items})
+		return
+	}
+
+	sortCol := "modified"
 	if c.Query("sort") == "name" {
-		sortCol = "f.name"
+		sortCol = "name"
 	}
 	dir := "DESC"
 	if c.Query("order") == "asc" {
 		dir = "ASC"
 	}
-	orderBy := sortCol + " " + dir
-	if c.Query("sort") == "random" { // 随机抽样（Featured 推荐位）
-		orderBy = "RANDOM()"
-	}
-
-	// LEFT JOIN 播放历史带出续播位置：网格卡片与「最近播放」货架用同一套进度条，
-	// 同一个视频不该在货架上有进度、进网格就没有。无历史的行 COALESCE 成 0。
-	sql := `SELECT f.path, f.name, f.size, f.modified,
-			COALESCE(h.position, 0), COALESCE(h.duration, 0)
-		FROM files f LEFT JOIN play_history h ON h.path=f.path AND h.user_id=?
-		WHERE f.is_dir=0 AND f.ext_type=?`
-	args := []any{getUser(c).ID, kind}
-	sql, args = baseFilter(sql, args, getUser(c).VisibleBase(), "f.path")
-	sql, args = s.mediaVisFilter(sql, args, kind, "f.path")
-	if parent := c.Query("parent"); parent != "" {
-		p, err := fs.NormPath(parent)
-		if err != nil {
-			fsError(c, err)
-			return
-		}
-		sql += ` AND substr(f.path,1,length(?)+1)=?||'/'`
-		args = append(args, p, p)
-	}
-	sql += ` ORDER BY ` + orderBy + ` LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-
-	rows, err := s.db.Query(sql, args...)
+	where, wargs := s.mediaFilter(c, kind, parent)
+	items, err := s.mediaSelect(c, where, wargs, sortCol+" "+dir, limit, offset)
 	if err != nil {
 		Fail500(c, err)
 		return
-	}
-	defer rows.Close()
-	items := []mediaItem{}
-	for rows.Next() {
-		var it mediaItem
-		if err := rows.Scan(&it.Path, &it.Name, &it.Size, &it.Modified, &it.Position, &it.Duration); err != nil {
-			Fail500(c, err)
-			return
-		}
-		items = append(items, it)
 	}
 	OK(c, gin.H{"items": items})
 }

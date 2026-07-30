@@ -34,10 +34,15 @@
         <p class="dim">推迟期间不会在后台预载，浏览到的封面与源信息改为当场加载。</p>
       </template>
       <template v-else-if="preState.loaded && preload.running">
-        <el-progress :percentage="preloadPct" :stroke-width="8" />
+        <!-- 清点阶段总数还没算出来，百分比恒为 0，走不确定态的条，别让人以为一开局就卡住 -->
+        <el-progress v-if="counting" :percentage="100" :indeterminate="true" :show-text="false" :stroke-width="8" />
+        <el-progress v-else :percentage="preloadPct" :stroke-width="8" />
         <p>正在预载：<span class="dim">{{ preload.current || '…' }}</span></p>
         <!-- 总数只含真要下载/探测的项，已缓存的不算——否则进度条一开局就停在缓存占比上 -->
-        <p>已处理 <b>{{ preload.done }}</b> / {{ preload.total }} 项</p>
+        <p v-if="!counting">已处理 <b>{{ preload.done }}</b> / {{ preload.total }} 项<template
+            v-if="elapsed">，本轮已跑 {{ elapsed }}</template>
+        </p>
+        <p v-else-if="elapsed">本轮已跑 {{ elapsed }}</p>
         <p>封面 <b>{{ preload.covers }}</b>{{ coverOf }} · 视频源信息 <b>{{ preload.probes }}</b>{{ probeOf }} 已缓存</p>
       </template>
       <template v-else>
@@ -88,7 +93,7 @@ const props = defineProps({ active: { type: Boolean, default: false } })
 const progress = ref({ running: false, scanned: 0, current: '', err: '' })
 const preload = ref({
   running: false, total: 0, done: 0, covers: 0, probes: 0, current: '', err: '',
-  snoozed: false, resume_at: '', pending: 0, failed: 0, fail_note: '', will_retry: false,
+  snoozed: false, resume_at: '', started_at: '', phase: '', pending: 0, failed: 0, fail_note: '', will_retry: false,
   cover_total: 0, probe_total: 0,
 })
 // coverOf / probeOf 是「/ 多少」这半截分母：没有它，光看「封面 2952」对不上索引里的
@@ -96,8 +101,27 @@ const preload = ref({
 // （mp4 一类浏览器直接能播的不需要探测）。还没读到分母时不显示，免得写出「/ 0」。
 const coverOf = computed(() => (preload.value.cover_total ? ` / ${preload.value.cover_total}` : ''))
 const probeOf = computed(() => (preload.value.probe_total ? ` / ${preload.value.probe_total}` : ''))
+// 保留一位小数：单件最坏两三分钟（抽帧 60s×2 + 探测 45s）、并发才 2，总数上千时
+// 整数百分比几十分钟才跳一格，看着就像卡死了。
 const preloadPct = computed(() =>
-  preload.value.total > 0 ? Math.round((preload.value.done / preload.value.total) * 100) : 0)
+  preload.value.total > 0
+    ? Math.round((preload.value.done / preload.value.total) * 1000) / 10
+    : 0)
+// counting 清点阶段：要对全库每个媒体查一次缓存，几万条要好几秒，这期间总数还是 0。
+const counting = computed(() => preload.value.phase === 'counting')
+// elapsed 本轮已跑多久。百分比走得慢，真正能说明「后台还在动」的是这个和「已处理 N / M」。
+// 一分钟内按秒走，跟着轮询一跳一跳的，看着就知道没死；nowTs 每轮轮询更新一次。
+const nowTs = ref(Date.now())
+const elapsed = computed(() => {
+  const t = Date.parse(preload.value.started_at || '')
+  if (isNaN(t)) return ''
+  const sec = Math.floor(Math.max(0, nowTs.value - t) / 1000)
+  if (sec < 60) return `${sec} 秒`
+  const min = Math.floor(sec / 60)
+  if (min < 60) return `${min} 分钟`
+  const h = Math.floor(min / 60)
+  return min % 60 ? `${h} 小时 ${min % 60} 分钟` : `${h} 小时`
+})
 // 推迟到点：一天后基本都落在「明天 HH:MM」，跨重启恢复时也可能是今天
 const snoozeNote = computed(() => {
   const at = fmtTime(preload.value.resume_at)
@@ -113,7 +137,11 @@ const preFailed = computed(() => !preState.value.loaded && !!preState.value.err)
 // 已有数字后又刷新失败：留住上一次的值，底部说明一句，免得进度条僵在那里看不出是断了
 const staleErr = computed(() =>
   (idxState.value.loaded && idxState.value.err) || (preState.value.loaded && preState.value.err) || '')
+const POLL_MS = 1500
 let pollTimer = null
+// 每侧各记一个在途标记：接口偶尔慢过一个轮询间隔时，别把请求越堆越多
+let idxInflight = false
+let preInflight = false
 
 function fmtTime(iso) {
   const t = new Date(iso || '')
@@ -124,38 +152,63 @@ function fmtTime(iso) {
   return `${day}${t.getHours()}:${String(t.getMinutes()).padStart(2, '0')} `
 }
 
-// 两个 progress 接口都是 silent：1.5s 一次的轮询若连不上，逐次弹 toast 会刷屏。
-// 失败改为就地呈现——首次失败给「重试」，已有数字时留住上一次的值并继续轮询自愈。
-// allSettled 而非 all：一个挂了不牵连另一张卡。
-async function loadProgress() {
-  const [idx, pre] = await Promise.allSettled([
-    api.admin.index.progress(),
-    api.admin.preload.progress(),
-  ])
-  if (idx.status === 'fulfilled') {
-    progress.value = idx.value
-    idxState.value = { loaded: true, err: '' }
-  } else {
-    idxState.value = { ...idxState.value, err: idx.reason?.message || '请求失败' }
-    console.error(idx.reason)
-  }
-  if (pre.status === 'fulfilled') {
-    preload.value = pre.value
-    preState.value = { loaded: true, err: '' }
-  } else {
-    preState.value = { ...preState.value, err: pre.reason?.message || '请求失败' }
-    console.error(pre.reason)
-  }
-  // 轮询：任一侧在跑就开着；读不到状态时也保持轮询，好在服务恢复后自动补上数字
-  const busy = (idxState.value.loaded && progress.value.running) ||
-    (preState.value.loaded && preload.value.running) ||
-    !!idxState.value.err || !!preState.value.err
-  if (busy && !pollTimer) {
-    pollTimer = setInterval(loadProgress, 1500)
-  } else if (!busy && pollTimer) {
+function startPoll() {
+  if (!pollTimer) pollTimer = setInterval(loadProgress, POLL_MS)
+}
+function stopPoll() {
+  if (pollTimer) {
     clearInterval(pollTimer)
     pollTimer = null
   }
+}
+// 轮询：任一侧在跑就开着；读不到状态时也保持轮询，好在服务恢复后自动补上数字。
+// 首个响应到齐之前一律开着——那会儿还不知道后台是不是正忙。
+function syncPoll() {
+  const busy = (idxState.value.loaded && progress.value.running) ||
+    (preState.value.loaded && preload.value.running) ||
+    !idxState.value.loaded || !preState.value.loaded ||
+    !!idxState.value.err || !!preState.value.err
+  if (busy) startPoll()
+  else stopPoll()
+}
+
+// 两个 progress 接口都是 silent：1.5s 一次的轮询若连不上，逐次弹 toast 会刷屏。
+// 失败改为就地呈现——首次失败给「重试」，已有数字时留住上一次的值并继续轮询自愈。
+// 两侧各发各的、各自渲染：预载那一侧是纯内存读取，不该被索引接口的耗时拖着一起等。
+function loadIndex() {
+  if (idxInflight) return
+  idxInflight = true
+  api.admin.index.progress().then((p) => {
+    progress.value = p
+    idxState.value = { loaded: true, err: '' }
+  }).catch((e) => {
+    idxState.value = { ...idxState.value, err: e?.message || '请求失败' }
+    console.error(e)
+  }).finally(() => {
+    idxInflight = false
+    syncPoll()
+  })
+}
+
+function loadPreload() {
+  if (preInflight) return
+  preInflight = true
+  api.admin.preload.progress().then((p) => {
+    preload.value = p
+    preState.value = { loaded: true, err: '' }
+  }).catch((e) => {
+    preState.value = { ...preState.value, err: e?.message || '请求失败' }
+    console.error(e)
+  }).finally(() => {
+    preInflight = false
+    syncPoll()
+  })
+}
+
+function loadProgress() {
+  nowTs.value = Date.now()
+  loadIndex()
+  loadPreload()
 }
 async function rebuild() {
   await api.admin.index.rebuild()
@@ -215,19 +268,30 @@ async function resumePreload() {
 
 watch(() => props.active, (a) => { if (a) loadProgress() })
 
-onMounted(loadProgress)
-onBeforeUnmount(() => {
-  if (pollTimer) clearInterval(pollTimer)
+onMounted(() => {
+  // 先起轮询，再发第一次请求：定时器若等第一次响应回来才装，首个响应之前一次都不轮询——
+  // 后台正跑着索引或预载时，进页面看到的是一动不动的占位。首个响应到了自会按状态收摊。
+  startPoll()
+  loadProgress()
 })
+onBeforeUnmount(stopPoll)
 </script>
 
 <style scoped>
 .index-pane { display: flex; gap: 16px; flex-wrap: wrap; }
+/* min-height 按内容最多的那一态定（预载卡空闲：两行数字 + 四行说明 + 按钮）：
+   卡内段落数随运行/空闲分支变化，没有下限时整排卡片会随状态切换忽高忽低。 */
 .index-card {
-  padding: 24px; min-width: 380px; flex: 1 1 380px; max-width: 460px;
+  padding: 24px; min-width: 380px; flex: 1 1 380px; max-width: 460px; min-height: 260px;
   display: flex; flex-direction: column; gap: 10px; align-items: flex-start;
 }
 .index-card p { margin: 0; font-size: 14px; }
+/* 「正在扫描 / 正在预载」后面的路径每 1.5 秒换一次，长路径一换行卡片就长高一截。
+   路径单行截断；前面的标签固定 5 个字，剩下的宽度都给它。 */
+.index-card p .dim {
+  display: inline-block; max-width: calc(100% - 5em); vertical-align: bottom;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
 .index-title { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
 .index-card .el-progress { width: 100%; }
 .index-actions { display: flex; gap: 8px; }

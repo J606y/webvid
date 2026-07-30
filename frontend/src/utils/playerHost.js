@@ -13,6 +13,8 @@ import Artplayer from 'artplayer'
 import router from '../router'
 import { api } from './api'
 import { attachMediaSession } from './mediaSession'
+import { demoteHevc } from './codec'
+import { forgetVideoInfo } from './videoInfo'
 import { playRoute } from './path'
 import { pipMode, isPipActive, enterPip, exitPip, onPipChange } from './pip'
 
@@ -33,12 +35,14 @@ let container = null   // 自建的播放器容器，随实例生灭
 let curPath = ''       // 当前实例播的逻辑路径，用于判断"接回"还是"换片"
 let curHls = false     // 当前实例是否 HLS（错误文案分流）
 let curReason = ''     // 转封装 / 转码，供接回时还原页面徽标
+let curHevc = false    // 本次直出靠的是本机自报的 HEVC 能力（解码失败时据此降级）
 let onFail = null      // 播放页给的运行期中断回调；寄存后置空（页面已不在，没处弹面板）
 let detachMS = null    // 系统「正在播放」会话摘除句柄
 let detachPip = null   // 画中画事件摘除句柄
 let reportTimer = null // 进度定时上报句柄
 let parked = false     // 是否寄存中（人在别的页面，视频在小窗里播）
 let pipAdded = false   // 画中画按钮是否已加（能力要等元数据就绪才准，加得比构造晚）
+let failAt = -1        // 首次报错时的播放位置（<0 = 未记），见 markFail
 
 // ---- 进度上报（原在 Play.vue，寄存期间必须继续跑，故随实例落到这里）----
 
@@ -131,9 +135,11 @@ export function destroy() {
   if (container) { container.remove(); container = null }
   curPath = ''
   curReason = ''
+  curHevc = false
   onFail = null
   parked = false
   pipAdded = false
+  failAt = -1
 }
 
 // snapshot 给播放页判断"这部片是不是还在我手上活着"：在的话页面直接复用，
@@ -143,11 +149,46 @@ export function snapshot(path) {
   return { isHls: curHls, reason: curReason }
 }
 
+// markFail 记下断点。落到兜底面板之前，ArtPlayer 已经重设 url 重载过两轮
+// （RECONNECT_TIME_MAX，每轮间隔 1 秒），hls.js 的恢复同理 —— 那时 currentTime 早已归零，
+// 「从中断处重试」实际是从头开始。位置只在第一次报错时记；一旦恢复播放即作废。
+function markFail() {
+  if (failAt < 0 && art && isFinite(art.currentTime)) failAt = art.currentTime
+}
+
+// mediaErrMessage 原生播放路径的中断原因。浏览器肯说的只有 MediaError.code，
+// 但足以把"取不到流"和"解不了码"分开 —— 过去两者落到同一句"网络不稳"，
+// 用户照着那句话排查，方向从一开始就是错的。
+function mediaErrMessage() {
+  const code = art && art.video.error ? art.video.error.code : 0
+  if (code === 3) return '播放已中断：视频流无法解码，该文件可能已损坏。'
+  if (code === 4) {
+    return curHls
+      ? '播放已中断：转码会话已结束，请重试。'
+      : '播放已中断：无法读取视频源，存储可能暂时不可用。'
+  }
+  return curHls
+    ? '播放已中断：视频流断开，可能是网络不稳或转码会话已结束。'
+    : '播放已中断：视频流断开，可能是网络不稳或文件已不可访问。'
+}
+
+// hlsErrMessage hls.js 的中断原因。它只交出状态码（响应体拿不到，xhr-loader 给的
+// text 是 statusText），但状态码已经够分事：404/410 是转码会话被回收，
+// 5xx 是服务端从存储取不到源（见 internal/stream 首块失败返回的 502）。
+function hlsErrMessage(data, isMedia) {
+  if (isMedia) return '播放已中断：视频流无法解码，该文件可能已损坏。'
+  const code = data.response?.code || 0
+  if (code === 404 || code === 410) return '播放已中断：转码会话已结束，请重试。'
+  if (code >= 500) return '播放已中断：服务器无法从存储读取这段视频，请稍后重试。'
+  return '播放已中断：视频流断开，可能是网络不稳或转码会话已结束。'
+}
+
 // fail 运行期播放中断 → 交播放页落到可重试、可下载的兜底面板。
 // 探测期失败一直有 unsupported 兜底，运行期（转码会话被回收、分片报错、断流）却没有，
 // 播放器只会无尽转圈。断点随回调交出去，重试从中断处接着播。
 function fail(msg) {
-  const at = art && isFinite(art.currentTime) ? art.currentTime : 0
+  let at = failAt
+  if (at < 0) at = art && isFinite(art.currentTime) ? art.currentTime : 0
   const cb = onFail
   // 切断 ArtPlayer 自带的断流重连，别让它在实例销毁后继续重设 url
   if (art) art.off('video:error')
@@ -182,6 +223,25 @@ function nativeHlsFirst() {
   return !!document.createElement('video').canPlayType('application/vnd.apple.mpegurl')
 }
 
+// loadPolicy 拼一条 hls.js 的加载策略。
+//
+// hls.js 的默认耐心远短于服务端：分片首字节 10 秒即判超时（fragLoadPolicy 默认
+// maxTimeToFirstByteMs=10000），播放列表 20 秒。而服务端起播时要等 ffmpeg 出东西，
+// 全程不发一个字节 —— event 模式的列表最长等 30 秒，init.mp4 20 秒，分片 90 秒
+// （拖到未生成处要 -ss 重启，从头起跑）。默认值下客户端每 10 秒断一次、重试几轮，
+// 每一轮都在服务端多留一个阻塞的 handler，而服务端的耐心一次都没用上。
+// 这里把两头对齐：客户端等得比服务端久一点，超时才真的意味着出了问题。
+function loadPolicy(firstByteMs, totalMs, timeoutRetry, errorRetry) {
+  return {
+    default: {
+      maxTimeToFirstByteMs: firstByteMs,
+      maxLoadTimeMs: totalMs,
+      timeoutRetry: { maxNumRetry: timeoutRetry, retryDelayMs: 0, maxRetryDelayMs: 0 },
+      errorRetry: { maxNumRetry: errorRetry, retryDelayMs: 1000, maxRetryDelayMs: 8000 },
+    },
+  }
+}
+
 async function create(slot, opts) {
   const { path, url, isHls, resumeAt = 0 } = opts
 
@@ -196,6 +256,7 @@ async function create(slot, opts) {
   curPath = path
   curHls = isHls
   curReason = opts.reason || ''
+  curHevc = !!opts.hevc
   onFail = opts.onFail || null
 
   container = document.createElement('div')
@@ -244,13 +305,19 @@ async function create(slot, opts) {
         if (hls) hls.destroy()
         // 续播：从 resumeAt 起（0 = 从头）。event 型列表（remux 边跑边播）默认会追
         // "直播沿"，显式 startPosition 强制落到目标位置；vod 列表本就全时间轴可 seek。
-        hls = new Hls({ startPosition: resumeAt })
+        hls = new Hls({
+          startPosition: resumeAt,
+          manifestLoadPolicy: loadPolicy(45000, 60000, 2, 1),
+          playlistLoadPolicy: loadPolicy(45000, 60000, 2, 2),
+          fragLoadPolicy: loadPolicy(100000, 140000, 2, 6),
+        })
         let netRetry = 0
         let mediaRetry = 0
         // 运行期中断兜底：转码会话被回收、分片请求失败、断流都在这里报 fatal。
         // 网络与解码类先按 hls.js 的既定手法就地恢复，连续恢复不了才落兜底面板。
         hls.on(Hls.Events.ERROR, (_, data) => {
           if (!data.fatal) return
+          markFail() // 断点要在恢复动作之前记：startLoad / recoverMediaError 都会动 currentTime
           if (data.type === Hls.ErrorTypes.NETWORK_ERROR && netRetry < 3) {
             netRetry++
             hls.startLoad()
@@ -261,9 +328,14 @@ async function create(slot, opts) {
             hls.recoverMediaError()
             return
           }
-          fail(data.type === Hls.ErrorTypes.NETWORK_ERROR
-            ? '播放已中断：视频流断开，可能是网络不稳或转码会话已结束。'
-            : '播放已中断：视频流无法解码，该文件可能已损坏。')
+          // 本机报了支持 HEVC，实际解不动：能力探测再准也只是探测，这里是它的退路。
+          // 记下来改走转码，并丢掉按旧能力算出的探测结论，重试即生效。
+          if (data.type === Hls.ErrorTypes.MEDIA_ERROR && curHevc && demoteHevc()) {
+            forgetVideoInfo(curPath)
+            fail('播放已中断：这台设备解不了该视频的编码，已改用转码播放。')
+            return
+          }
+          fail(hlsErrMessage(data, data.type === Hls.ErrorTypes.MEDIA_ERROR))
         })
         hls.loadSource(src)
         hls.attachMedia(video)
@@ -298,12 +370,12 @@ async function create(slot, opts) {
   art.on('video:pause', () => report(art.currentTime))
   art.on('video:seeked', () => report(art.currentTime))
   art.on('video:ended', () => report(art.duration || 0, true)) // 播完 → 后端归零，下次从头
+  art.on('video:playing', () => { failAt = -1 }) // 又播起来了，之前记的断点作废
   // 原生播放路径（直连文件 / iPhone 的原生 HLS）的运行期兜底：hls.js 分支自有恢复策略，
   // 这里只管没有 hls 实例的情形。先让 ArtPlayer 自带的重连试两轮，仍不行才落兜底面板。
   art.on('error', (_, times) => {
+    markFail() // 记在放行重连之前：ArtPlayer 每轮重连都会重设 url，currentTime 随即归零
     if (hls || times < 2) return
-    fail(curHls
-      ? '播放已中断：视频流断开，可能是网络不稳或转码会话已结束。'
-      : '播放已中断：视频流断开，可能是网络不稳或文件已不可访问。')
+    fail(mediaErrMessage())
   })
 }

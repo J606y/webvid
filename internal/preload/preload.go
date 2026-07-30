@@ -34,9 +34,23 @@ func (s *Service) workers() int {
 	return s.conf.PreloadWorkers()
 }
 
-// coverWidth 预载封面的请求宽度：远端盘下载的那份与宽度无关、各尺寸共用，
-// 本地盘按此宽度生成。判缓存与真下载必须用同一个宽度，否则本地盘会判空。
-const coverWidth = 400
+// coverWidth 预载封面的请求宽度。远端盘下载的那份与宽度无关、各尺寸共用；本地盘按
+// 此宽度生成，缓存键含宽度，所以这里的取值必须落在 thumb 的档位上（见 thumb.normWidth），
+// 且要选前端真正会请求的那一档——不然预载生成的封面谁也命中不了，做完等于没做。
+// 取小档：卡片、网格、详情弹窗、锁屏封面全在这一档，只有首页 hero 的大图走大档，
+// 它统共几张，第一次打开时现场生成即可。
+const coverWidth = 640
+
+// coverTimeout / probeTimeout 是单件活的时限。
+//
+// 预载跑在没有 deadline 的后台 ctx 上，底下的云盘客户端也不设全局超时（那会把大文件
+// 传输一起砍断）——云盘一挂，取封面就永久卡在那里。worker 统共两条，卡住两条即
+// 进度永远停在原地，界面却还显示「运行中」，看着像后台在忙，其实一件活也没在动。
+// 封面 3 分钟覆盖抽帧的 60s×2，源信息 2 分钟覆盖 ffprobe 的 45s，都留了余量。
+const (
+	coverTimeout = 3 * time.Minute
+	probeTimeout = 2 * time.Minute
+)
 
 // SnoozeFor 是「不是现在」的推迟时长，到点自动继续。
 const SnoozeFor = 24 * time.Hour
@@ -51,18 +65,51 @@ const AutoEvery = 6 * time.Hour
 // snoozeKey 是推迟到点时刻在 settings 里的键，重启后据此恢复计时。
 const snoozeKey = "preload_snooze_until"
 
-// admin 全视野身份（预载扫全部可见媒体，权限过滤由挂载可见性开关承担）。
-var admin = &user.User{Role: "admin", BasePath: "/"}
+// 本轮阶段，见 Progress.Phase。
+const (
+	phaseCounting = "counting"
+	phaseRunning  = "running"
+)
+
+// errNoAdmin 库里一个启用的管理员都没有，预载这一轮做不了。
+var errNoAdmin = errors.New("没有可用的管理员账号，预载读不了云盘上的文件")
+
+// adminUser 取本轮预载的身份：库里第一个启用的管理员（全视野，权限过滤由挂载的
+// 可见性开关承担）。
+//
+// 必须是真实存在的账号，不能就地捏一个。云盘上抽封面、探源信息都要 ffmpeg 走回环
+// /api/raw，令牌由这个身份的 ID 签出（media/hls.go 的 input），鉴权中间件拿这个 ID
+// 回查 users 表——users 自增主键从 1 起，ID 为零的假身份签出的令牌一律 401，
+// 云盘的封面与源信息一件也做不成，且失败会以「网络故障」的面目出现，无从查起。
+func (s *Service) adminUser() (*user.User, error) {
+	u := &user.User{Enabled: true}
+	err := s.db.QueryRow(
+		`SELECT id, username, role, base_path FROM users
+		 WHERE role='admin' AND enabled=1 ORDER BY id LIMIT 1`).
+		Scan(&u.ID, &u.Username, &u.Role, &u.BasePath)
+	switch {
+	case errors.Is(err, sql.ErrNoRows), err == nil && u.ID <= 0:
+		return nil, errNoAdmin
+	case err != nil:
+		return nil, err
+	}
+	return u, nil
+}
 
 // Progress 是预载进度快照（供后台展示）。
 type Progress struct {
-	Running    bool   `json:"running"`
-	Total      int64  `json:"total"`   // 待处理媒体总数
-	Done       int64  `json:"done"`    // 已处理
-	Covers     int64  `json:"covers"`  // 已就绪封面数
-	Probes     int64  `json:"probes"`  // 已探测视频数
-	Current    string `json:"current"` // 当前处理路径
-	Err        string `json:"err"`
+	Running bool   `json:"running"`
+	Total   int64  `json:"total"`   // 待处理媒体总数
+	Done    int64  `json:"done"`    // 已处理
+	Covers  int64  `json:"covers"`  // 已就绪封面数
+	Probes  int64  `json:"probes"`  // 已探测视频数
+	Current string `json:"current"` // 当前处理路径
+	Err     string `json:"err"`
+	// Phase 本轮跑到哪一步：counting = 正在清点已缓存的部分，running = 正在预载，
+	// 空 = 没在跑。清点要对全库每个媒体查一次缓存，几万条要好几秒，这期间 Total 还是 0、
+	// 算出来的百分比恒为 0——前端得知道这不是卡住了，该显示不确定态的进度条。
+	Phase      string `json:"phase"`
+	StartedAt  string `json:"started_at"` // 本轮开始运行的时刻（RFC3339）
 	FinishedAt string `json:"finished_at"`
 	Snoozed    bool   `json:"snoozed"`   // 已点「不是现在」，推迟中
 	ResumeAt   string `json:"resume_at"` // 推迟到点、自动继续的时刻（RFC3339）
@@ -75,7 +122,7 @@ type Progress struct {
 	// Failed / FailNote 本轮没能取到封面或源信息的项数与头一条原因。这类失败往往秒回
 	// （云盘不给缩略图、抽帧崩了、探测连不上），只记日志的话界面上只剩「跑完了」，
 	// 用户看到的就是「后台好像没干活」——必须摆到卡片上。
-	Failed    int64 `json:"failed"`
+	Failed    int64  `json:"failed"`
 	FailNote  string `json:"fail_note"`
 	WillRetry bool   `json:"will_retry"` // 已排好下一次重试（失败项会再试一遍）
 }
@@ -94,6 +141,8 @@ type Service struct {
 	probeTotal  int64 // 需要探测的视频数（分母）
 	current     string
 	errMsg      string
+	phase       string    // 本轮阶段，见 Progress.Phase
+	startedAt   time.Time // 本轮开始运行的时刻，卡片据此显示「本轮已跑多久」
 	finishedAt  string
 	gen         int // 轮次代际：新一轮取代旧轮，旧 goroutine 靠比对 gen 停手
 	cancel      context.CancelFunc
@@ -124,10 +173,13 @@ func (s *Service) Progress() Progress {
 	p := Progress{
 		Running: s.running, Total: s.total,
 		Done: s.done.Load(), Covers: s.covers.Load(), Probes: s.probes.Load(),
-		Current: s.current, Err: s.errMsg, FinishedAt: s.finishedAt,
+		Current: s.current, Err: s.errMsg, Phase: s.phase, FinishedAt: s.finishedAt,
 		Failed: s.failed.Load(), FailNote: s.failNote,
 		CoverTotal: s.coverTotal, ProbeTotal: s.probeTotal,
 		WillRetry: s.retryTimer != nil,
+	}
+	if !s.startedAt.IsZero() {
+		p.StartedAt = s.startedAt.UTC().Format(time.RFC3339)
 	}
 	if !s.snoozeUntil.IsZero() {
 		p.Snoozed = true
@@ -329,6 +381,7 @@ func (s *Service) stop() {
 	s.retryIn = 0
 	s.running = false
 	s.current = ""
+	s.phase = ""
 	s.errMsg = ""
 	s.finishedAt = ""
 	s.pending = nil
@@ -354,8 +407,14 @@ func (s *Service) start(files []fileRow, resume bool) {
 	s.cancel = cancel
 	s.running = true
 	s.current = ""
+	s.phase = phaseRunning
+	if !resume {
+		s.phase = phaseCounting // 清完点才知道总数，这之前百分比没有意义
+	}
 	s.errMsg = ""
 	s.pending = nil
+	// 每次开跑都重记：推迟一天后「继续」沿用旧时刻的话，卡片会说这一轮跑了 24 小时
+	s.startedAt = time.Now()
 	s.disarmRetryLocked() // 这一轮就是重试，旧的定时器作废
 	if !resume {
 		s.failNote = ""
@@ -376,10 +435,18 @@ func (s *Service) run(ctx context.Context, gen int, files []fileRow, resume bool
 			s.finish(gen, nil, nil)
 		}
 	}()
+	// 身份要先拿到：云盘上的活全靠它签的回环令牌，取不到就整轮免谈——
+	// 硬跑只会得到一整轮 401，还被记成「网络故障」。
+	u, err := s.adminUser()
+	if err != nil {
+		log.Printf("[preload] %v", err)
+		s.finish(gen, err, nil)
+		return
+	}
 	if !resume {
 		// 清点要挨个查缓存（几万条媒体要几秒），先把话说在前头，别让卡片空着一个 0%
 		s.setCurrent(gen, "清点已缓存的部分…")
-		t := s.collect()
+		t := s.collect(u)
 		files = t.todo
 		s.mu.Lock()
 		if s.gen != gen {
@@ -388,6 +455,7 @@ func (s *Service) run(ctx context.Context, gen int, files []fileRow, resume bool
 		}
 		s.total = int64(len(files))
 		s.coverTotal, s.probeTotal = t.coverTotal, t.probeTotal
+		s.phase = phaseRunning
 		s.mu.Unlock()
 		// 计数基线：已缓存的那部分先记上，之后每做成一件再加一。卡片显示的始终是
 		// 「现在缓存了多少」，不是「这一轮跑了多少」。
@@ -420,7 +488,7 @@ func (s *Service) run(ctx context.Context, gen int, files []fileRow, resume bool
 				}
 			}()
 			s.setCurrent(gen, fr.path)
-			s.process(ctx, gen, fr)
+			s.process(ctx, gen, u, fr)
 			if s.isCurrent(gen) {
 				s.done.Add(1)
 			}
@@ -487,10 +555,13 @@ type tally struct {
 // 服务器没有 ffmpeg/ffprobe）一律不进——它们会被瞬间跳过，算进总数只会让进度条
 // 一开局就停在「已缓存占比」上，剩下的真活全挤在最后一小截里。
 // covers/probes 是此刻真实的缓存量，用作计数基线，卡片据此显示「已缓存多少」。
-func (s *Service) collect() tally {
+func (s *Service) collect(u *user.User) tally {
 	var t tally
+	// 探测缓存一次拉进内存：一项一条 SELECT 的话，几万条媒体要好几秒，还全挤在
+	// SQLite 那四条连接上，把同时在跑的索引进度查询也拖住（见 media.Probed）。
+	probed := s.media.Probed()
 	for _, fr := range s.visible() {
-		switch s.thumbs.Cover(admin, fr.path, coverWidth) {
+		switch s.thumbs.Cover(u, fr.path, coverWidth) {
 		case thumb.CoverReady:
 			t.covers++
 			t.coverTotal++
@@ -498,7 +569,7 @@ func (s *Service) collect() tally {
 			fr.needCover = true
 			t.coverTotal++
 		}
-		switch s.media.ProbeStatus(fr.path, model.FileInfo{
+		switch s.media.ProbeStatus(probed, fr.path, model.FileInfo{
 			Name: fr.name, Size: fr.size, Modified: parseMod(fr.modified)}) {
 		case media.ProbeReady:
 			t.probes++
@@ -523,7 +594,12 @@ func (s *Service) countCached() {
 	if running {
 		return
 	}
-	t := s.collect()
+	u, err := s.adminUser()
+	if err != nil {
+		log.Printf("[preload] %v", err)
+		return
+	}
+	t := s.collect(u)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.gen != gen || s.running {
@@ -538,11 +614,13 @@ func (s *Service) countCached() {
 // 重复调一遍虽是缓存命中，但计数会把已经计进基线的那份再加一次。
 // 计数只在本轮仍是当前轮时累加：Clear/新一轮已把计数归零，在途的这几项跑完再加
 // 会让界面显示出刚被删掉的缓存（gen 判定同 setCurrent）。
-func (s *Service) process(ctx context.Context, gen int, fr fileRow) {
+func (s *Service) process(ctx context.Context, gen int, u *user.User, fr fileRow) {
 	// 封面：远端盘下载落盘一份（宽度无关，各尺寸共用）；本地盘生成默认宽度。
 	// file 为空 = 只拿到一次性直链、没能落盘，对预载而言等同没做成。
 	if fr.needCover {
-		_, file, err := s.thumbs.Get(ctx, admin, fr.path, coverWidth)
+		cctx, cancel := context.WithTimeout(ctx, coverTimeout)
+		_, file, err := s.thumbs.Get(cctx, u, fr.path, coverWidth)
+		cancel()
 		switch {
 		case err == nil && file != "":
 			if s.isCurrent(gen) {
@@ -555,7 +633,10 @@ func (s *Service) process(ctx context.Context, gen int, fr fileRow) {
 	// 视频源信息：direct 扩展名由 handler 按扩展名秒判，无需 ffprobe；其余探测并回写 media_info。
 	if fr.needProbe {
 		fi := model.FileInfo{Name: fr.name, Size: fr.size, Modified: parseMod(fr.modified)}
-		if _, err := s.media.Decide(ctx, admin, fr.path, fi); err == nil {
+		pctx, cancel := context.WithTimeout(ctx, probeTimeout)
+		_, err := s.media.Decide(pctx, u, fr.path, fi)
+		cancel()
+		if err == nil {
 			if s.isCurrent(gen) {
 				s.probes.Add(1)
 			}
@@ -595,6 +676,7 @@ func (s *Service) finish(gen int, cerr error, left []fileRow) {
 	}
 	s.running = false
 	s.current = ""
+	s.phase = ""
 	if s.cancel != nil {
 		s.cancel()
 		s.cancel = nil
@@ -608,16 +690,25 @@ func (s *Service) finish(gen int, cerr error, left []fileRow) {
 		log.Printf("[preload] 预载已停下：剩余 %d 项待继续", len(left))
 		return
 	}
+	// 有没做成的就不算完成。finishedAt 是「这一轮把活干完了」的凭证，失败项照样写上，
+	// 等于让界面拿一句「已完成」把红字盖过去——每一项都失败也报圆满，用户看到的
+	// 就是「后台说做完了，可就是没有封面」。
+	//
+	// 进度条走到 100% 是对的：done 记的是「处理过几项」，成败都算，不然会停在半路
+	// 却又不再运行，更像是卡死。做没做成由失败数与下面这行日志说清。
+	failed := s.failed.Load()
+	if failed > 0 {
+		log.Printf("[preload] 预载停下：%d / %d 项没做成，已缓存封面 %d / 源信息 %d",
+			failed, s.total, s.covers.Load(), s.probes.Load())
+		// 最常见的一幕：进程刚起、云盘驱动还没连上，整轮秒败——不重试的话这些封面
+		// 就永远只能等浏览时当场生成。做成的那部分不会重做。
+		s.armRetryLocked()
+		return
+	}
 	s.finishedAt = time.Now().UTC().Format(time.RFC3339)
+	s.retryIn = 0
 	log.Printf("[preload] 预载完成：本轮做了 %d 项，已缓存封面 %d / 源信息 %d",
 		s.total, s.covers.Load(), s.probes.Load())
-	// 有没做成的就排一次重试。最常见的一幕：进程刚起、云盘驱动还没连上，整轮秒败——
-	// 不重试的话这些封面就永远只能等浏览时当场生成。全做成了则把退避清零。
-	if s.failed.Load() > 0 {
-		s.armRetryLocked()
-	} else {
-		s.retryIn = 0
-	}
 }
 
 func (s *Service) isCurrent(gen int) bool {

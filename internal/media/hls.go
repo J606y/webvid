@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log"
 	"math"
@@ -14,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -32,6 +34,11 @@ const (
 	maxSessions = 2               // 转码会话并发上限（PLAN：并发 ≤2，超出驱逐最久未用）
 	idleTTL     = 5 * time.Minute // 空闲回收
 	waitAhead   = 12              // vod 模式：请求分片超出当前进度 N 个以内等待，否则 -ss 重启
+
+	// maxDuration 播放列表按时长展开的上限。分片数直接由 ffprobe 报的时长算出，
+	// 而畸形/损坏文件报出个荒谬的时长是常事——vodPlaylist 会照单全收，一次请求
+	// 就拼出一个几 GB 的字符串。24 小时已是 21600 个分片，再长的一律按 24 小时算。
+	maxDuration = 24 * 3600.0
 )
 
 // Service 是 HLS 转码会话管理器。
@@ -60,13 +67,45 @@ type Service struct {
 	// 那是用户正在等的前台活）。后台可调，见 conf.MediaJobs。
 	jobs *util.Gate
 
+	// stop 关停 janitor；stopOnce 保证 Close 可重复调用。
+	stop     chan struct{}
+	stopOnce sync.Once
+
 	mu       sync.Mutex
 	sessions map[string]*session
 	probes   map[string]Decision
+	flight   map[string]*probeWait // 在途探测，同一文件只跑一趟 ffprobe
+	stats    map[string]statEntry  // 短时文件信息，见 rememberStat
 }
 
+// probeWait 是一次在途探测：后到的调用等它的结论，不再各占一个闸位。
+type probeWait struct {
+	done chan struct{}
+	d    Decision
+	err  error
+}
+
+// statEntry 是刚问过云盘的文件信息。播一部片子要连着三次拿同一份 size/mtime
+// （/video/info、建会话、拉流），在云盘上每次都是一发网络请求。
+type statEntry struct {
+	fi model.FileInfo
+	at time.Time
+}
+
+// statTTL 文件信息的复用时限：只覆盖「点开视频」这一串连续动作，超时即回落真去问。
+const statTTL = 2 * time.Minute
+
+// maxLead vod 模式下转码最多领先播放位置几个分片（150×4s = 10 分钟）。
+// var 以便测试调小，见 paceLeadFrom。
+var maxLead = 150
+
 // SetJobs 热调 ffmpeg/ffprobe 并发上限，下一件活起跑即生效。
+// main 接线后这与 thumb 的封面生成闸是同一把（见 SetGate），调任一边都即时生效。
 func (s *Service) SetJobs(n int) { s.jobs.SetLimit(n) }
+
+// SetGate 换用外部传入的 ffmpeg 总闸，仅供启动接线（此时尚无并发）。
+// 与 thumb 各建一把闸的话，后台设置项写着「总闸 N」，实际能同时跑的 ffmpeg 是 2N。
+func (s *Service) SetGate(g *util.Gate) { s.jobs = g }
 
 func New(f *fs.FS, dataDir, baseURL string, secret []byte, db *sql.DB) *Service {
 	root := filepath.Join(dataDir, "transcode")
@@ -75,6 +114,8 @@ func New(f *fs.FS, dataDir, baseURL string, secret []byte, db *sql.DB) *Service 
 	s := &Service{fs: f, root: root, baseURL: baseURL, secret: secret,
 		internalToken: auth.RandomPassword(32), db: db,
 		sessions: map[string]*session{}, probes: map[string]Decision{},
+		flight: map[string]*probeWait{}, stats: map[string]statEntry{},
+		stop: make(chan struct{}),
 		jobs: util.NewGate(2)} // 保守默认，main 随后按 conf.MediaJobs 调整
 	go s.janitor()
 	return s
@@ -103,6 +144,12 @@ func (s *Service) input(u *user.User, logical string) (string, error) {
 	}
 	if lp, ok := drv.(driver.LocalPather); ok {
 		return lp.AbsPath(rel)
+	}
+	// 回环 /api/raw 挂在鉴权组下，令牌里的用户 ID 会被中间件回查 users 表，而自增主键
+	// 从 1 起——ID 不合法就是一次注定 401 的请求。发出去只会让「身份配错了」以
+	// 「云盘连不上」的面目回到调用方，无从查起，所以这里当场说清。
+	if u == nil || u.ID <= 0 {
+		return "", fmt.Errorf("内部回环缺少有效的用户身份，读不了云盘上的文件")
 	}
 	tok, _, err := auth.SignToken(u.ID, s.secret)
 	if err != nil {
@@ -139,8 +186,16 @@ func (s *Service) FrameJPEG(ctx context.Context, u *user.User, logical, out stri
 	return FrameAt(ctx, ff, in, out, width, s.internalToken, "3", "0")
 }
 
+// FrameFirst 取输入的第一帧写入 out（缩放到宽 width 的 JPEG），不做任何定位。
+// 静态图片（JPEG/PNG 等单帧输入）必须走这个：单帧输入上任何定位参数都会把唯一那一帧
+// 丢掉，而 ffmpeg 退出码仍是 0，只是什么也没输出。
+func FrameFirst(ctx context.Context, ff, in, out string, width int) error {
+	return FrameAt(ctx, ff, in, out, width, "", "")
+}
+
 // FrameAt 用 ffmpeg 抽取视频某一帧写入 out（缩放到宽 width 的 JPEG）。依次尝试 offsets 中
 // 各秒点（如 "3","0"：先 3s 处、失败回退取首帧），第一个产出非空帧的即成功；全部失败返回最后错误。
+// 偏移传空串表示不定位，直接取输入的第一帧——静态图片（单帧输入）必须这样调，见 try。
 // in 为本地绝对路径或 http(s) 直链——http 输入自动挂 -reconnect 续传与 X-Internal-Auth 头
 // （见 httpInputArgs），本地输入这些旗标为空、无副作用，故一份代码兼容云盘回环抽帧与本地抽帧。
 // ff 为 ffmpeg 可执行路径，internalToken 为回环鉴权令牌（本地或无令牌传 ""）。
@@ -151,7 +206,12 @@ func FrameAt(ctx context.Context, ff, in, out string, width int, internalToken s
 		cctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 		defer cancel()
 		// -threads 1：抽一帧而已，默认多线程解码会吃满所有核心（并发另有 jobs 闸把关）
-		a := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1", "-ss", ss}
+		a := []string{"-hide_banner", "-loglevel", "error", "-nostdin", "-threads", "1"}
+		// 单帧输入（JPEG/PNG 等静态图）上任何定位都会把唯一那一帧丢掉：ffmpeg 退出码仍是 0，
+		// 只是什么也没输出——连 -ss 0 都会。所以偏移为空时一个定位参数都不加。
+		if ss != "" {
+			a = append(a, "-ss", ss)
+		}
 		a = append(a, httpInputArgs(in, internalToken)...)
 		a = append(a, "-i", in, "-frames:v", "1",
 			"-vf", fmt.Sprintf("scale=%d:-2", width), "-q:v", "5", "-y", tmp)
@@ -173,35 +233,72 @@ func FrameAt(ctx context.Context, ff, in, out string, width int, internalToken s
 }
 
 // Decide 探测文件并给出播放决策（结果按 路径+size+mtime 内存缓存）。
+// 后台优先级，供预载调用；用户正在等的那次探测走 decideNow(…, true)。
 func (s *Service) Decide(ctx context.Context, u *user.User, logical string, fi model.FileInfo) (Decision, error) {
+	return s.decideNow(ctx, u, logical, fi, false)
+}
+
+// decideNow 探测并给出决策。foreground=true 表示有人正盯着屏幕等，闸上插队（见 util.Gate）。
+//
+// 同一文件的并发探测只跑一趟：详情卡与播放页会同时来问、用户连点两下也会，
+// 各探各的就是两个 ffprobe 各占一个闸位，而闸总共才两个。
+func (s *Service) decideNow(ctx context.Context, u *user.User, logical string, fi model.FileInfo, foreground bool) (Decision, error) {
 	_, ffprobe := s.tools()
 	if ffprobe == "" {
 		return Decision{}, ErrNoFFmpeg
 	}
 	key := logical + "|" + strconv.FormatInt(fi.Size, 10) + "|" + strconv.FormatInt(fi.Modified.UnixNano(), 10)
-	s.mu.Lock()
-	if d, ok := s.probes[key]; ok {
+	for {
+		s.mu.Lock()
+		d, hit := s.probes[key]
 		s.mu.Unlock()
-		return d, nil
-	}
-	s.mu.Unlock()
+		if hit {
+			return d, nil
+		}
 
-	// 持久层（预载已探测 / 上次会话回写）：size+modified 未变即复用，免云盘现场探测。
-	if d, ok := s.loadInfo(logical, fi); ok {
-		s.cacheMem(key, d)
-		return d, nil
-	}
+		// 持久层（预载已探测 / 上次会话回写）：size+modified 未变即复用，免云盘现场探测。
+		if d, ok := s.loadInfo(logical, fi); ok {
+			s.cacheMem(key, d)
+			return d, nil
+		}
 
+		w, lead := s.beginProbe(key)
+		if lead {
+			d, err := s.runDecide(ctx, u, logical, fi, key, foreground)
+			s.endProbe(key, w, d, err)
+			return d, err
+		}
+		select {
+		case <-w.done:
+		case <-ctx.Done():
+			return Decision{}, ctx.Err()
+		}
+		if !errors.Is(w.err, context.Canceled) {
+			return w.d, w.err
+		}
+		// 领跑的那次是被它自己的 ctx 掐掉的（本次的还活着，上面的 select 已验过），
+		// 重来一趟：要么这次命中缓存，要么自己领跑。
+	}
+}
+
+// runDecide 真跑一次 ffprobe 并落两级缓存。
+func (s *Service) runDecide(ctx context.Context, u *user.User, logical string, fi model.FileInfo, key string, foreground bool) (Decision, error) {
 	input, err := s.input(u, logical)
 	if err != nil {
 		return Decision{}, err
 	}
-	// 排队等 ffprobe 名额：缓存全落空时（如刚建完索引）这里会同时涌进成百上千个探测请求
-	release, err := s.jobs.Acquire(ctx)
+	// 排队等 ffprobe 名额：缓存全落空时（如刚建完索引）这里会同时涌进成百上千个探测请求。
+	// 前台插队，否则点开一个视频要等后台预载手头那两个跨国大文件探完，最坏 45 秒。
+	acquire := s.jobs.Acquire
+	if foreground {
+		acquire = s.jobs.AcquirePriority
+	}
+	release, err := acquire(ctx)
 	if err != nil {
 		return Decision{}, err
 	}
 	defer release()
+	_, ffprobe := s.tools()
 	po, err := runProbe(ctx, ffprobe, input, s.internalToken)
 	if err != nil {
 		return Decision{}, err
@@ -210,6 +307,51 @@ func (s *Service) Decide(ctx context.Context, u *user.User, logical string, fi m
 	s.cacheMem(key, d)
 	s.saveInfo(logical, fi, d)
 	return d, nil
+}
+
+// beginProbe 登记一次探测，lead=true 表示由本次调用负责真去跑。
+func (s *Service) beginProbe(key string) (*probeWait, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.flight == nil { // 测试可能不经 New 直接构造
+		s.flight = map[string]*probeWait{}
+	}
+	if w, ok := s.flight[key]; ok {
+		return w, false
+	}
+	w := &probeWait{done: make(chan struct{})}
+	s.flight[key] = w
+	return w, true
+}
+
+// endProbe 交出结论并唤醒等待者。等待者只在 done 关闭之后读 d/err，故此处赋值安全。
+func (s *Service) endProbe(key string, w *probeWait, d Decision, err error) {
+	s.mu.Lock()
+	delete(s.flight, key)
+	s.mu.Unlock()
+	w.d, w.err = d, err
+	close(w.done)
+}
+
+// rememberStat 记下刚问到的文件信息，供紧接着的建会话复用（见 statEntry）。
+func (s *Service) rememberStat(logical string, fi model.FileInfo) {
+	s.mu.Lock()
+	if len(s.stats) > 512 {
+		s.stats = map[string]statEntry{}
+	}
+	s.stats[logical] = statEntry{fi: fi, at: time.Now()}
+	s.mu.Unlock()
+}
+
+// recallStat 取回 statTTL 内记下的文件信息。
+func (s *Service) recallStat(logical string) (model.FileInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	e, ok := s.stats[logical]
+	if !ok || time.Since(e.at) > statTTL {
+		return model.FileInfo{}, false
+	}
+	return e.fi, true
 }
 
 func (s *Service) cacheMem(key string, d Decision) {
@@ -227,18 +369,19 @@ func (s *Service) loadInfo(logical string, fi model.FileInfo) (Decision, bool) {
 		return Decision{}, false
 	}
 	var (
-		d                        Decision
-		vc, ac, aa, hv, ha, size int64
+		d                            Decision
+		vc, vh, ac, aa, hv, ha, size int64
 	)
 	mod := modKey(fi.Modified)
 	err := s.db.QueryRow(
-		`SELECT size, video_copy, audio_copy, audio_aac, has_video, has_audio, duration FROM media_info
+		`SELECT size, video_copy, video_hevc, audio_copy, audio_aac, has_video, has_audio, duration FROM media_info
 		 WHERE path=? AND modified=?`, logical, mod).
-		Scan(&size, &vc, &ac, &aa, &hv, &ha, &d.Duration)
+		Scan(&size, &vc, &vh, &ac, &aa, &hv, &ha, &d.Duration)
 	if err != nil || size != fi.Size {
 		return Decision{}, false
 	}
 	d.VideoCopy, d.AudioCopy, d.AudioAAC, d.HasVideo, d.HasAudio = vc == 1, ac == 1, aa == 1, hv == 1, ha == 1
+	d.VideoHEVC = int(vh)
 	return d, true
 }
 
@@ -249,10 +392,11 @@ func (s *Service) saveInfo(logical string, fi model.FileInfo, d Decision) {
 	}
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO media_info
-		 (path,size,modified,video_copy,audio_copy,audio_aac,has_video,has_audio,duration,probed_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		 (path,size,modified,video_copy,video_hevc,audio_copy,audio_aac,has_video,has_audio,duration,probed_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		logical, fi.Size, modKey(fi.Modified),
-		util.BoolInt(d.VideoCopy), util.BoolInt(d.AudioCopy), util.BoolInt(d.AudioAAC), util.BoolInt(d.HasVideo), util.BoolInt(d.HasAudio),
+		util.BoolInt(d.VideoCopy), d.VideoHEVC,
+		util.BoolInt(d.AudioCopy), util.BoolInt(d.AudioAAC), util.BoolInt(d.HasVideo), util.BoolInt(d.HasAudio),
 		d.Duration, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		log.Printf("[media] media_info 写入失败 %s: %v", logical, err)
@@ -284,8 +428,9 @@ func modKey(t time.Time) string {
 }
 
 // Playlist 返回 index.m3u8 内容（不存在则创建会话并启动 ffmpeg）。
-func (s *Service) Playlist(ctx context.Context, u *user.User, logical string) ([]byte, error) {
-	sess, err := s.ensure(ctx, u, logical)
+// hevcCap 是客户端的 HEVC 解码能力，见 Decision.CopyWith。
+func (s *Service) Playlist(ctx context.Context, u *user.User, logical string, hevcCap int) ([]byte, error) {
+	sess, err := s.ensure(ctx, u, logical, hevcCap)
 	if err != nil {
 		return nil, err
 	}
@@ -293,22 +438,29 @@ func (s *Service) Playlist(ctx context.Context, u *user.User, logical string) ([
 }
 
 // Segment 等待并返回分片文件的本地路径（name ∈ init.mp4 | seg_N.m4s）。
-func (s *Service) Segment(ctx context.Context, u *user.User, logical, name string) (string, error) {
-	sess, err := s.ensure(ctx, u, logical)
+func (s *Service) Segment(ctx context.Context, u *user.User, logical, name string, hevcCap int) (string, error) {
+	sess, err := s.ensure(ctx, u, logical, hevcCap)
 	if err != nil {
 		return "", err
 	}
 	return sess.segment(ctx, name)
 }
 
+// sessionKey 会话表的键。带上客户端能力：同一部 HEVC 片子，能直出的设备拿到的是
+// 原样封装的分片，不能直出的拿到的是 x264 重编码的，两者的分片内容与目录都不能混用。
+func sessionKey(logical string, hevcCap int) string {
+	return logical + "\x00" + strconv.Itoa(hevcCap)
+}
+
 // ensure 取现有会话或新建（Stat+probe 不持全局锁；同 key 并发创建以先入表者为准）。
-func (s *Service) ensure(ctx context.Context, u *user.User, logical string) (*session, error) {
+func (s *Service) ensure(ctx context.Context, u *user.User, logical string, hevcCap int) (*session, error) {
 	ffmpeg, _ := s.tools()
 	if ffmpeg == "" {
 		return nil, ErrNoFFmpeg
 	}
+	key := sessionKey(logical, hevcCap)
 	s.mu.Lock()
-	if sess := s.sessions[logical]; sess != nil {
+	if sess := s.sessions[key]; sess != nil {
 		s.mu.Unlock()
 		sess.touch()
 		return sess, nil
@@ -319,23 +471,28 @@ func (s *Service) ensure(ctx context.Context, u *user.User, logical string) (*se
 	if err != nil {
 		return nil, err
 	}
-	fi, err := drv.Stat(ctx, rel)
+	// /video/info 刚问过同一个文件，几秒内不必再问云盘一次（见 statEntry）
+	fi, ok := s.recallStat(logical)
+	if !ok {
+		if fi, err = drv.Stat(ctx, rel); err != nil {
+			return nil, err
+		}
+		if fi.IsDir {
+			return nil, driver.ErrNotFound
+		}
+		s.rememberStat(logical, fi)
+	}
+	raw, err := s.decideNow(ctx, u, logical, fi, true) // 用户正等着起播
 	if err != nil {
 		return nil, err
 	}
-	if fi.IsDir {
-		return nil, driver.ErrNotFound
-	}
-	dec, err := s.Decide(ctx, u, logical, fi)
-	if err != nil {
-		return nil, err
-	}
+	dec := raw.CopyWith(hevcCap)
 	input, err := s.input(u, logical)
 	if err != nil {
 		return nil, err
 	}
 
-	h := sha1.Sum([]byte(logical))
+	h := sha1.Sum([]byte(key))
 	id := hex.EncodeToString(h[:])[:16]
 	sess := &session{
 		svc:   s,
@@ -344,11 +501,11 @@ func (s *Service) ensure(ctx context.Context, u *user.User, logical string) (*se
 		input: input,
 		dec:   dec,
 		vod:   dec.HasVideo && !dec.VideoCopy && dec.Duration > 0,
-		nSegs: int(math.Ceil(math.Max(dec.Duration, segLen) / segLen)),
+		nSegs: int(math.Ceil(math.Min(math.Max(dec.Duration, segLen), maxDuration) / segLen)),
 	}
 
 	s.mu.Lock()
-	if exist := s.sessions[logical]; exist != nil {
+	if exist := s.sessions[key]; exist != nil {
 		s.mu.Unlock()
 		exist.touch()
 		return exist, nil
@@ -366,15 +523,15 @@ func (s *Service) ensure(ctx context.Context, u *user.User, logical string) (*se
 			}
 		}
 		delete(s.sessions, oldestKey)
-		log.Printf("[media] 会话数达上限，驱逐最久未用 %s", oldestKey)
+		log.Printf("[media] 会话数达上限，驱逐最久未用 %s", oldest.key)
 		go oldest.destroy()
 	}
-	s.sessions[logical] = sess
+	s.sessions[key] = sess
 	s.mu.Unlock()
 
 	if err := os.MkdirAll(sess.dir, 0o755); err != nil {
 		s.mu.Lock()
-		delete(s.sessions, logical)
+		delete(s.sessions, key)
 		s.mu.Unlock()
 		return nil, err
 	}
@@ -387,8 +544,8 @@ func (s *Service) ensure(ctx context.Context, u *user.User, logical string) (*se
 		// 启动即失败：从会话表移除并清理目录，否则坏会话被缓存 idleTTL(5min)，
 		// 期间该文件持续命中并返回旧错误，无法重试播放。
 		s.mu.Lock()
-		if s.sessions[logical] == sess {
-			delete(s.sessions, logical)
+		if s.sessions[key] == sess {
+			delete(s.sessions, key)
 		}
 		s.mu.Unlock()
 		go sess.destroy()
@@ -397,10 +554,18 @@ func (s *Service) ensure(ctx context.Context, u *user.User, logical string) (*se
 	return sess, nil
 }
 
-// janitor 定期回收空闲超时的会话。
+// janitor 定期回收空闲超时的会话，Close 时随之退出。
+// 用 NewTicker 而非 time.Tick：后者的 Ticker 谁都拿不到、停不掉也回收不了。
 func (s *Service) janitor() {
-	for range time.Tick(time.Minute) {
-		s.sweep()
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.stop:
+			return
+		case <-t.C:
+			s.sweep()
+		}
 	}
 }
 
@@ -413,7 +578,7 @@ func (s *Service) sweep() {
 		sess.mu.Unlock()
 		if idle {
 			delete(s.sessions, k)
-			log.Printf("[media] 回收空闲转码会话 %s", k)
+			log.Printf("[media] 回收空闲转码会话 %s", sess.key)
 			go sess.destroy()
 		}
 	}
@@ -422,6 +587,7 @@ func (s *Service) sweep() {
 // Close 关停服务：终止所有在跑的 ffmpeg 并清理会话目录。由 main 在 HTTP 优雅关闭后调用，
 // 避免转码进程变孤儿继续跑完、临时目录残留。
 func (s *Service) Close() {
+	s.stopOnce.Do(func() { close(s.stop) })
 	s.mu.Lock()
 	sessions := s.sessions
 	s.sessions = map[string]*session{}
@@ -515,6 +681,12 @@ func (sess *session) killLocked() {
 	sess.gen++
 }
 
+// transcodeThreads 一路 x264 允许用几个核：核数的一半，至少 1。
+// maxSessions=2，两路同时跑正好用满，机器不会因为看片而没法响应别的请求。
+func transcodeThreads() int {
+	return max(1, runtime.NumCPU()/2)
+}
+
 // destroy 终止进程并删除会话目录（等进程退出，Windows 下句柄未释放删不掉）。
 func (sess *session) destroy() {
 	sess.mu.Lock()
@@ -552,8 +724,15 @@ func (sess *session) ffmpegArgs(from int) []string {
 	if sess.dec.HasVideo {
 		if sess.dec.VideoCopy {
 			a = append(a, "-c:v", "copy")
+			if sess.dec.videoTag != "" {
+				a = append(a, "-tag:v", sess.dec.videoTag) // HEVC 直出需 hvc1，见 Decision.CopyWith
+			}
 		} else {
+			// -threads：不写的话 libx264 按核数开满，一路转码就吃掉整机——转码不受
+			// jobs 闸约束（那是用户正在等的前台活），唯一的约束就是这里。取核数一半，
+			// 留一半给另一路会话、ffprobe/抽帧和 HTTP 本身。
 			a = append(a, "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+				"-threads", strconv.Itoa(transcodeThreads()),
 				"-pix_fmt", "yuv420p",
 				"-force_key_frames", fmt.Sprintf("expr:gte(t,n_forced*%d)", int(segLen)))
 		}
@@ -661,6 +840,9 @@ func (sess *session) segment(ctx context.Context, name string) (string, error) {
 		return "", driver.ErrNotFound
 	}
 	if ready(fp) {
+		if sess.vod {
+			sess.paceLeadFrom(n)
+		}
 		return fp, nil
 	}
 	if !sess.vod {
@@ -671,10 +853,18 @@ func (sess *session) segment(ctx context.Context, name string) (string, error) {
 	// vod 模式：进度窗口内等待，窗口外（含回拖到已驱逐区/进程已停）-ss 重启
 	sess.mu.Lock()
 	sess.advanceCursorLocked()
-	inWindow := sess.cmd != nil && n >= sess.runFrom && n <= sess.cursor+waitAhead
-	if !inWindow {
+	if !sess.inWindowLocked(n) {
+		done := sess.runDone
 		sess.killLocked()
-		sess.startLocked(n)
+		sess.mu.Unlock()
+		// kill 只是发信号，进程要一会儿才真退。等它退了再起新的：否则两路 x264 同时
+		// 按 -threads 跑，瞬时把 CPU 翻倍，还会一起往同一批分片文件里写。
+		waitClosed(done, 3*time.Second)
+		sess.mu.Lock()
+		if !sess.inWindowLocked(n) { // 期间可能已被并发的分片请求重新拉起
+			sess.killLocked()
+			sess.startLocked(n)
+		}
 	}
 	rerr := sess.runErr
 	sess.mu.Unlock()
@@ -682,6 +872,43 @@ func (sess *session) segment(ctx context.Context, name string) (string, error) {
 		return "", rerr
 	}
 	return sess.waitFile(ctx, fp, 90*time.Second)
+}
+
+// inWindowLocked 第 n 个分片是否落在本轮 ffmpeg 够得着的进度窗口内（须持 sess.mu）。
+func (sess *session) inWindowLocked(n int) bool {
+	return sess.cmd != nil && n >= sess.runFrom && n <= sess.cursor+waitAhead
+}
+
+// paceLeadFrom 领先太多就把 ffmpeg 停下来。
+//
+// 不设上限时它会全速把整部片子转完：用户看了五分钟就退出，CPU 和云盘流量照样按整片
+// 付账（event 模式的 -c copy 更是把整个文件拉了一遍），之后还要占着磁盘等 idleTTL 回收。
+// 停下来不影响观看——已生成的分片就在盘上，播放位置追到边界时由上面的窗口判定原地
+// -ss 续转。只对 vod 模式生效：event 模式的列表由 ffmpeg 自己写，中途停掉就再也接不上。
+func (sess *session) paceLeadFrom(n int) {
+	sess.mu.Lock()
+	defer sess.mu.Unlock()
+	if sess.cmd == nil {
+		return
+	}
+	sess.advanceCursorLocked()
+	if sess.cursor-n > maxLead {
+		log.Printf("[media] %s 转码已领先播放位置 %d 个分片，先停下（追上来再续）", sess.key, sess.cursor-n)
+		sess.killLocked()
+	}
+}
+
+// waitClosed 等 ch 关闭，最多等 d。ch 为 nil 直接返回。
+func waitClosed(ch chan struct{}, d time.Duration) {
+	if ch == nil {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ch:
+	case <-t.C:
+	}
 }
 
 // advanceCursorLocked 推进"已连续生成"游标（本轮从 runFrom 起顺序产出）。

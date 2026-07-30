@@ -56,26 +56,52 @@ type probeOut struct {
 }
 
 // Decision 是探测后的 HLS 播放决策（direct/unsupported 在 handler 层判定）。
+//
+// 探测结论与客户端无关，落库即长期有效。唯一与客户端有关的是 HEVC：能不能直出取决于
+// 那台设备解不解，所以这里只记「这条流是几位的 HEVC」，到底 copy 还是重编码由
+// CopyWith 在每次播放时定。
 type Decision struct {
-	VideoCopy bool // 视频流浏览器可解 → -c:v copy（remux）；false = libx264 重编码
+	VideoCopy bool // 视频流各家浏览器都可解 → -c:v copy（remux）；false = 看 VideoHEVC 或重编码
+	VideoHEVC int  // 0=非 HEVC 或该 HEVC 不可直出；8=Main 8bit；10=Main 10bit
 	AudioCopy bool // 音频流浏览器可解 → -c:a copy；false = 转 aac
 	AudioAAC  bool // 音频编码为 aac：copy 进 fMP4 须挂 aac_adtstoasc（ADTS 源如 ts/m2ts 必需，ASC 源直通无害）
 	HasVideo  bool
 	HasAudio  bool
 	Duration  float64 // 秒；<=0 = 未知
+
+	videoTag string // -tag:v 值（HEVC 直出时为 hvc1），空 = 不加
+}
+
+// CopyWith 按客户端的 HEVC 能力（0=不支持 / 8=Main 8bit / 10=含 Main 10bit）定下这次
+// 播放是否可直出。h264/vp9/av1 的结论与客户端无关，原样沿用。
+//
+// 判错的代价是不对称的：多转一次只是费 CPU，判成可直出而对方解不了就是黑屏。因此
+// 能力由客户端自己 isTypeSupported 探出来上报，服务端不按 UA 猜。
+func (d Decision) CopyWith(hevcCap int) Decision {
+	if !d.VideoCopy && d.VideoHEVC > 0 && hevcCap >= d.VideoHEVC {
+		d.VideoCopy = true
+		// HEVC 进 fMP4 必须打 hvc1 标签：ffmpeg 默认写 hev1，Safari 与 MSE 都不认，
+		// 表现为有声音没画面。
+		d.videoTag = "hvc1"
+	}
+	return d
 }
 
 // httpInputArgs http(s) 输入的公共旗标（探测/抽帧/转码共用），本地路径输入返回 nil：
 //   - X-Internal-Auth 头：标识本进程内部回环请求，服务器豁免下载限速、改走单流透传；
-//   - reconnect 系列：流中断/限流(429/5xx)时带 Range 自动续传——没有它 ffmpeg 会把
+//   - reconnect 系列：流中断/限流(403/429/5xx)时带 Range 自动续传——没有它 ffmpeg 会把
 //     半途断流当 EOF，remux 出"合法但截断"的片子；404 等不在列，删除的文件仍快速失败。
+//
+// 403 必须在列：它是 Google Drive 限流的主力返回码，一次限流就会让整场转码当场死掉。
+// 真没权限时 ffmpeg 确实会重连到 -reconnect_delay_max 才罢休，但那种情形 raw 层自己
+// 先重试并快速失败，轮不到这里空转。
 func httpInputArgs(input, internalToken string) []string {
 	if !strings.HasPrefix(input, "http") {
 		return nil
 	}
 	a := []string{
 		"-reconnect", "1", "-reconnect_streamed", "1",
-		"-reconnect_delay_max", "30", "-reconnect_on_http_error", "429,5xx",
+		"-reconnect_delay_max", "30", "-reconnect_on_http_error", "403,429,5xx",
 	}
 	if internalToken != "" {
 		a = append(a, "-headers", "X-Internal-Auth: "+internalToken+"\r\n")
@@ -118,6 +144,25 @@ func playableVideoStream(st *probeStream) bool {
 	return false
 }
 
+// hevcLevel 判定这条 HEVC 流可直出所需的客户端能力：8=Main（8bit 4:2:0）、
+// 10=Main 10（10bit 4:2:0）、0=不是 HEVC 或用了没人普遍支持的像素格式（4:2:2/4:4:4
+// 与 12bit 一律重编码）。
+//
+// 只按像素格式判，不看 profile 字符串——理由同 h264 那条：ffprobe 报的 profile
+// 名称各版本不一，pix_fmt 才是稳定的。
+func hevcLevel(st *probeStream) int {
+	if st.CodecName != "hevc" && st.CodecName != "h265" {
+		return 0
+	}
+	switch st.PixFmt {
+	case "", "yuv420p", "yuvj420p":
+		return 8
+	case "yuv420p10le":
+		return 10
+	}
+	return 0
+}
+
 // decide 从 ffprobe 结果生成决策：取第一条视频流（跳过封面图）与第一条音频流。
 func decide(po *probeOut) Decision {
 	d := Decision{}
@@ -130,6 +175,9 @@ func decide(po *probeOut) Decision {
 		case st.CodecType == "video" && st.Disposition.AttachedPic == 0 && !d.HasVideo:
 			d.HasVideo = true
 			d.VideoCopy = playableVideoStream(st)
+			if !d.VideoCopy {
+				d.VideoHEVC = hevcLevel(st)
+			}
 		case st.CodecType == "audio" && !d.HasAudio:
 			d.HasAudio = true
 			d.AudioCopy = playableAudio[st.CodecName]

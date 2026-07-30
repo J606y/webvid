@@ -133,6 +133,31 @@ func (e *storeEnv) indexed(t *testing.T, p string) bool {
 	return n > 0
 }
 
+// waitScanned 等进度里的「共 N 项」跟上 files 表的真实行数。
+//
+// 增量改动之后的重数是后台跑的（COUNT(*) 抢 SQLite 那几条连接，最坏在 busy_timeout 上
+// 排到 5 秒，不能压在读进度的请求线程里），本次读进度先给上一轮的数字，下一次才是新的。
+// 所以这里要的不是「读一次就对」，而是「有界时间内必须收敛到真实行数」——
+// 一直不收敛（回填被代际号误判作废、goroutine 没起来）依然是失败。
+func (e *storeEnv) waitScanned(t *testing.T) {
+	t.Helper()
+	var rows int64
+	if err := e.d.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&rows); err != nil {
+		t.Fatalf("查询 files: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got := e.idx.Progress().Scanned
+		if got == rows {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("索引条数应跟上实际行数 %d, got %d", rows, got)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
 // waitIndexed 等某条路径进/出索引（后台重扫是异步的）。
 func (e *storeEnv) waitIndexed(t *testing.T, p string, want bool) {
 	t.Helper()
@@ -315,12 +340,6 @@ func TestStorageCreateScansOnlyNewMount(t *testing.T) {
 	if !e.indexed(t, "/B/b.mp4") || !e.indexed(t, marker) {
 		t.Fatal("新增存储不该重建别的存储的索引")
 	}
-	// 「共 N 项」要跟得上：增量改动后读进度会重数一遍真实行数
-	var rows int64
-	if err := e.d.QueryRow(`SELECT COUNT(*) FROM files`).Scan(&rows); err != nil {
-		t.Fatalf("查询 files: %v", err)
-	}
-	if got := e.idx.Progress().Scanned; got != rows {
-		t.Fatalf("索引条数应跟上实际行数 %d, got %d", rows, got)
-	}
+	// 「共 N 项」要跟得上：增量改动后读进度会在后台重数一遍真实行数
+	e.waitScanned(t)
 }

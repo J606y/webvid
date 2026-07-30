@@ -285,7 +285,12 @@ function goDir() {
 }
 
 .vdc-info { padding: 20px 26px 26px; }
-.vdc-title { margin: 0 0 10px; font-size: 24px; font-weight: 800; line-height: 1.25; }
+/* 两行封顶：卡片宽度固定、高度 auto，标题换三四行会让同一批文件的卡片高矮不一，
+   hero 转场的目标尺寸也跟着不稳。完整文件名在下面的「文件名」一行里给全。 */
+.vdc-title {
+  margin: 0 0 10px; font-size: 24px; font-weight: 800; line-height: 1.25;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden;
+}
 .vdc-meta {
   display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px;
   font-size: 13px; margin-bottom: 16px;

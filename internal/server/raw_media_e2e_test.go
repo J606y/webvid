@@ -136,7 +136,7 @@ func TestProxyLoopbackTranscodeE2E(t *testing.T) {
 	deadline := time.Now().Add(90 * time.Second)
 	var playlist string
 	for {
-		b, err := md.Playlist(context.Background(), u, "/代理盘/sample.mkv")
+		b, err := md.Playlist(context.Background(), u, "/代理盘/sample.mkv", 0)
 		if err != nil {
 			t.Fatalf("Playlist: %v", err)
 		}

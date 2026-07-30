@@ -30,6 +30,11 @@ const (
 	StateCanceled State = "canceled"
 )
 
+// terminal 任务是否已到终态：不会再自行变化，可以删除或淘汰。
+func (s State) terminal() bool {
+	return s == StateDone || s == StateError || s == StateCanceled
+}
+
 // 任务组：每组独立队列与 worker 池，线程数可在后台设置里分别调整。
 const (
 	GroupCopy    = "copy"    // 跨存储复制/移动转存
@@ -38,6 +43,11 @@ const (
 
 // maxWorkers 单组线程数上限，防误填超大值把云盘 API 打挂。
 const maxWorkers = 32
+
+// maxTerminal 终态任务（成功/失败/已取消）的保留条数。任务表是内存态，只有用户手动
+// 点「清除已完成」才会变小，而每个任务还扣着完整的文件清单——一次十万文件的转存跑完
+// 仍占着约 20MB。超出这个数就按创建时间淘汰最旧的终态任务；运行中与排队中的一个不动。
+const maxTerminal = 200
 
 var (
 	ErrNotFound  = errors.New("任务不存在")
@@ -409,6 +419,7 @@ func (m *Manager) run(t *Task) {
 		log.Printf("[task] 任务 %s 失败: %v", t.ID, err)
 	}
 	t.mu.Unlock()
+	m.evictTerminal()
 }
 
 // runTaskFn 执行任务体并捕获 panic，转为普通错误——后台 worker goroutine 的 panic
@@ -459,8 +470,42 @@ func (m *Manager) SubmitIn(groupName string, owner int64, name string, fn Func) 
 	}
 	m.tasks[t.ID] = t
 	m.mu.Unlock()
+	m.evictTerminal()
 	enqueue(g, t)
 	return t
+}
+
+// evictTerminal 把终态任务压回 maxTerminal 条，淘汰创建最早的那些。
+// 提交任务与任务收尾后各调一次——任务表只在这两处变长。
+func (m *Manager) evictTerminal() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.tasks) <= maxTerminal {
+		return
+	}
+	old := make([]*Task, 0, len(m.tasks))
+	for _, t := range m.tasks {
+		t.mu.Lock()
+		st := t.State
+		t.mu.Unlock()
+		if st.terminal() {
+			old = append(old, t)
+		}
+	}
+	if len(old) <= maxTerminal {
+		return
+	}
+	// 排序口径与 List 一致（创建时间，同秒按 ID），淘汰顺序才与用户看到的顺序对得上。
+	// ID 与 CreatedAt 建好即不再变，读它们不必持任务锁。
+	sort.Slice(old, func(i, j int) bool {
+		if old[i].CreatedAt != old[j].CreatedAt {
+			return old[i].CreatedAt < old[j].CreatedAt
+		}
+		return old[i].ID < old[j].ID
+	})
+	for _, t := range old[:len(old)-maxTerminal] {
+		delete(m.tasks, t.ID)
+	}
 }
 
 // List 返回快照数组：admin 全量，否则仅本人；按创建时间倒序（同秒按 ID 稳定排序）。
@@ -638,7 +683,7 @@ func (m *Manager) Remove(id string, owner int64, isAdmin bool) error {
 		return err
 	}
 	t.mu.Lock()
-	terminal := t.State == StateDone || t.State == StateError || t.State == StateCanceled
+	terminal := t.State.terminal()
 	t.mu.Unlock()
 	if !terminal {
 		return ErrBadState

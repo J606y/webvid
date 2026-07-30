@@ -65,6 +65,10 @@ const (
 // 缓存命中返回的 URL 必然仍有效（加速换链重取也安全）；每次播放/下载省一轮 Graph。
 const linkTTL = 10 * time.Minute
 
+// linkCacheEntries 直链缓存条数上限。过期条目原样滞留在 map 里、只有写操作才整表清空，
+// 浏览器每滚一屏都要 Stat + Link 一批文件，不设上限就是随浏览过的文件数一路长。
+const linkCacheEntries = 4096
+
 // OneDrive 同时承担 onedrive / onedrive_app 两种模式。
 type OneDrive struct {
 	mode    string
@@ -73,22 +77,25 @@ type OneDrive struct {
 	persist func(driver.Config) error
 	chunk   int64 // 上传分块大小（测试可调小）
 
-	linkMu    sync.Mutex
-	linkCache map[string]cachedLink // relPath → 直链，写操作后整表清空
+	linkOnce  sync.Once
+	linkCache *util.TTLCache[cachedLink] // relPath → 直链，写操作后整表清空
 }
 
 type cachedLink struct {
 	url  string
 	size int64
 	mod  time.Time
-	exp  time.Time
 }
 
-func (d *OneDrive) clearLinks() {
-	d.linkMu.Lock()
-	d.linkCache = map[string]cachedLink{}
-	d.linkMu.Unlock()
+// links 取直链缓存。测试可能不经 Init 直接构造驱动，就地补一个。
+func (d *OneDrive) links() *util.TTLCache[cachedLink] {
+	d.linkOnce.Do(func() {
+		d.linkCache = util.NewTTLCache[cachedLink](linkTTL, linkCacheEntries, 0)
+	})
+	return d.linkCache
 }
+
+func (d *OneDrive) clearLinks() { d.links().Clear() }
 
 // item 是 Graph driveItem 的最小投影。
 type item struct {
@@ -127,7 +134,7 @@ func (d *OneDrive) Init(ctx context.Context, cfg driver.Config) error {
 	if d.chunk == 0 {
 		d.chunk = defaultChunkSize
 	}
-	d.linkCache = map[string]cachedLink{}
+	d.links().Clear() // 复用同一实例重新 Init（改配置）时不留旧盘的直链
 
 	c := &client{
 		mode:         d.mode,
@@ -213,12 +220,9 @@ func (d *OneDrive) Stat(ctx context.Context, relPath string) (model.FileInfo, er
 	// 直链缓存里已有该文件的 size/mtime（与 downloadUrl 同一响应取回）：直接复用。
 	// 代理/转码播放每次打开都会 Stat+Link，ffmpeg 探测+seek 连开多次，
 	// 叠加拉流本身的请求量容易撞 Graph 限流；缓存只含文件（目录无 downloadUrl）。
-	d.linkMu.Lock()
-	if cl, ok := d.linkCache[relPath]; ok && time.Now().Before(cl.exp) {
-		d.linkMu.Unlock()
+	if cl, _, ok := d.links().Get(relPath); ok {
 		return model.FileInfo{Name: path.Base(relPath), Size: cl.size, Modified: cl.mod}, nil
 	}
-	d.linkMu.Unlock()
 
 	var it item
 	if err := d.cli.req(ctx, http.MethodGet,
@@ -233,12 +237,9 @@ func (d *OneDrive) Stat(ctx context.Context, relPath string) (model.FileInfo, er
 }
 
 func (d *OneDrive) Link(ctx context.Context, relPath string) (*driver.Link, error) {
-	d.linkMu.Lock()
-	if cl, ok := d.linkCache[relPath]; ok && time.Now().Before(cl.exp) {
-		d.linkMu.Unlock()
+	if cl, _, ok := d.links().Get(relPath); ok {
 		return &driver.Link{URL: cl.url, Size: cl.size, Mod: cl.mod}, nil
 	}
-	d.linkMu.Unlock()
 
 	var it item
 	if err := d.cli.req(ctx, http.MethodGet,
@@ -250,13 +251,7 @@ func (d *OneDrive) Link(ctx context.Context, relPath string) (*driver.Link, erro
 		return nil, driver.ErrNotFound // 目录或异常条目
 	}
 	mod, _ := time.Parse(time.RFC3339, it.Modified)
-	d.linkMu.Lock()
-	if d.linkCache == nil { // 测试可能不经 Init 直接构造
-		d.linkCache = map[string]cachedLink{}
-	}
-	d.linkCache[relPath] = cachedLink{url: it.DownloadURL, size: it.Size, mod: mod,
-		exp: time.Now().Add(linkTTL)}
-	d.linkMu.Unlock()
+	d.links().Put(relPath, cachedLink{url: it.DownloadURL, size: it.Size, mod: mod})
 	return &driver.Link{URL: it.DownloadURL, Size: it.Size, Mod: mod}, nil
 }
 
@@ -264,9 +259,7 @@ func (d *OneDrive) Link(ctx context.Context, relPath string) (*driver.Link, erro
 // Link 的 TTL 缓存以"downloadUrl 有效期约 1h"为前提，但直链也可能被云端提前
 // 作废（文件被改写、令牌撤销等）——没有强制通道，重连在 TTL 内会一直拿到同一条死链。
 func (d *OneDrive) RefreshLink(ctx context.Context, relPath string) (*driver.Link, error) {
-	d.linkMu.Lock()
-	delete(d.linkCache, relPath)
-	d.linkMu.Unlock()
+	d.links().Delete(relPath)
 	return d.Link(ctx, relPath)
 }
 

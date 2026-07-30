@@ -375,21 +375,30 @@ type LinkResult struct {
 }
 
 // LinkEx 获取文件内容访问方式及所在挂载的加速配置（raw 代理/转存加速用）。
+//
+// 只取一次直链，不再无条件另发 Stat：现有驱动的 Link 都填了 Size 与 Mod，而 Stat 在
+// OneDrive 上就是一次实打实的 Graph 往返。播放一部云盘上的片子，ffmpeg 会反复回环重取
+// 直链，每次都白搭一发。目录与 Google 原生文档没有可下载的字节，由各驱动的 Link 自己拒掉。
+//
+// 「Link 会填 Size」是驱动的约定而非编译期约束，所以没填时回落问一次 Stat：漏填会让
+// 该存储上的每个文件都变成 0 字节（Range 请求直接 416），这种错法不能靠约定挡。
 func (f *FS) LinkEx(ctx context.Context, u *user.User, p string) (*LinkResult, error) {
 	m, rel, err := f.Resolve(u, p)
 	if err != nil {
 		return nil, err
 	}
-	fi, err := m.drv.Stat(ctx, rel)
-	if err != nil {
-		return nil, err
-	}
-	if fi.IsDir {
-		return nil, driver.ErrNotFound
-	}
 	lk, err := m.drv.Link(ctx, rel)
 	if err != nil {
 		return nil, err
+	}
+	fi := model.FileInfo{Name: path.Base(p), Size: lk.Size, Modified: lk.Mod}
+	if lk.Size <= 0 { // 未填，或者真是空文件——两种都只多问一次，代价可忽略
+		if st, serr := m.drv.Stat(ctx, rel); serr == nil {
+			fi.Size, fi.Modified = st.Size, st.Modified
+			if st.Name != "" {
+				fi.Name = st.Name
+			}
+		}
 	}
 	drv := m.drv
 	return &LinkResult{

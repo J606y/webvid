@@ -37,6 +37,7 @@ import { useRoute } from 'vue-router'
 import { Back, VideoCamera, Download, Loading, RefreshRight } from '@element-plus/icons-vue'
 import { api } from '../utils/api'
 import { fetchVideoInfo } from '../utils/videoInfo'
+import { hevcCap } from '../utils/codec'
 import { rawUrl, hlsUrl, fromParams } from '../utils/path'
 import * as player from '../utils/playerHost'
 
@@ -101,15 +102,16 @@ async function start(keepResume = false) {
   reason.value = d.reason || ''
   if (d.strategy === 'unsupported') return
   if (d.strategy === 'direct') await mount(rawUrl(path.value), false)
-  else await mount(hlsUrl(path.value), true)
+  // hevcCap 必须与上面那次探测报的是同一个值：会话按它区分（见后端 sessionKey）
+  else await mount(hlsUrl(path.value, hevcCap()), true, !!d.hevc)
 }
 
 // mount 把播放器要到本页的插槽里。插槽由 v-if 控制，等一帧渲染出来再要。
-async function mount(url, isHls) {
+async function mount(url, isHls, hevc = false) {
   await nextTick()
   if (!slotRef.value) return // 异步期间已快速离页卸载，别再建播放器
   await player.attach(slotRef.value, {
-    path: path.value, url, isHls, resumeAt, reason: reason.value, onFail: fail,
+    path: path.value, url, isHls, hevc, resumeAt, reason: reason.value, onFail: fail,
   })
 }
 

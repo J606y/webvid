@@ -123,8 +123,11 @@ import FeaturedCarousel from '../components/FeaturedCarousel.vue'
 import { playRoute } from '../utils/path'
 import { formatSize, formatTime, progressPct } from '../utils/file'
 import { useMediaLibrary } from '../composables/useMediaLibrary'
+import { useApp } from '../stores/app'
 
 defineOptions({ name: 'LibraryVideo' }) // App.vue keep-alive include 按此名匹配
+
+const app = useApp()
 
 const hero = ref([])   // Featured 随机推荐
 const recent = ref([]) // 最近添加货架
@@ -133,10 +136,15 @@ const detail = ref(null) // 详情卡片组件
 
 async function loadStatic() {
   try {
+    // Featured 的取法跟随后台「媒体库首页」设置：早先这里恒发 random，
+    // 后台设成「最新在前」也关不掉它，同一个开关在网格和横幅上两种表现。
+    await app.ensurePublic()
+    const feat = { kind: 'video', limit: 5, sort: app.mediaHomeSort }
+    if (feat.sort === 'modified') feat.order = 'desc'
     // Featured/最近添加/最近播放三路互不依赖，并发请求缩短首屏等待
     const [r, d, h] = await Promise.all([
-      // Featured：整库随机抽 5 个（封面 object-fit:cover，竖屏也能铺满横幅）
-      api.media.list({ kind: 'video', limit: 5, sort: 'random' }),
+      // 整库抽 5 个（封面 object-fit:cover，竖屏也能铺满横幅）
+      api.media.list(feat),
       api.media.list({ kind: 'video', limit: 12, sort: 'modified', order: 'desc' }),
       api.media.history({ kind: 'video', limit: 12 }),
     ])

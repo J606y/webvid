@@ -28,7 +28,7 @@ import (
 )
 
 // POST /api/fs/offline {urls[], dst_dir, name, referer} —— 离线下载：每个 URL 建一个后台任务
-//（offline 组），服务器拉流写入目标目录。返回 task_ids，进度/取消/重试走统一任务接口。
+// （offline 组），服务器拉流写入目标目录。返回 task_ids，进度/取消/重试走统一任务接口。
 func (s *Server) fsOffline(c *gin.Context) {
 	var req struct {
 		URLs    []string `json:"urls"`
@@ -137,6 +137,8 @@ var offlineClient = &http.Client{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           offlineDialer().DialContext,
 		ResponseHeaderTimeout: 30 * time.Second,
+		// 不设的话是 0 = 空闲连接永不回收，一直占着对端的连接数
+		IdleConnTimeout: 90 * time.Second,
 	},
 	CheckRedirect: func(req *http.Request, via []*http.Request) error {
 		if len(via) >= 5 {

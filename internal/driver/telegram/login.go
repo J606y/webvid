@@ -34,6 +34,8 @@ type pendingLogin struct {
 type LoginManager struct {
 	mu      sync.Mutex
 	pending map[int64]*pendingLogin
+
+	sweepOnce sync.Once // 首次发码时才起清理协程，没用过 Telegram 的部署不多这一条
 }
 
 // Logins 供 server 层调用（自用单进程，单例足够）。
@@ -130,6 +132,47 @@ func tgAuthError(err error, sending bool) error {
 // loginTTL 登录会话保活时长：验证码经 App 通道投递偶有数分钟延迟，给足取码时间。
 const loginTTL = 10 * time.Minute
 
+// sweepEvery 过期登录会话的巡检间隔。
+const sweepEvery = time.Minute
+
+// startSweeper 起一条清理协程（进程内只起一次）。
+//
+// 每个未完成的登录会话都扣着一条常驻的 MTProto 连接：管理员点了「发送验证码」之后
+// 就走开、再也不回来，这条连接原地挂着不会自己断——只有同一个存储再次发码或者登录
+// 成功才顺手回收。巡检把过期的直接停掉。
+func (m *LoginManager) startSweeper() {
+	m.sweepOnce.Do(func() {
+		go func() {
+			t := time.NewTicker(sweepEvery)
+			defer t.Stop()
+			for range t.C {
+				m.sweep()
+			}
+		}()
+	})
+}
+
+// sweep 停掉所有已过期的登录会话。stop 会发网络请求（断开 MTProto），
+// 因此先摘出表再逐个停，不持锁做 I/O。
+func (m *LoginManager) sweep() {
+	now := time.Now()
+	var dead []*pendingLogin
+	m.mu.Lock()
+	for id, p := range m.pending {
+		if now.After(p.expires) {
+			delete(m.pending, id)
+			dead = append(dead, p)
+		}
+	}
+	m.mu.Unlock()
+	for _, p := range dead {
+		_ = p.stop()
+	}
+	if len(dead) > 0 {
+		log.Printf("telegram: 回收了 %d 个过期的登录会话", len(dead))
+	}
+}
+
 // PendingInfo 某存储当前有没有未过期的登录会话。
 // 会话在服务端存活 loginTTL，与登录弹窗的开关无关：关掉弹窗再打开，服务端这边
 // 可能仍在等验证码。前端据此显示真实的按钮文案，而不是凭本地有没有点过按钮猜。
@@ -178,6 +221,7 @@ func (m *LoginManager) SendCode(ctx context.Context, id int64, cfg driver.Config
 	if phone == "" {
 		return nil, errors.New("请先在存储配置里填写手机号")
 	}
+	m.startSweeper()
 	if p := m.take(id, phone); p != nil {
 		sent, err := p.client.API().AuthResendCode(ctx, &tg.AuthResendCodeRequest{
 			PhoneNumber: phone, PhoneCodeHash: p.codeHash,
