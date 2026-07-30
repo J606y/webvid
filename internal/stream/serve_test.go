@@ -20,7 +20,7 @@ func newServeTS(t *testing.T, content []byte, size int64) (string, *rangeSrv, fu
 	mod := time.Date(2026, 7, 6, 12, 0, 0, 0, time.UTC)
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		Serve(w, r, "f.bin", mod, size, "application/octet-stream",
-			fixedProvider(upstream.URL), tOpts(3, 64<<10))
+			fixedProvider(upstream.URL), 3, 64<<10)
 	}))
 	return down.URL, up, func() { upstream.Close(); down.Close() }
 }
@@ -143,55 +143,6 @@ func TestServeMultiRangeFallback(t *testing.T) {
 	resp, body := doReq(t, http.MethodGet, url, "bytes=0-1,5-6")
 	if resp.StatusCode != 200 || !bytes.Equal(body, content) {
 		t.Fatalf("多区间应降级 200 全量: status=%d", resp.StatusCode)
-	}
-}
-
-// 首块拿不到就必须落成 502。若在第一个字节到手前就把状态码提交出去，上游此后无论
-// 怎么失败，客户端看到的都是同一件事——一个承诺了 Content-Length 却提前断掉的 206，
-// 播放器只能报"网络错误"，服务端知道的真正原因一个字也传不出去。
-func TestServeFirstChunkFailureIs502(t *testing.T) {
-	content := pattern(300 << 10)
-	url, up, done := newServeTS(t, content, int64(len(content)))
-	defer done()
-	up.hook = func(w http.ResponseWriter, r *http.Request, start, end int64, try int) bool {
-		http.Error(w, `{"error":{"code":500,"message":"backend error"}}`, http.StatusInternalServerError)
-		return true
-	}
-
-	resp, body := doReq(t, http.MethodGet, url, "")
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Fatalf("首块失败应为 502，实际 %d", resp.StatusCode)
-	}
-	if cr := resp.Header.Get("Content-Range"); cr != "" {
-		t.Fatalf("502 不该还带着区间承诺: Content-Range=%q", cr)
-	}
-	if cl := resp.Header.Get("Content-Length"); cl == fmt.Sprint(len(content)) {
-		t.Fatalf("502 不该还承诺整个文件的长度: Content-Length=%q", cl)
-	}
-	if len(bytes.TrimSpace(body)) == 0 {
-		t.Fatal("502 应给出一句原因")
-	}
-}
-
-// 首块失败的原因分类要能穿过 fetchChunk 的外层包装，否则说明一律回落到最泛的那句。
-func TestOpenFailMessage(t *testing.T) {
-	wrap := func(err error) error { // 与 fetchChunk 的收尾包装同形
-		return fmt.Errorf("分块 0 [0-1023] 下载失败（已重试）: %w", err)
-	}
-	cases := []struct {
-		err  error
-		want string
-	}{
-		{wrap(fmt.Errorf("%w: HTTP 403 (userRateLimitExceeded)", errThrottled)), "存储正在限制访问频率，请稍后重试"},
-		{wrap(fmt.Errorf("%w: HTTP 401", errRelink)), "存储拒绝了这次访问，可能需要在后台重新授权"},
-		{errNoRange, "该存储不支持分段读取，无法播放"},
-		{wrap(context.DeadlineExceeded), "连接存储超时，请稍后重试"},
-		{wrap(fmt.Errorf("拉取分块失败: HTTP 500")), "无法从存储读取该文件，请稍后重试"},
-	}
-	for _, c := range cases {
-		if got := openFailMessage(c.err); got != c.want {
-			t.Fatalf("openFailMessage(%v) = %q, want %q", c.err, got, c.want)
-		}
 	}
 }
 
@@ -341,7 +292,7 @@ func TestServeUnknownSizePassthrough(t *testing.T) {
 	}))
 	defer upstream.Close()
 	down := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		Serve(w, r, "f.bin", time.Time{}, -1, "video/mp4", fixedProvider(upstream.URL), tOpts(4, 64<<10))
+		Serve(w, r, "f.bin", time.Time{}, -1, "video/mp4", fixedProvider(upstream.URL), 4, 64<<10)
 	}))
 	defer down.Close()
 

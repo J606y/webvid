@@ -2,8 +2,6 @@ package stream
 
 import (
 	"context"
-	"crypto/tls"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -64,11 +62,8 @@ func parseRange(h string, size int64) (r httpRange, hasRange, satisfiable bool) 
 // Serve 以代理模式响应下载/播放请求：解析客户端 Range → 并发分块拉直链 → 单流回给客户端。
 // size 未知（<0）时退化为单流透传（原样转发 Range 头、镜像上游状态与长度头）。
 // 调用方先设好 Content-Disposition 等附加头再进来。
-//
-// 客户端那一侧永远是单条有序响应——浏览器对一个文件只发一个 Range 请求，HTTP 语义
-// 决定了它不能拆到多条连接上发。并发只发生在服务器↔云盘这一段（见 MultiReader）。
 func Serve(w http.ResponseWriter, req *http.Request, name string, modtime time.Time, size int64,
-	ctype string, provider LinkProvider, o Opts) {
+	ctype string, provider LinkProvider, threads int, chunkBytes int64) {
 	if ctype != "" {
 		w.Header().Set("Content-Type", ctype)
 	}
@@ -102,50 +97,10 @@ func Serve(w http.ResponseWriter, req *http.Request, name string, modtime time.T
 		w.WriteHeader(status)
 		return
 	}
-	if o.Label == "" {
-		o.Label = name
-	}
-	mr := NewMultiReader(req.Context(), provider, rg.start, rg.length, o)
+	mr := NewMultiReader(req.Context(), provider, rg.start, rg.length, threads, chunkBytes)
 	defer mr.Close()
-	// 第 0 块到手之前不提交状态码。一旦 WriteHeader 出去就再也改不回来了，上游此后
-	// 无论怎么失败（限流、配额耗尽、令牌失效、超时），客户端看到的都是同一件事——
-	// 一个承诺了 Content-Length 却提前断掉的 206，播放器只能报"网络错误"。
-	// 服务端明明知道真正的原因，却没有任何位置说得出口，这正是这类故障最难定位的地方。
-	// 渐进分块已把首块压到 512KB（见 rampBase），这点等待换的是一个说得清的失败。
-	var head [1]byte
-	n, err := io.ReadFull(mr, head[:])
-	if err != nil {
-		if req.Context().Err() != nil {
-			return // 客户端自己走了，不是故障
-		}
-		log.Printf("[stream] 首块打开失败 %s: %v", name, err)
-		w.Header().Del("Content-Length")
-		w.Header().Del("Content-Range")
-		http.Error(w, openFailMessage(err), http.StatusBadGateway)
-		return
-	}
 	w.WriteHeader(status)
-	if _, err := w.Write(head[:n]); err != nil {
-		return
-	}
 	io.Copy(w, mr) // 客户端断开→req.Context 取消→MultiReader 退出；此处无法再改状态码
-}
-
-// openFailMessage 把首字节前的失败翻译成一句给用户看的话。
-// 本包不依赖项目内其他包（见包注释），故不走 util.Humanize——它按关键词匹配，
-// 会把限流的 403 一律说成"没有权限"，那比不说更误导。
-func openFailMessage(err error) string {
-	switch {
-	case errors.Is(err, errThrottled):
-		return "存储正在限制访问频率，请稍后重试"
-	case errors.Is(err, errRelink):
-		return "存储拒绝了这次访问，可能需要在后台重新授权"
-	case errors.Is(err, errNoRange):
-		return "该存储不支持分段读取，无法播放"
-	case errors.Is(err, context.DeadlineExceeded):
-		return "连接存储超时，请稍后重试"
-	}
-	return "无法从存储读取该文件，请稍后重试"
 }
 
 // ServeSingle 单连接透传：整个响应只向源发一个请求，Range 语义与 Serve 一致。
@@ -189,15 +144,12 @@ func ServeSingle(w http.ResponseWriter, req *http.Request, name string, modtime 
 		log.Printf("[stream] 单流打开失败 %s: %v", name, err)
 		w.Header().Del("Content-Length")
 		w.Header().Del("Content-Range")
-		http.Error(w, openFailMessage(err), http.StatusBadGateway)
+		http.Error(w, "拉取源失败", http.StatusBadGateway)
 		return
 	}
-	// 套一层预读：内部读取方（ffmpeg/ffprobe）是走走停停的，不缓冲的话它每停一下
-	// 都会顶回云盘那条 TCP 的接收窗口，跨国链路上的带宽因此反复塌陷再爬坡。见 readAhead。
-	src := newReadAhead(req.Context(), body, readaheadBlocks, readaheadBlock)
-	defer src.Close() // 所有权已交给它，由它关掉 body
+	defer body.Close()
 	w.WriteHeader(status)
-	io.Copy(w, src) // 客户端断开或源断流即止；源断流表现为短传，读取方自行续传
+	io.Copy(w, body) // 客户端断开或源断流即止；源断流表现为短传，读取方自行续传
 }
 
 // 单流打开重试参数：仅作用于首字节前（响应开始后无法重来）。
@@ -207,31 +159,24 @@ const (
 )
 
 // singleClient 带响应头超时（体传输不限时——单流本就长寿命）。
-// 同样禁 h2：h2 的每流流控窗口固定 4MB，长跑的整片顺序读在高时延链路上会被它封顶，
-// 而单流本就只用一条连接，h2 的多路复用在这里一点好处也没有。理由详见 chunkClient。
 var singleClient = &http.Client{Transport: func() http.RoundTripper {
 	t, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
 		return http.DefaultTransport
 	}
 	t2 := t.Clone()
-	t2.ForceAttemptHTTP2 = false
-	t2.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 	t2.ResponseHeaderTimeout = 30 * time.Second
 	return t2
 }()}
 
 // openUpstream 打开源的 [start, start+length) 单流：
 // 401/403/404/410 → 换链重试（provider 再调用即强制重取直链）；
-// 429/503 → 按 Retry-After 等待后重试（累计预算内不消耗尝试次数）；
-// 换链之后仍被拒 → 按限流处置（见 escalate，分块路径同此判定）。
+// 429/503 → 按 Retry-After 等待后重试（累计预算内不消耗尝试次数）。
 func openUpstream(ctx context.Context, provider LinkProvider, rg httpRange, size int64) (io.ReadCloser, error) {
 	var lastErr error
 	var url string
 	var hdr http.Header
 	var throttled time.Duration
-	throttleN := 0
-	relinked := false
 	for attempt := 1; attempt <= openAttempts; {
 		if url == "" {
 			u, h, err := provider(ctx)
@@ -273,18 +218,15 @@ func openUpstream(ctx context.Context, provider LinkProvider, rg httpRange, size
 			resp.Body.Close()
 			return nil, errNoRange
 		}
-		note := upstreamNote(resp.Body)
 		resp.Body.Close()
-		switch escalate(classifyErrStatus(resp.StatusCode), relinked) {
+		switch classifyErrStatus(resp.StatusCode) {
 		case dispRelink:
-			lastErr = fmt.Errorf("%w: HTTP %d%s", errRelink, resp.StatusCode, note)
+			lastErr = fmt.Errorf("直链疑似过期: HTTP %d", resp.StatusCode)
 			url = "" // 下轮换新链
-			relinked = true
 			attempt++
 		case dispThrottle:
-			throttleN++
-			wait := throttleWait(resp.Header.Get("Retry-After"), throttleN)
-			lastErr = fmt.Errorf("%w: HTTP %d%s", errThrottled, resp.StatusCode, note)
+			wait := retryAfter(resp.Header.Get("Retry-After"))
+			lastErr = fmt.Errorf("源限流: HTTP %d", resp.StatusCode)
 			if throttled+wait <= openThrottleLimit {
 				throttled += wait
 				if !ctxPause(ctx, wait) {
@@ -294,7 +236,7 @@ func openUpstream(ctx context.Context, provider LinkProvider, rg httpRange, size
 			}
 			attempt++
 		default: // dispHard
-			lastErr = fmt.Errorf("拉取源失败: HTTP %d%s", resp.StatusCode, note)
+			lastErr = fmt.Errorf("拉取源失败: HTTP %d", resp.StatusCode)
 			attempt++
 			if attempt <= openAttempts && !ctxPause(ctx, retryBackoff*time.Duration(attempt-1)) {
 				return nil, ctx.Err()
@@ -333,7 +275,7 @@ func servePassthrough(w http.ResponseWriter, req *http.Request, provider LinkPro
 	if r := req.Header.Get("Range"); r != "" {
 		up.Header.Set("Range", r)
 	}
-	resp, err := singleClient.Do(up) // 同为单流，复用其响应头超时与 h1.1 设定
+	resp, err := http.DefaultClient.Do(up)
 	if err != nil {
 		http.Error(w, "拉取源失败", http.StatusBadGateway)
 		return

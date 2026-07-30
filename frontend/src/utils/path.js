@@ -27,12 +27,9 @@ export function thumbUrl(p, size = 400) {
   return `/api/thumb${encodePath(p)}?size=${size}&token=${encodeURIComponent(getToken())}`
 }
 
-// HLS 转码播放列表地址（分片 URI 的 token 与 hevc 由服务端注入回列表）。
-// hevc 必须与取 /video/info 时报的是同一个值：会话按它区分，不然列表与分片会落到
-// 两个不同的会话上。
-export function hlsUrl(p, hevc = 0) {
-  const q = `?token=${encodeURIComponent(getToken())}` + (hevc > 0 ? `&hevc=${hevc}` : '')
-  return `/api/video/hls${encodePath(p)}/index.m3u8${q}`
+// HLS 转码播放列表地址（分片 URI 的 token 由服务端注入回列表）
+export function hlsUrl(p) {
+  return `/api/video/hls${encodePath(p)}/index.m3u8?token=${encodeURIComponent(getToken())}`
 }
 
 // 构造 /files /play 路由（逐段编码，兼容 % # ? 等字符）

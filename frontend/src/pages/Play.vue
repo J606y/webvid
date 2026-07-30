@@ -6,9 +6,7 @@
       <span v-if="reason" class="badge">{{ reason === 'remux' ? '转封装' : '转码' }}</span>
     </div>
 
-    <!-- 播放器插槽：真正的播放器容器由 utils/playerHost 自建后塞进来（它要能跨页面存活，
-         不能归 Vue 管，详见该模块）。本页只负责给它一个位置。 -->
-    <div v-if="strategy === 'direct' || strategy === 'hls'" ref="slotRef" class="player-slot glass glass-panel" />
+    <div v-if="strategy === 'direct' || strategy === 'hls'" ref="artRef" class="player glass glass-panel" />
 
     <div v-else-if="strategy === 'unsupported'" class="unsupported glass glass-panel">
       <el-icon :size="46" class="dim"><VideoCamera /></el-icon>
@@ -35,11 +33,10 @@
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
 import { useRoute } from 'vue-router'
 import { Back, VideoCamera, Download, Loading, RefreshRight } from '@element-plus/icons-vue'
+import Artplayer from 'artplayer'
 import { api } from '../utils/api'
 import { fetchVideoInfo } from '../utils/videoInfo'
-import { hevcCap } from '../utils/codec'
 import { rawUrl, hlsUrl, fromParams } from '../utils/path'
-import * as player from '../utils/playerHost'
 
 const route = useRoute()
 // path 冻结在进入播放页时的值（不跟 route 变）：离开时路由先改、组件后卸载，
@@ -60,14 +57,17 @@ const strategy = ref(DIRECT_EXTS.has(ext0) ? 'direct' : '')
 const message = ref('')
 const reason = ref('')
 const canRetry = ref(false) // 兜底面板是否给「重试」（运行期中断才给）
-const slotRef = ref(null)
-let resumeAt = 0            // 续播起点（秒），起播后定位到此处
+const artRef = ref(null)
+let art = null
+let hls = null
+let resumeAt = 0        // 续播起点（秒），起播后定位到此处
+let reportTimer = null  // 进度定时上报句柄
 
 // start 起播全流程：取续播位置 → 定播放策略 → 挂播放器。
 // keepResume=true 时沿用当前 resumeAt（运行期中断后重试，从断点接着播），
 // 否则回服务端取续播位置。
 async function start(keepResume = false) {
-  player.destroy() // 重试前收掉上一轮播放器与转码流（首次进入是空操作）
+  teardown() // 重试前收掉上一轮播放器与转码流（首次进入是空操作）
   strategy.value = DIRECT_EXTS.has(ext0) ? 'direct' : ''
   message.value = ''
   reason.value = ''
@@ -102,45 +102,140 @@ async function start(keepResume = false) {
   reason.value = d.reason || ''
   if (d.strategy === 'unsupported') return
   if (d.strategy === 'direct') await mount(rawUrl(path.value), false)
-  // hevcCap 必须与上面那次探测报的是同一个值：会话按它区分（见后端 sessionKey）
-  else await mount(hlsUrl(path.value, hevcCap()), true, !!d.hevc)
+  else await mount(hlsUrl(path.value), true)
 }
+onMounted(() => start())
 
-// mount 把播放器要到本页的插槽里。插槽由 v-if 控制，等一帧渲染出来再要。
-async function mount(url, isHls, hevc = false) {
-  await nextTick()
-  if (!slotRef.value) return // 异步期间已快速离页卸载，别再建播放器
-  await player.attach(slotRef.value, {
-    path: path.value, url, isHls, hevc, resumeAt, reason: reason.value, onFail: fail,
-  })
-}
-
-// fail 运行期播放中断（playerHost 回调）→ 落到可重试、可下载的兜底面板。
-// 断点由 playerHost 交回，重试从中断处接着播。
-function fail(msg, at) {
-  resumeAt = at || 0
+// fail 运行期播放中断 → 落到可重试、可下载的兜底面板。
+// 探测期失败一直有 unsupported 兜底，运行期（转码会话被回收、分片报错、断流）却没有，
+// 播放器只会无尽转圈。断点记在 resumeAt 上，重试从中断处接着播。
+function fail(msg) {
+  const at = art && isFinite(art.currentTime) ? art.currentTime : 0
+  // 切断 ArtPlayer 自带的断流重连，别让它在实例销毁后继续重设 url
+  if (art) art.off('video:error')
+  teardown()
+  resumeAt = at
   strategy.value = 'unsupported'
   message.value = msg
   canRetry.value = true
 }
 
-onMounted(() => {
-  // 这部片的播放器还活着 = 用户刚从系统画中画的小窗还原回来。直接把它接回页面：
-  // 不重新探测、不重新起播，进度与小窗里的一模一样。
-  const snap = player.snapshot(path.value)
-  if (snap) {
-    strategy.value = snap.isHls ? 'hls' : 'direct'
-    reason.value = snap.reason
-    nextTick(() => {
-      if (slotRef.value) player.attach(slotRef.value, { path: path.value, onFail: fail })
-    })
-    return
+// teardown 收掉播放器与转码流，并补记一次末次进度。离页与重试共用。
+function teardown() {
+  if (reportTimer) { clearTimeout(reportTimer); reportTimer = null }
+  if (art) {
+    try { report(art.currentTime) } catch { /* 末次进度，忽略异常 */ }
+    art.destroy(true)
+    art = null
   }
-  start()
-})
+  if (hls) {
+    hls.destroy()
+    hls = null
+  }
+}
 
-// 离页：在画中画里就寄存（小窗继续播），否则收掉。见 utils/playerHost
-onBeforeUnmount(() => player.leave())
+// report 上报播放进度：起播 position=0 只刷"最近播放"；播放中带当前秒数；
+// duration 供货架/详情卡画进度条（后端只在 duration>0 时更新，避免元数据未就绪的
+// 早期上报把已知时长覆盖成 0）。ended=true 只在播完时带上，后端据此把续播点归零
+// （拖动到片尾不算看完，续播点要忠实保留）。silent 失败不打扰。频率由各调用点节流。
+function report(position, ended = false) {
+  const sec = Math.floor(position || 0)
+  const dur = art && isFinite(art.duration) ? art.duration : 0
+  api.media.played({ path: path.value, position: sec, duration: dur, ended }).catch(() => {})
+}
+
+async function mount(url, isHls) {
+  await nextTick()
+  if (!artRef.value) return // 异步期间已快速离页卸载，别再建播放器（否则 ArtPlayer 报 container 无效）
+  const opts = {
+    container: artRef.value,
+    url,
+    title: name.value,
+    theme: '#ff0000', // YouTube 红：已播进度条 / 拖拽圆点 / 音量 / 选中项统一取此色
+    volume: 0.7,
+    // 关掉 ArtPlayer 的 backdrop：它默认给弹窗加 .art-backdrop 类、附带一条
+    // `.art-video-player.art-backdrop .art-volume-inner{background:rgba(0,0,0,.75)}`（0,3,0 高优先级），
+    // 会把弹窗背景钉死成黑、盖过 --art-widget-background。关掉后弹窗背景回落到该变量（可控成白），
+    // 磨砂由下方 CSS 自己加。
+    backdrop: false,
+    setting: true,
+    playbackRate: true,
+    aspectRatio: true,
+    pip: true,
+    fullscreen: true,
+    fullscreenWeb: true,
+    hotkey: true,
+    autoSize: false,
+    autoplay: true,
+    // 中间大播放态图标换成纯三角（去掉 ArtPlayer 自带的实心圆），
+    // 下方 .art-state 用液态玻璃圆承托 —— 圆由玻璃画、三角只是白色glyph。
+    // svg 必须带显式 width/height 属性（ArtPlayer 自带图标全都带）：只有 viewBox 的
+    // svg 在 iOS WebKit 的百分比尺寸链里会解析成 0 高，iPhone 上三角直接消失只剩玻璃圆。
+    icons: {
+      state: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"></path></svg>',
+    },
+  }
+  if (isHls) {
+    const { default: Hls } = await import('hls.js') // 独立 chunk，仅转码播放时加载
+    opts.type = 'm3u8'
+    let netRetry = 0
+    let mediaRetry = 0
+    opts.customType = {
+      m3u8(video, src) {
+        if (Hls.isSupported()) {
+          if (hls) hls.destroy()
+          // 续播：从 resumeAt 起（0 = 从头）。event 型列表（remux 边跑边播）默认会追
+          // "直播沿"，显式 startPosition 强制落到目标位置；vod 列表本就全时间轴可 seek。
+          hls = new Hls({ startPosition: resumeAt })
+          // 运行期中断兜底：转码会话被回收、分片请求失败、断流都在这里报 fatal。
+          // 网络与解码类先按 hls.js 的既定手法就地恢复，连续恢复不了才落兜底面板。
+          hls.on(Hls.Events.ERROR, (_, data) => {
+            if (!data.fatal) return
+            if (data.type === Hls.ErrorTypes.NETWORK_ERROR && netRetry < 3) {
+              netRetry++
+              hls.startLoad()
+              return
+            }
+            if (data.type === Hls.ErrorTypes.MEDIA_ERROR && mediaRetry < 2) {
+              mediaRetry++
+              hls.recoverMediaError()
+              return
+            }
+            fail(data.type === Hls.ErrorTypes.NETWORK_ERROR
+              ? '播放已中断：视频流断开，可能是网络不稳或转码会话已结束。'
+              : '播放已中断：视频流无法解码，该文件可能已损坏。')
+          })
+          hls.loadSource(src)
+          hls.attachMedia(video)
+        } else {
+          video.src = src // Safari 原生 HLS：token 已注入播放列表
+        }
+      },
+    }
+  }
+  art = new Artplayer(opts)
+
+  // 续播定位：direct / Safari 原生 HLS 走 video.currentTime；hls.js 已在 startPosition 处理
+  art.on('ready', () => {
+    if (resumeAt > 0 && !(isHls && hls)) art.currentTime = resumeAt
+    report(art.currentTime || 0) // 起播即记一次最近播放
+  })
+  // 元数据就绪后补记一次，确保 duration 落库（ready 可能早于 metadata，dur 尚为 0）
+  art.on('video:loadedmetadata', () => report(art.currentTime || 0))
+  // 播放中每 10s 上报一次；暂停/跳转/播完各补一次
+  art.on('video:timeupdate', () => {
+    if (reportTimer) return
+    reportTimer = setTimeout(() => {
+      reportTimer = null
+      if (art && !art.paused) report(art.currentTime)
+    }, 10000)
+  })
+  art.on('video:pause', () => report(art.currentTime))
+  art.on('video:seeked', () => report(art.currentTime))
+  art.on('video:ended', () => report(art.duration || 0, true)) // 播完 → 后端归零，下次从头
+}
+
+onBeforeUnmount(teardown)
 </script>
 
 <style scoped>
@@ -160,9 +255,100 @@ onBeforeUnmount(() => player.leave())
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
-/* 插槽只管排版与"播放器还没就位"时的那块玻璃底（首帧不留白）；
-   播放器自身外观在 assets/player.css（容器不带 scoped 属性，见 utils/playerHost） */
-.player-slot { width: 100%; aspect-ratio: 16/9; overflow: hidden; }
+.player { aspect-ratio: 16/9; overflow: hidden; }
+
+/* ---- YouTube 风格播放器（红色细进度条 + 液态玻璃控件）---- */
+/* 参考 YouTube 2025「液态玻璃」新版：底部控件不再是扁平白图标，而是每颗按钮各自
+   坐在一枚半透明磨砂玻璃胶囊上（backdrop-filter 实时模糊背后画面 + 顶部高光描边）。
+   进度条保持 YouTube 招牌：红色细条、悬停变粗、拖拽红点、全宽贴边。
+   磨砂一律用 backdrop-filter（本项目 iOS 上验证安全的方案，backdrop 全保留不受影响），
+   绝不用 filter:blur（会在 iOS 触发极光式重光栅化卡死，见项目历史）。 */
+.player :deep(.art-video-player) {
+  --art-progress-height: 5px;                     /* 悬停态条高；静止态取其半（~2.5px），细如 YouTube */
+  --art-progress-color: rgba(255, 255, 255, .22); /* 未播放轨道 */
+  --art-loaded-color: rgba(255, 255, 255, .45);   /* 已缓冲段 */
+  --art-hover-color: rgba(255, 255, 255, .5);     /* 鼠标前方的预览高亮 */
+  --art-indicator-size: 13px;                     /* 拖拽圆点（红色，悬停浮现） */
+  --art-control-icon-size: 22px;                  /* 图标收到 YouTube 尺度，好落进玻璃胶囊 */
+  --art-control-icon-scale: 1;
+  --art-bottom-gap: 14px;
+  --art-widget-background: rgba(255, 255, 255, .06);  /* 弹出层底色：与下方控件胶囊同透明度（关了 backdrop 后此变量才真正生效） */
+}
+/* 进度条全宽贴边（YouTube 招牌）：抵消底栏左右内边距，红条从边到边；
+   底栏 overflow:hidden，圆点在 0% 处半探出左缘会被裁掉，恰是 YouTube 的观感。 */
+.player :deep(.art-bottom .art-progress) {
+  margin-left: calc(var(--art-padding) * -1);
+  margin-right: calc(var(--art-padding) * -1);
+}
+/* 左右分组：清掉 ArtPlayer 的负边距（原本让图标视觉贴边），胶囊之间留呼吸间距 */
+.player :deep(.art-controls-left),
+.player :deep(.art-controls-right) {
+  margin: 0;
+  gap: 8px;
+  align-items: center;
+}
+.player :deep(.art-controls) { padding-bottom: 8px; }
+/* ArtPlayer 检测到手机 UA（.art-mobile）会给两个控件组加负边距让图标贴边——玻璃胶囊
+   贴边很难看；上面的 margin:0 与它平级打平、而 ArtPlayer 样式是运行时注入排在产物 CSS
+   之后会赢，这里按更高特异性压回。 */
+.player :deep(.art-video-player.art-mobile .art-controls-left) { margin-left: 0; }
+.player :deep(.art-video-player.art-mobile .art-controls-right) { margin-right: 0; }
+/* 每颗控件 = 一枚液态玻璃胶囊：近乎透明的底 + 弱磨砂（透背后画面）+ 顶部高光描边 + 轻投影。
+   要点：blur 压到 7px 才透（16px 会糊成厚磨砂），底色降到 .06、靠 saturate/brightness 提折射感
+   与更亮的高光内描边把玻璃「形状」勾出来 —— 这才是液态玻璃而非磨砂玻璃。 */
+.player :deep(.art-controls .art-control) {
+  opacity: 1;                     /* 玻璃底恒显，不再靠透明度淡入淡出 */
+  min-width: 42px;
+  min-height: 38px;
+  padding: 0 4px;
+  border-radius: 13px;
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .2);
+  -webkit-backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), inset 0 -1px 2px rgba(0, 0, 0, .12), 0 2px 10px rgba(0, 0, 0, .22);
+  transition: background var(--art-transition-duration) ease;
+}
+.player :deep(.art-controls .art-control:hover) { background: rgba(255, 255, 255, .18); }
+/* 时间胶囊：左右多留白、数字等宽不抖，贴近 YouTube「1:26 / 4:02」 */
+.player :deep(.art-control-time) {
+  padding: 0 12px;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+/* 二级弹窗（设置 / 音量竖条 / 画质选择 / 右键菜单）同款通透液态玻璃：
+   弱模糊透背后画面 + 高光内描边成形，跟胶囊一个配方，不再是 Image#3 那种厚暗磨砂。 */
+.player :deep(.art-settings),
+.player :deep(.art-selector-list),
+.player :deep(.art-contextmenus),
+.player :deep(.art-volume-inner) {
+  color: #fff;                                    /* 白字，和按钮白图标一致 */
+  -webkit-backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  border: 1px solid rgba(255, 255, 255, .2);
+  border-radius: 14px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), 0 8px 28px rgba(0, 0, 0, .3);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .7);       /* 白字在亮画面上靠深色投影保可读（图标本有描边） */
+}
+/* 中间大播放态图标：液态玻璃圆 + 纯三角（图标已在 mount() 换成无实心圆的三角）。
+   仅暂停/点按时浮现，玻璃圆透背后画面 + 高光描边，三角白色带投影保对比。 */
+.player :deep(.art-state) {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .14);
+  border: 1px solid rgba(255, 255, 255, .3);
+  -webkit-backdrop-filter: blur(10px) saturate(1.8) brightness(1.1);
+  backdrop-filter: blur(10px) saturate(1.8) brightness(1.1);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 6px 22px rgba(0, 0, 0, .3);
+}
+.player :deep(.art-state .art-icon) {
+  width: 32px;  /* 定像素并与 svg 的 width/height 属性一致：原 42% 的百分比链在 iOS WebKit
+                   会把内层 svg 解析成 0 高（只剩玻璃圆没三角）；原 filter:drop-shadow 也是
+                   iOS 光栅化雷区（同极光教训）一并去掉，对比度交给玻璃圆的底色+描边 */
+  height: 32px;
+  margin-left: 3px; /* 三角视觉重心偏左，右移一点看着才居中 */
+}
 .unsupported, .detecting {
   padding: 70px 24px; text-align: center;
   display: flex; flex-direction: column; align-items: center; gap: 12px;
@@ -185,7 +371,28 @@ onBeforeUnmount(() => player.leave())
   }
   .head { gap: 8px; margin-bottom: 0; }
   .title { font-size: 15px; }
-  .player-slot { margin: auto 0; } /* 头部之下剩余空间垂直居中 */
+  .player {
+    border-radius: 14px;
+    width: 100%;
+    margin: auto 0; /* 头部之下剩余空间垂直居中 */
+  }
+  /* 底栏控件收一号：390px 屏减页边距后控件行只有 ~350px，桌面尺度（胶囊 42 + gap 8 +
+     时间胶囊两侧 12px）七颗排不下会挤成一团。胶囊 36/34、图标 20、gap 5、时间字号 12，
+     整行 ~320px 落进一行还留呼吸空间；控件行高回 44 给触控留高度（.art-mobile 压成 38 太矮）。 */
+  .player :deep(.art-video-player) {
+    --art-control-icon-size: 20px;
+    --art-padding: 8px;
+    --art-control-height: 44px;
+  }
+  .player :deep(.art-controls-left),
+  .player :deep(.art-controls-right) { gap: 5px; }
+  .player :deep(.art-controls .art-control) {
+    min-width: 36px;
+    min-height: 34px;
+    border-radius: 12px;
+    padding: 0 2px;
+  }
+  .player :deep(.art-control-time) { padding: 0 7px; font-size: 12px; }
   .unsupported, .detecting { margin: auto 0; } /* 兜底/探测占位同样居中，不再吊在顶部 */
 }
 </style>

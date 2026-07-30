@@ -21,24 +21,11 @@ func TestAccelOpts(t *testing.T) {
 		cfg  driver.Config
 		want AccelOpts
 	}{
-		{nil, AccelOpts{Threads: 4, ChunkBytes: 4 << 20, ReadaheadBytes: 32 << 20}},
-		{driver.Config{"proxy": "true", "threads": "8", "chunk_mb": "16"},
-			AccelOpts{Proxy: true, Threads: 8, ChunkBytes: 16 << 20, ReadaheadBytes: 32 << 20}},
-		{driver.Config{"proxy": "false", "threads": "0", "chunk_mb": "999"},
-			AccelOpts{Threads: 1, ChunkBytes: 64 << 20, ReadaheadBytes: 32 << 20}},
-		{driver.Config{"threads": "100"},
-			AccelOpts{Threads: 32, ChunkBytes: 4 << 20, ReadaheadBytes: 32 << 20}},
-		{driver.Config{"threads": "abc", "chunk_mb": ""},
-			AccelOpts{Threads: 4, ChunkBytes: 4 << 20, ReadaheadBytes: 32 << 20}},
-		// 预读缓冲：正常取值、下限 4MB、上限 512MB、非法值回落默认
-		{driver.Config{"readahead_mb": "64"},
-			AccelOpts{Threads: 4, ChunkBytes: 4 << 20, ReadaheadBytes: 64 << 20}},
-		{driver.Config{"readahead_mb": "1"},
-			AccelOpts{Threads: 4, ChunkBytes: 4 << 20, ReadaheadBytes: 4 << 20}},
-		{driver.Config{"readahead_mb": "9999"},
-			AccelOpts{Threads: 4, ChunkBytes: 4 << 20, ReadaheadBytes: 512 << 20}},
-		{driver.Config{"readahead_mb": "x"},
-			AccelOpts{Threads: 4, ChunkBytes: 4 << 20, ReadaheadBytes: 32 << 20}},
+		{nil, AccelOpts{false, 4, 4 << 20}},
+		{driver.Config{"proxy": "true", "threads": "8", "chunk_mb": "16"}, AccelOpts{true, 8, 16 << 20}},
+		{driver.Config{"proxy": "false", "threads": "0", "chunk_mb": "999"}, AccelOpts{false, 1, 64 << 20}},
+		{driver.Config{"threads": "100"}, AccelOpts{false, 32, 4 << 20}},
+		{driver.Config{"threads": "abc", "chunk_mb": ""}, AccelOpts{false, 4, 4 << 20}},
 	}
 	for i, c := range cases {
 		m := &Mount{Cfg: c.cfg}

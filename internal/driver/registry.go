@@ -32,15 +32,10 @@ var registry = map[string]struct {
 // CommonRemoteFields 远端驱动统一追加的字段（fs 层读取，驱动可忽略）。
 var CommonRemoteFields = []FieldSpec{
 	{Name: "proxy", Label: "代理模式（服务器中转流量）", Type: "bool", Default: "false",
-		Help: "开启后下载/播放经服务器转发，可配合多线程加速。" +
-			"Google Drive 的直链必须带授权头，无论此开关如何都走中转"},
+		Help: "开启后下载/播放经服务器转发，可配合多线程加速"},
 	{Name: "threads", Label: "加速线程数", Type: "number", Default: "4",
-		Help: "服务器向云盘并发拉取的连接数，1=不加速。链路时延越高，加速效果越明显"},
-	{Name: "chunk_mb", Label: "加速分块大小(MB)", Type: "number", Default: "4",
-		Help: "每条连接单次取多少数据。太小则连接反复启停跑不满速"},
-	{Name: "readahead_mb", Label: "预读缓冲(MB)", Type: "number", Default: "32",
-		Help: "服务器为每条在播的流提前取好并暂存在内存里的数据量。" +
-			"调大更抗网络抖动，同时也更占内存（按同时在播的路数乘算）"},
+		Help: "代理模式下并发 Range 连接数，1=不加速"},
+	{Name: "chunk_mb", Label: "加速分块大小(MB)", Type: "number", Default: "4"},
 }
 
 // CommonFields 所有驱动统一追加的字段（fs/server 层读取，驱动可忽略）。

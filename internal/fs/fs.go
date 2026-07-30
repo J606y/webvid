@@ -324,33 +324,21 @@ func (f *FS) List(ctx context.Context, u *user.User, p string) ([]model.FileInfo
 
 // AccelOpts 挂载的加速配置（driver.CommonRemoteFields，本地驱动无这些字段→零值）。
 type AccelOpts struct {
-	Proxy          bool  // 代理模式：下载/播放经服务器中转
-	Threads        int   // 并发 Range 连接数
-	ChunkBytes     int64 // 分块大小（字节）
-	ReadaheadBytes int64 // 预读缓冲上限（字节）：每条在播的流常驻的内存量
+	Proxy      bool  // 代理模式：下载/播放经服务器中转
+	Threads    int   // 并发 Range 连接数
+	ChunkBytes int64 // 分块大小（字节）
 }
 
-// accelOpts 解析挂载配置；缺省 threads=4、chunk_mb=4、readahead_mb=32，钳制到安全区间。
-// 取值范围只在这里定——stream 包是纯机制，不掺"多大算合理"的策略。
+// accelOpts 解析挂载配置；缺省 threads=4、chunk_mb=4，钳制到安全区间。
 func (m *Mount) accelOpts() AccelOpts {
-	o := AccelOpts{Proxy: m.Cfg["proxy"] == "true", Threads: 4,
-		ChunkBytes: 4 << 20, ReadaheadBytes: 32 << 20}
+	o := AccelOpts{Proxy: m.Cfg["proxy"] == "true", Threads: 4, ChunkBytes: 4 << 20}
 	if n, err := strconv.Atoi(m.Cfg["threads"]); err == nil {
 		o.Threads = min(max(n, 1), 32)
 	}
 	if n, err := strconv.Atoi(m.Cfg["chunk_mb"]); err == nil {
 		o.ChunkBytes = int64(min(max(n, 1), 64)) << 20
 	}
-	if n, err := strconv.Atoi(m.Cfg["readahead_mb"]); err == nil {
-		o.ReadaheadBytes = int64(min(max(n, 4), 512)) << 20
-	}
 	return o
-}
-
-// Stream 转成 stream 包的调参。
-func (o AccelOpts) Stream(label string) stream.Opts {
-	return stream.Opts{Threads: o.Threads, ChunkBytes: o.ChunkBytes,
-		ReadaheadBytes: o.ReadaheadBytes, Label: label}
 }
 
 // MediaVisible 该挂载的内容是否在指定界面展示（kind: video=视频库 / image=照片墙 / search=搜索）。
@@ -375,30 +363,21 @@ type LinkResult struct {
 }
 
 // LinkEx 获取文件内容访问方式及所在挂载的加速配置（raw 代理/转存加速用）。
-//
-// 只取一次直链，不再无条件另发 Stat：现有驱动的 Link 都填了 Size 与 Mod，而 Stat 在
-// OneDrive 上就是一次实打实的 Graph 往返。播放一部云盘上的片子，ffmpeg 会反复回环重取
-// 直链，每次都白搭一发。目录与 Google 原生文档没有可下载的字节，由各驱动的 Link 自己拒掉。
-//
-// 「Link 会填 Size」是驱动的约定而非编译期约束，所以没填时回落问一次 Stat：漏填会让
-// 该存储上的每个文件都变成 0 字节（Range 请求直接 416），这种错法不能靠约定挡。
 func (f *FS) LinkEx(ctx context.Context, u *user.User, p string) (*LinkResult, error) {
 	m, rel, err := f.Resolve(u, p)
 	if err != nil {
 		return nil, err
 	}
-	lk, err := m.drv.Link(ctx, rel)
+	fi, err := m.drv.Stat(ctx, rel)
 	if err != nil {
 		return nil, err
 	}
-	fi := model.FileInfo{Name: path.Base(p), Size: lk.Size, Modified: lk.Mod}
-	if lk.Size <= 0 { // 未填，或者真是空文件——两种都只多问一次，代价可忽略
-		if st, serr := m.drv.Stat(ctx, rel); serr == nil {
-			fi.Size, fi.Modified = st.Size, st.Modified
-			if st.Name != "" {
-				fi.Name = st.Name
-			}
-		}
+	if fi.IsDir {
+		return nil, driver.ErrNotFound
+	}
+	lk, err := m.drv.Link(ctx, rel)
+	if err != nil {
+		return nil, err
 	}
 	drv := m.drv
 	return &LinkResult{
