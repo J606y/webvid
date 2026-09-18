@@ -197,6 +197,39 @@ func TestOfflineDownload(t *testing.T) {
 	}
 }
 
+// TestOfflineExt 离线下载补扩展名。本项目认文件类型全靠扩展名——能不能播、
+// 进不进媒体库都由它决定，所以「电影」这样的自定义名必须补出后缀，否则下完打不开。
+func TestOfflineExt(t *testing.T) {
+	mk := func(ct string) *http.Response {
+		r := &http.Response{Header: http.Header{}}
+		if ct != "" {
+			r.Header.Set("Content-Type", ct)
+		}
+		return r
+	}
+	cases := []struct {
+		name, ct, url, want string
+	}{
+		{"Content-Type 比地址可靠", "video/mp4", "https://a.com/dl.php?id=1", ".mp4"},
+		{"带 charset 参数", "video/mp4; charset=utf-8", "https://a.com/x", ".mp4"},
+		{"大小写不敏感", "VIDEO/MP4", "https://a.com/x", ".mp4"},
+		{"类型含糊时看地址", "application/octet-stream", "https://a.com/v/movie.mkv", ".mkv"},
+		{"地址后缀大写", "", "https://a.com/v/movie.MP4", ".mp4"},
+		{"查询串不干扰", "", "https://a.com/v/movie.mp4?token=abc", ".mp4"},
+		{"地址也没后缀就不补", "application/octet-stream", "https://a.com/video?id=1", ""},
+		{"脚本入口不当扩展名", "application/octet-stream", "https://a.com/dl.php", ""},
+		{"页面地址同理", "", "https://a.com/watch.html", ""},
+		{"超长的不是扩展名", "", "https://a.com/f.abcdefghij", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := offlineExt(mk(tc.ct), tc.url); got != tc.want {
+				t.Fatalf("offlineExt(%q, %q) = %q, want %q", tc.ct, tc.url, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestSettingsHotApply(t *testing.T) {
 	api, token, _, srv, tm := newOfflineTestServer(t)
 

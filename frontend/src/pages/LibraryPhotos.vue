@@ -60,6 +60,7 @@
       <div class="shelf-head"><h2>最近添加</h2></div>
       <div class="shelf-row">
         <div v-for="(p, i) in recent" :key="p.path" class="p-card shelf-card"
+          v-menu="(at) => openMenu(at, p)"
           @click="openList(recent, i, 480, '.shelf-recent .p-card .art img')">
           <div class="art">
             <img :src="thumbUrl(p.path, 480)" loading="lazy" @error="hideImg" />
@@ -84,6 +85,7 @@
       </div>
       <div class="shelf-row">
         <div v-for="(p, i) in viewed" :key="p.path" class="p-card shelf-card"
+          v-menu="(at) => openMenu(at, p)"
           @click="openList(viewed, i, 480, '.shelf-viewed .p-card .art img')">
           <div class="art">
             <img :src="thumbUrl(p.path, 480)" loading="lazy" @error="hideImg" />
@@ -107,7 +109,8 @@
         </div>
       </div>
       <div class="photo-grid">
-        <div v-for="(img, i) in grid" :key="img.path" class="cell" @click="openList(grid, i)">
+        <div v-for="(img, i) in grid" :key="img.path" class="cell"
+          v-menu="(at) => openMenu(at, img)" @click="openList(grid, i)">
           <img :src="thumbUrl(img.path, 320)" loading="lazy" @error="hideImg" />
           <div class="thumb-fallback abs"><el-icon :size="26"><Picture /></el-icon></div>
         </div>
@@ -116,18 +119,28 @@
 
     <div ref="sentinel" class="sentinel" />
     <div v-if="loading && grid.length" class="dim loading-more">加载中…</div>
+
+    <!-- 照片详情二级卡片 + 右键 / 长按菜单 -->
+    <PhotoDetailCard ref="detail" />
+    <ContextMenu ref="menu" @select="onMenuSelect" />
   </div>
 </template>
 
 <script setup>
 import { ref, onUnmounted, watch } from 'vue'
-import { ArrowLeft, ArrowRight, Picture, View, FolderOpened, Loading } from '@element-plus/icons-vue'
+import {
+  ArrowLeft, ArrowRight, Picture, View, FolderOpened, Loading, Delete, InfoFilled,
+} from '@element-plus/icons-vue'
 import { api } from '../utils/api'
 import FeaturedCarousel from '../components/FeaturedCarousel.vue'
+import PhotoDetailCard from '../components/PhotoDetailCard.vue'
+import ContextMenu from '../components/ContextMenu.vue'
 import { thumbUrl } from '../utils/path'
 import { formatTime, hideImg, stripExt } from '../utils/file'
 import { openLightbox } from '../utils/lightbox'
+import { vMenu } from '../utils/contextMenu'
 import { useMediaLibrary } from '../composables/useMediaLibrary'
+import { useMediaRemove } from '../composables/useMediaRemove'
 import { useApp } from '../stores/app'
 
 defineOptions({ name: 'LibraryPhotos' }) // App.vue keep-alive include 按此名匹配
@@ -184,6 +197,28 @@ function openList(list, i, msize = 320, sel = '.photo-grid .cell img') {
   openLightbox(list.map((x) => x.path), i, msize,
     (idx) => document.querySelectorAll(sel)[idx])
 }
+
+// ---- 右键 / 长按菜单 ----
+const detail = ref(null)
+const menu = ref(null)
+const PHOTO_MENU = [
+  { cmd: 'detail', label: '详情', icon: InfoFilled },
+  { cmd: 'remove', label: '删除', icon: Delete, danger: true },
+]
+
+function openMenu(at, p) {
+  // 连缩略图元素一并记下：从菜单点「详情」时，卡片仍要从图处展开。
+  // 货架卡片的图在 .art 里，网格的方格本身就是图。
+  menu.value?.show(at, PHOTO_MENU, { p, el: at.el?.querySelector?.('.art') || at.el || null })
+}
+
+function onMenuSelect(cmd, data) {
+  if (cmd === 'detail') detail.value?.open(data.p, data.el)
+  else if (cmd === 'remove') removeItem(data.p)
+}
+
+// 删除逻辑与视频库共用（含权限判断的取舍，见 useMediaRemove）
+const { removeItem } = useMediaRemove([grid, recent, viewed, hero])
 </script>
 
 <style scoped src="../assets/media-library.css"></style>

@@ -207,7 +207,9 @@ func TestPreloadWarmsCovers(t *testing.T) {
 	}
 }
 
-// TestPreloadProbesVideos：非 direct 视频探测源信息写入 media_info；direct(mp4) 不探测。需要 ffmpeg。
+// TestPreloadProbesVideos：视频源信息探测写入 media_info，direct(mp4) 一并在内。
+// 早先 direct 扩展名不探测（播放它们本就不需要 ffprobe），但详情卡要显示编码/分辨率/
+// 帧率/码率，那只能从探测里来 —— 见 media.ProbeStatus。需要 ffmpeg。
 func TestPreloadProbesVideos(t *testing.T) {
 	ffmpeg := media.LookTool("ffmpeg")
 	if ffmpeg == "" || media.LookTool("ffprobe") == "" {
@@ -234,8 +236,8 @@ func TestPreloadProbesVideos(t *testing.T) {
 	if mkv != 1 {
 		t.Fatalf("非 direct 视频应写入 media_info, got %d", mkv)
 	}
-	if mp4 != 0 {
-		t.Fatalf("direct 视频(mp4)不应探测入库, got %d", mp4)
+	if mp4 != 1 {
+		t.Fatalf("direct 视频(mp4)也应探测入库（详情卡要拿规格）, got %d", mp4)
 	}
 }
 

@@ -100,6 +100,11 @@ func migrate(d *sql.DB) error {
 				has_video  INTEGER NOT NULL DEFAULT 0,
 				has_audio  INTEGER NOT NULL DEFAULT 0,
 				duration   REAL NOT NULL DEFAULT 0,
+				video_codec TEXT NOT NULL DEFAULT '',
+				width      INTEGER NOT NULL DEFAULT 0,
+				height     INTEGER NOT NULL DEFAULT 0,
+				fps        REAL NOT NULL DEFAULT 0,
+				bitrate    INTEGER NOT NULL DEFAULT 0,
 				probed_at  TEXT NOT NULL
 			)`,
 	}
@@ -122,6 +127,23 @@ func migrate(d *sql.DB) error {
 	if _, err := d.Exec(`ALTER TABLE media_info ADD COLUMN video_hevc INTEGER NOT NULL DEFAULT 0`); err == nil {
 		if _, err := d.Exec(`DELETE FROM media_info WHERE video_copy = 0`); err != nil {
 			return fmt.Errorf("migrate: %w", err)
+		}
+	}
+	// 旧库补列：源规格（编码/分辨率/帧率/码率）上线前的缓存一个规格字段都没有，而详情卡
+	// 要显示它们。与 audio_aac 那条同理——加列成功（=首次升级）即清空整表强制重探，留着
+	// 旧行只会让老片子的规格永远空着。direct 扩展名此前压根不进探测（见 media.ProbeStatus），
+	// 这轮起也要探，重探一轮正好把它们一并补齐。
+	if _, err := d.Exec(`ALTER TABLE media_info ADD COLUMN video_codec TEXT NOT NULL DEFAULT ''`); err == nil {
+		for _, s := range []string{
+			`ALTER TABLE media_info ADD COLUMN width INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE media_info ADD COLUMN height INTEGER NOT NULL DEFAULT 0`,
+			`ALTER TABLE media_info ADD COLUMN fps REAL NOT NULL DEFAULT 0`,
+			`ALTER TABLE media_info ADD COLUMN bitrate INTEGER NOT NULL DEFAULT 0`,
+			`DELETE FROM media_info`,
+		} {
+			if _, err := d.Exec(s); err != nil {
+				return fmt.Errorf("migrate: %w", err)
+			}
 		}
 	}
 	// 旧库补列：断点续播（position/duration）上线前的 play_history 无这两列，

@@ -11,45 +11,53 @@
       </div>
     </template>
 
-    <div class="pick glass" @click="pick">
-      <el-icon :size="28"><UploadFilled /></el-icon>
-      <span>点击选择文件，或将文件拖拽到页面任意处</span>
-    </div>
-    <input ref="fileInput" type="file" multiple hidden @change="onPick" />
-
-    <!-- 多个文件同时撞名时给一次性处理，免得逐个点 -->
-    <div v-if="conflicts.length > 1" class="bulk glass">
-      <span class="dim">{{ conflicts.length }} 个文件同名</span>
-      <div class="spacer" />
-      <el-button size="small" link type="warning" @click="resolveAll('overwrite')">全部覆盖</el-button>
-      <el-button size="small" link type="primary" @click="resolveAll('keepBoth')">全部保留两者</el-button>
-      <el-button size="small" link @click="skipAll">全部跳过</el-button>
-    </div>
-
-    <div v-for="t in tasks" :key="t.id" class="task glass">
-      <div class="row">
-        <span class="name" :title="targetName(t)">{{ targetName(t) }}</span>
-        <span class="dim size">{{ formatSize(t.file.size) }}</span>
-        <el-icon class="rm" title="移除" @click="removeTask(t)"><Close /></el-icon>
+    <!-- 落区是整个抽屉体，不止那个框：只认那个框的话稍微拖偏一点就落空，
+         而抽屉一旦打开，落在它任何位置的文件拖放意图都是明确的。框只作视觉锚点。 -->
+    <div class="dz" @dragenter="onDragEnter" @dragover="onDragOver"
+      @dragleave="onDragLeave" @drop="onDrop">
+      <div class="pick glass" :class="{ over }" @click="pick">
+        <el-icon :size="28"><UploadFilled /></el-icon>
+        <span v-if="over">松开以上传到 {{ dir || '/' }}</span>
+        <span v-else>点击选择文件，或将文件拖到这里</span>
       </div>
-      <el-progress :percentage="t.percent" :status="statusOf(t)" :stroke-width="6" />
-      <div class="row">
-        <span class="dim state">{{ stateText(t) }}</span>
-        <el-button v-if="t.state === 'error'" size="small" link type="primary" @click="retry(t)">
-          重试
-        </el-button>
-        <template v-if="t.state === 'conflict'">
-          <el-button size="small" link type="warning" @click="resolve(t, 'overwrite')">覆盖</el-button>
-          <el-button size="small" link type="primary" @click="resolve(t, 'keepBoth')">保留两者</el-button>
-          <el-button size="small" link @click="removeTask(t)">跳过</el-button>
-        </template>
+      <input ref="fileInput" type="file" multiple hidden @change="onPick" />
+
+      <!-- 多个文件同时撞名时给一次性处理，免得逐个点 -->
+      <div v-if="conflicts.length > 1" class="bulk glass">
+        <span class="dim">{{ conflicts.length }} 个文件同名</span>
+        <div class="spacer" />
+        <el-button size="small" link type="warning" @click="resolveAll('overwrite')">全部覆盖</el-button>
+        <el-button size="small" link type="primary" @click="resolveAll('keepBoth')">全部保留两者</el-button>
+        <el-button size="small" link @click="skipAll">全部跳过</el-button>
+      </div>
+
+      <div v-for="t in tasks" :key="t.id" class="task glass">
+        <div class="row">
+          <span class="name" :title="targetName(t)">{{ targetName(t) }}</span>
+          <span class="dim size">{{ formatSize(t.file.size) }}</span>
+          <el-icon class="rm" title="移除" @click="removeTask(t)"><Close /></el-icon>
+        </div>
+        <el-progress :percentage="t.percent" :status="statusOf(t)" :stroke-width="6" />
+        <div class="row">
+          <span class="dim state">{{ stateText(t) }}</span>
+          <el-button v-if="t.state === 'error'" size="small" link type="primary" @click="retry(t)">
+            重试
+          </el-button>
+          <template v-if="t.state === 'conflict'">
+            <el-button size="small" link type="warning" @click="resolve(t, 'overwrite')">覆盖</el-button>
+            <el-button size="small" link type="primary" @click="resolve(t, 'keepBoth')">保留两者</el-button>
+            <el-button size="small" link @click="removeTask(t)">跳过</el-button>
+          </template>
+        </div>
       </div>
     </div>
   </el-drawer>
 </template>
 
 <script setup>
-import { ref, computed, reactive, watch } from 'vue'
+import { ref, computed, reactive, watch, onBeforeUnmount } from 'vue'
+import { ElMessage, ElMessageBox } from 'element-plus'
+import 'element-plus/es/components/message-box/style/css'
 import { UploadFilled, Close } from '@element-plus/icons-vue'
 import { api } from '../utils/api'
 import { join } from '../utils/path'
@@ -59,6 +67,9 @@ import { useApp } from '../stores/app'
 const props = defineProps({
   modelValue: Boolean,
   dir: { type: String, required: true }, // 目标目录逻辑路径
+  // 目标目录所在存储是否支持上传。只读存储上拖进来的文件只会换回一串失败任务，
+  // 不如在入队前就拦住并说清楚。缺省 true：不传的调用方维持原行为。
+  canUpload: { type: Boolean, default: true },
 })
 const emit = defineEmits(['update:modelValue', 'uploaded', 'count', 'tasks'])
 
@@ -71,13 +82,101 @@ const controllers = new Map() // 任务 id → AbortController（非响应式，
 
 function pick() { fileInput.value?.click() }
 
+// ---- 拖放落区 ----
+// 这个框是唯一的落区（整页落区已移除）。系统（桌面/资源管理器/访达）拖进来的文件能不能
+// 落下，取决于三件事，缺一不可：
+//   1. dragenter 与 dragover 都要 preventDefault。只挡 dragover 时，进入元素的那一刻
+//      仍按「不接受放置」处理，光标是禁止符号，drop 不会触发。
+//   2. dropEffect 必须显式设成 'copy'。系统拖出的 effectAllowed 通常是 copyMove/all，
+//      不指定时浏览器可能解析成 move 或 none——显示禁止符号，drop 同样不触发。
+//   3. stopPropagation。页面在 window 上把落区之外的文件拖放标成 dropEffect='none' 吞掉
+//      （防止浏览器把文件当导航打开），事件冒上去会把这里设好的 'copy' 覆盖掉。
+const over = ref(false)
+let beat = 0
+
+function isFileDrag(e) {
+  return !!e.dataTransfer && Array.prototype.includes.call(e.dataTransfer.types || [], 'Files')
+}
+
+// 高亮靠 dragover 心跳维持，不靠 dragleave：拖着文件离开窗口时浏览器不保证补发 dragleave，
+// 只认 dragleave 的话高亮会一直亮着。dragover 在悬停期间持续触发，停 400ms 即判定已离开。
+function endOver() {
+  clearTimeout(beat)
+  beat = 0
+  over.value = false
+}
+
+function accept(e) {
+  e.preventDefault()
+  e.stopPropagation()
+  e.dataTransfer.dropEffect = 'copy'
+  over.value = true
+  clearTimeout(beat)
+  beat = setTimeout(endOver, 400)
+}
+
+function onDragEnter(e) { if (isFileDrag(e)) accept(e) }
+function onDragOver(e) { if (isFileDrag(e)) accept(e) }
+function onDragLeave(e) {
+  // 框内子元素之间移动也会触发 dragleave；relatedTarget 仍在框内就不算离开
+  if (!e.currentTarget.contains(e.relatedTarget)) endOver()
+}
+
+// 拆出文件与目录：拖进来的文件夹在 DataTransfer 里同样算一个 File（大小 0、无类型），
+// 直接传上去只会在网盘里得到一个空文件。按 webkitGetAsEntry 判定剔除，并明确告知。
+// 用 items 而非 files 逐个取：items 里除文件外还可能有 text/uri-list 之类的字符串项，
+// 两个列表的下标并不对齐，只能按 kind === 'file' 自己走一遍。
+function splitEntries(dt) {
+  const files = []
+  const dirs = []
+  for (const it of [...(dt.items || [])]) {
+    if (it.kind !== 'file') continue
+    const entry = it.webkitGetAsEntry?.()
+    const f = it.getAsFile()
+    if (!f) continue
+    if (entry?.isDirectory) dirs.push(f.name)
+    else files.push(f)
+  }
+  // items 不可用时退回 files（此时无法识别目录，交由后端拒绝）
+  if (!files.length && !dirs.length) files.push(...(dt.files || []))
+  return { files, dirs }
+}
+
+async function onDrop(e) {
+  if (!isFileDrag(e)) return
+  e.preventDefault()
+  e.stopPropagation()
+  endOver()
+  // 必须在 await 之前把 File 取出来：DataTransfer 在事件回调结束后即失效，
+  // 等用户点完确认框再来读就已经是空的了。File 本身是持久引用，不受影响。
+  const { files, dirs } = splitEntries(e.dataTransfer)
+  if (dirs.length) ElMessage.warning(`网页上传不支持文件夹，已跳过 ${dirs.length} 项`)
+  if (!files.length) return
+  try {
+    await ElMessageBox.confirm(`将上传到 ${props.dir || '/'}`,
+      files.length === 1 ? `上传「${files[0].name}」？` : `上传 ${files.length} 个文件？`,
+      { confirmButtonText: '上传', cancelButtonText: '取消' })
+  } catch {
+    return // 取消或关闭
+  }
+  addFiles(files)
+}
+
+onBeforeUnmount(endOver)
+
 function onPick(e) {
   addFiles([...e.target.files])
   e.target.value = ''
 }
 
-// 供父组件（拖拽落区）调用
+// 供父组件（拖拽落区）调用。
+// 权限在这里把关而不是在各入口：拖放、点击选择、父组件直接调用三条路都汇到这儿，
+// 挡一次就全挡住了 —— 早先只有窗口级拖放做了这道检查，另外两条一直是漏的。
 function addFiles(files) {
+  if (!props.canUpload) {
+    ElMessage.warning('当前目录所在存储不支持上传')
+    return
+  }
   for (const f of files) {
     tasks.value.unshift(reactive({
       id: nextId++, file: f, dir: props.dir,
@@ -208,6 +307,8 @@ defineExpose({ addFiles })
 
 <style scoped>
 .dh { display: flex; align-items: center; gap: 12px; }
+/* 落区铺满抽屉体：否则它只有内容那么高，队列为空时下方一大片空白拖上去落不到 */
+.dz { min-height: 100%; }
 .bulk {
   display: flex; align-items: center; gap: 6px;
   padding: 8px 12px; margin-bottom: 10px; font-size: 12px;
@@ -220,6 +321,13 @@ defineExpose({ addFiles })
   font-size: 13px; color: var(--text-dim); text-align: center;
 }
 .pick:hover { color: var(--text-main); border-color: var(--accent); }
+/* 拖拽悬停：比 hover 再明确一档——实线边加淡色底，表示「松手就落在这」 */
+.pick.over {
+  color: var(--accent);
+  border-style: solid;
+  border-color: var(--accent);
+  background: rgba(var(--accent-rgb), 0.12);
+}
 .task { padding: 10px 12px; margin-bottom: 10px; }
 .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .name {

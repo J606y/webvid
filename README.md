@@ -52,8 +52,11 @@ webvid reset-password    # 重设管理员密码（省略参数则随机生成�
 webvid uninstall         # 卸载（会询问是否删除数据）
 ```
 
-默认监听 `5243`，数据在 `/opt/webvid/data`，本地存储在 `/opt/webvid/files`。
+默认监听 `5243`，数据在 `/opt/webvid/data`，`/opt/webvid/files` 是留给本地存储的空目录。
 可用 `WEBVID_PORT`、`WEBVID_DIR` 覆盖。
+
+装好后存储列表是空的，到后台「存储」里添加你要挂的盘 —— 本地目录、OneDrive、Google Drive、
+PikPak、Telegram 都在那里。
 
 ### Docker
 
@@ -62,8 +65,8 @@ docker compose up -d --build
 docker logs webvid        # 首次启动会在日志里打印随机管理员密码
 ```
 
-打开 `http://localhost:5243` 登录。`./files` 会自动挂载为「/本地存储」，
-数据库、封面和转码缓存都在 `./data`。
+打开 `http://localhost:5243` 登录，到后台「存储」里添加要挂的盘；`./files` 是留给
+本地存储的空目录，数据库、封面和转码缓存都在 `./data`。
 想固定首启密码，在 `docker-compose.yml` 里取消 `NL_ADMIN_PASSWORD` 的注释（仅建库时生效）。
 
 ### 从源码构建
@@ -116,7 +119,7 @@ NL_ADMIN_PASSWORD=admin123 ./webvid
 |---|---|---|
 | NL_PORT | 5243 | 监听端口 |
 | NL_DATA_DIR | ./data（镜像内 /data） | 数据库与缓存目录 |
-| NL_FILES_DIR | ./files（镜像内 /files） | 首次启动自动挂载的本地存储 |
+| NL_FILES_DIR | ./files（镜像内 /files） | 留给本地存储的目录，需在后台自行添加挂载 |
 | NL_ADMIN_USER / NL_ADMIN_PASSWORD | admin / 随机 | 仅首次建库时生效 |
 | NL_FFMPEG / NL_FFPROBE | 自动探测 | ffmpeg 与 ffprobe 的路径 |
 | NL_TRUSTED_PROXIES | 回环与内网网段 | 逗号分隔的 CIDR，声明可信的反向代理来源 |

@@ -68,6 +68,31 @@ export function progressPct(position, duration) {
   return Math.min(100, Math.round((position / duration) * 100))
 }
 
+// ffprobe 的 codec_name → 通行写法。表里没有的原样大写（新编码冒出来也不至于空着）。
+const codecLabels = {
+  h264: 'H.264', hevc: 'HEVC', h265: 'HEVC', av1: 'AV1', vp8: 'VP8', vp9: 'VP9',
+  mpeg4: 'MPEG-4', mpeg2video: 'MPEG-2', mpeg1video: 'MPEG-1', vc1: 'VC-1',
+  wmv1: 'WMV', wmv2: 'WMV', wmv3: 'WMV', theora: 'Theora', prores: 'ProRes', dvvideo: 'DV',
+}
+
+export function codecLabel(name) {
+  if (!name) return ''
+  return codecLabels[name] || name.toUpperCase()
+}
+
+// 帧率：整数帧率不显示小数（25 而非 25.000），电影那种 23.976 保留三位才看得出是不是降帧。
+export function formatFps(v) {
+  if (!v) return ''
+  const r = Math.round(v)
+  return (Math.abs(v - r) < 0.005 ? String(r) : v.toFixed(3)) + ' fps'
+}
+
+// 码率：Mbps 起步保留一位，不足 1 Mbps 的用 kbps 取整。
+export function formatBitrate(bps) {
+  if (!bps) return ''
+  return bps >= 1e6 ? (bps / 1e6).toFixed(1) + ' Mbps' : Math.round(bps / 1e3) + ' kbps'
+}
+
 // 去扩展名（同 ext() 的 lastIndexOf 判定：i>0 才算有扩展名，隐藏文件如 .gitignore 保持原样不截断）
 export function stripExt(name) {
   const i = name.lastIndexOf('.')

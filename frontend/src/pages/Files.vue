@@ -1,10 +1,5 @@
 <template>
   <div class="page">
-    <div v-if="dragging && caps.upload" class="drop-mask glass-panel">
-      <el-icon :size="46"><UploadFilled /></el-icon>
-      <p>松开以上传到 {{ current }}</p>
-    </div>
-
     <!-- 面包屑 -->
     <el-breadcrumb class="crumbs" separator="/">
       <el-breadcrumb-item>
@@ -61,7 +56,9 @@
             </span>
           </template>
         </el-table-column>
-        <el-table-column label="大小" :width="isMobile ? 84 : 110">
+        <!-- 移动端收窄 12px 给操作列的第四个图标腾地方：42+150+72+116 = 380，
+             仍在 390 屏内不出横向滚动条；「1.2 GB」这类字样 72px 绰绰有余 -->
+        <el-table-column label="大小" :width="isMobile ? 72 : 110">
           <template #default="{ row }">
             <span class="dim">{{ row.is_dir ? '-' : formatSize(row.size) }}</span>
           </template>
@@ -70,8 +67,11 @@
         <el-table-column v-if="!isMobile" label="修改时间" width="160">
           <template #default="{ row }"><span class="dim">{{ formatTime(row.modified) }}</span></template>
         </el-table-column>
-        <el-table-column :width="isMobile ? 88 : 120" align="right">
+        <el-table-column :width="isMobile ? 116 : 150" align="right">
           <template #default="{ row }">
+            <!-- 详情只对视频给：这张卡讲的是播放策略、时长、续播进度，对文档图片没有意义 -->
+            <el-button v-if="isVideo(row)" link size="small" :icon="InfoFilled"
+              @click.stop="openDetail(row, $event.currentTarget)" />
             <el-button v-if="caps.write" link size="small" :icon="EditPen"
               @click.stop="openRename(row)" />
             <el-button v-if="!row.is_dir" link size="small" :icon="Download"
@@ -96,17 +96,20 @@
         selectable :selected="selection.includes(row)" :actions="cardActions(row)"
         @open="dispatch(row)"
         @update:selected="(on) => toggleSelect(row, on)"
-        @command="(cmd) => onCardCommand(cmd, row)" />
+        @command="(cmd, el) => onCardCommand(cmd, row, el)" />
       <div v-if="!loaded" class="dim empty-tip loading-tip"><el-icon class="is-loading"><Loading /></el-icon>加载中…</div>
       <div v-else-if="!items.length" class="dim empty-tip">空目录</div>
     </div>
+
+    <!-- 视频详情二级卡片：与视频库同一个组件，两处手感一致 -->
+    <VideoDetailCard ref="detail" />
 
     <!-- 对话框与抽屉 -->
     <NameDialog v-model="mkdirVisible" title="新建目录" @confirm="doMkdir" />
     <NameDialog v-model="renameVisible" title="重命名" :initial="renameTarget?.name || ''" @confirm="doRename" />
     <MoveCopyDialog v-model="mcVisible" :mode="mcMode" :paths="mcPaths" @done="load"
       @tasks="tasksVisible = true" />
-    <UploadDrawer ref="uploader" v-model="uploadVisible" :dir="current" @uploaded="load"
+    <UploadDrawer ref="uploader" v-model="uploadVisible" :dir="current" :can-upload="caps.upload" @uploaded="load"
       @count="activeUploads = $event" @tasks="tasksVisible = true" />
     <TextDrawer v-model="textVisible" :path="textPath" :kind="textKind" />
     <TasksDrawer v-model="tasksVisible" @count="onTaskCount" @uploads="uploadVisible = true" />
@@ -134,7 +137,7 @@ import 'element-plus/es/components/message-box/style/css'
 import { iconMap as icons } from '../utils/icons'
 import {
   Refresh, Expand, Grid, SortUp, SortDown, Delete, Rank, CopyDocument,
-  FolderAdd, Upload, UploadFilled, HomeFilled, EditPen, Download, Van, Link, Loading,
+  FolderAdd, Upload, HomeFilled, EditPen, Download, Van, Link, Loading, InfoFilled,
 } from '@element-plus/icons-vue'
 import { api } from '../utils/api'
 import { join, filesRoute, fromParams } from '../utils/path'
@@ -147,6 +150,7 @@ import MoveCopyDialog from '../components/MoveCopyDialog.vue'
 import UploadDrawer from '../components/UploadDrawer.vue'
 import TasksDrawer from '../components/TasksDrawer.vue'
 import MediaGridCard from '../components/MediaGridCard.vue'
+import VideoDetailCard from '../components/VideoDetailCard.vue'
 
 // 懒加载：TextDrawer 静态引入 highlight.js/marked/dompurify/github-markdown-css（体积不小），
 // 只有用户点开文本/markdown 文件才用到，按需加载不塞进 Files 路由主 chunk
@@ -164,8 +168,8 @@ const loaded = ref(false)
 const selection = ref([])
 const sortKey = ref('name')
 const sortOrder = ref('asc')
-const dragging = ref(false)
 
+const detail = ref(null) // 视频详情二级卡片
 const mkdirVisible = ref(false)
 const renameVisible = ref(false)
 const renameTarget = ref(null)
@@ -361,17 +365,27 @@ function removeOne(row) {
   return removePaths([fullPath(row)], `确定删除「${row.name}」？此操作不可恢复。`)
 }
 
-// 方格卡片的操作菜单项：写权限决定重命名与删除，目录没有下载
+function isVideo(row) { return !row.is_dir && extType(row.name) === 'video' }
+
+// openDetail 打开视频详情卡（与视频库同一个组件）。列表行只带文件名，详情卡要完整路径；
+// originEl 是 hero 转场的起点：网格给封面元素、列表给触发按钮本身，卡片从那儿放大展开。
+function openDetail(row, originEl) {
+  detail.value?.open({ ...row, path: fullPath(row) }, originEl || null)
+}
+
+// 方格卡片的操作菜单项：详情只给视频，写权限决定重命名与删除，目录没有下载
 function cardActions(row) {
   const a = []
+  if (isVideo(row)) a.push('detail')
   if (caps.value.write) a.push('rename')
   if (!row.is_dir) a.push('download')
   if (caps.value.write) a.push('remove')
   return a
 }
 
-function onCardCommand(cmd, row) {
-  if (cmd === 'rename') openRename(row)
+function onCardCommand(cmd, row, el) {
+  if (cmd === 'detail') openDetail(row, el)
+  else if (cmd === 'rename') openRename(row)
   else if (cmd === 'download') download(row)
   else if (cmd === 'remove') removeOne(row)
 }
@@ -392,40 +406,25 @@ function openMoveCopy(mode) {
   mcVisible.value = true
 }
 
-// 拖拽落区挂在 window 而非 .page：.page 只有内容那么高，文件夹一空/宽屏留白处
-// 拖上去落不到（浏览器显示禁止符号）。文件拖拽一律 preventDefault（避免浏览器把文件
-// 当导航打开），仅当前目录可上传时才显示遮罩并接收；非文件拖拽（选中文本等）忽略。
-function isFileDrag(e) {
-  return !!e.dataTransfer && Array.prototype.includes.call(e.dataTransfer.types || [], 'Files')
-}
-function onWinDragOver(e) {
-  if (!isFileDrag(e)) return
+// 落区只有一个：上传队列抽屉里的那个框（见 UploadDrawer）。这里在 window 上兜底，
+// 把落到落区之外的文件拖放吞掉——浏览器对未处理的文件放置默认是「打开该文件」，
+// 会直接导航离开当前页，正在进行的上传随之全部中断。
+// preventDefault 拿下默认行为，dropEffect='none' 让光标显示禁止符号：落区之外明确不接收，
+// 而不是让人拖着文件在页面上乱找。落区自身 stopPropagation，事件不会冒到这里被覆盖。
+function swallowStrayDrop(e) {
+  if (!e.dataTransfer || !Array.prototype.includes.call(e.dataTransfer.types || [], 'Files')) return
   e.preventDefault()
-  dragging.value = caps.value.upload
-}
-function onWinDrop(e) {
-  if (!isFileDrag(e)) return
-  e.preventDefault()
-  dragging.value = false
-  if (!caps.value.upload) return
-  const files = [...(e.dataTransfer.files || [])]
-  if (files.length) uploader.value?.addFiles(files)
-}
-function onWinDragLeave(e) {
-  if (e.relatedTarget === null) dragging.value = false // 拖出整个窗口才收起遮罩
+  e.dataTransfer.dropEffect = 'none'
 }
 
 // keep-alive：仅在本页激活时监听，离开（缓存驻留）时摘掉，避免后台页误吞其它页的拖放。
 onActivated(() => {
-  window.addEventListener('dragover', onWinDragOver)
-  window.addEventListener('drop', onWinDrop)
-  window.addEventListener('dragleave', onWinDragLeave)
+  window.addEventListener('dragover', swallowStrayDrop)
+  window.addEventListener('drop', swallowStrayDrop)
 })
 onDeactivated(() => {
-  window.removeEventListener('dragover', onWinDragOver)
-  window.removeEventListener('drop', onWinDrop)
-  window.removeEventListener('dragleave', onWinDragLeave)
-  dragging.value = false
+  window.removeEventListener('dragover', swallowStrayDrop)
+  window.removeEventListener('drop', swallowStrayDrop)
 })
 
 watch(current, load, { immediate: true })
@@ -469,16 +468,5 @@ onBeforeRouteLeave(() => { tasksVisible.value = false })
   /* 按钮多，放不下就换行（选中批量操作时出现第二行） */
   .toolbar { flex-wrap: wrap; gap: 8px; padding: 8px 10px; }
   .crumbs { margin-bottom: 10px; }
-}
-
-.drop-mask {
-  position: fixed; inset: 16px; z-index: 200;
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
-  background: rgba(20, 26, 50, 0.65);
-  border: 2px dashed var(--accent);
-  border-radius: var(--radius-panel);
-  backdrop-filter: blur(8px);
-  pointer-events: none;
-  color: var(--accent);
 }
 </style>

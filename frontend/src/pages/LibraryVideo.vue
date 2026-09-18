@@ -59,6 +59,7 @@
       <div class="shelf-head"><h2>最近添加</h2></div>
       <div class="shelf-row">
         <VideoCard v-for="v in recent" :key="v.path" class="shelf-card" :video="v"
+          v-menu="(at) => openMenu(at, v)"
           @open="openDetail(v, $event)" @play="$router.push(playRoute(v.path))">
           {{ formatTime(v.modified) }}
         </VideoCard>
@@ -78,6 +79,7 @@
       </div>
       <div class="shelf-row">
         <VideoCard v-for="v in played" :key="v.path" class="shelf-card" :video="v" show-progress
+          v-menu="(at) => openMenu(at, v)"
           @open="openDetail(v, $event)" @play="$router.push(playRoute(v.path))">
           {{ subText(v) }}
         </VideoCard>
@@ -97,6 +99,7 @@
       </div>
       <div class="v-grid">
         <VideoCard v-for="v in grid" :key="v.path" :video="v" show-progress
+          v-menu="(at) => openMenu(at, v)"
           @open="openDetail(v, $event)" @play="$router.push(playRoute(v.path))">
           <!-- 历史视图副标题=「看到 x% · 时间」；否则大小·时间（显式两分支，不依赖空插槽回落） -->
           <template v-if="historyView">{{ subText(v) }}</template>
@@ -110,19 +113,26 @@
 
     <!-- 视频详情二级卡片（反馈#16） -->
     <VideoDetailCard ref="detail" />
+    <!-- 右键 / 长按菜单 -->
+    <ContextMenu ref="menu" @select="onMenuSelect" />
   </div>
 </template>
 
 <script setup>
 import { ref, onMounted, onUnmounted, watch } from 'vue'
-import { ArrowLeft, ArrowRight, VideoCamera, VideoPlay, FolderOpened, Loading } from '@element-plus/icons-vue'
+import {
+  ArrowLeft, ArrowRight, VideoCamera, VideoPlay, FolderOpened, Loading, Delete, InfoFilled,
+} from '@element-plus/icons-vue'
 import { api } from '../utils/api'
 import VideoDetailCard from '../components/VideoDetailCard.vue'
 import VideoCard from '../components/VideoCard.vue'
+import ContextMenu from '../components/ContextMenu.vue'
 import FeaturedCarousel from '../components/FeaturedCarousel.vue'
+import { vMenu } from '../utils/contextMenu'
 import { playRoute } from '../utils/path'
 import { formatSize, formatTime, progressPct } from '../utils/file'
 import { useMediaLibrary } from '../composables/useMediaLibrary'
+import { useMediaRemove } from '../composables/useMediaRemove'
 import { useApp } from '../stores/app'
 
 defineOptions({ name: 'LibraryVideo' }) // App.vue keep-alive include 按此名匹配
@@ -178,6 +188,27 @@ function openDetail(v, ev) {
   const t = ev?.currentTarget
   detail.value?.open(v, t?.querySelector?.('.art') || t || null)
 }
+
+// ---- 右键 / 长按菜单 ----
+const menu = ref(null)
+const VIDEO_MENU = [
+  { cmd: 'detail', label: '详情', icon: InfoFilled },
+  { cmd: 'remove', label: '删除', icon: Delete, danger: true },
+]
+
+function openMenu(at, v) {
+  // 连卡片的封面框一并记下：从菜单点「详情」时，卡片仍要从封面处展开，
+  // 与直接点击打开是同一套转场，不能因为走了菜单就变成凭空浮现
+  menu.value?.show(at, VIDEO_MENU, { v, el: at.el?.querySelector?.('.art') || at.el || null })
+}
+
+function onMenuSelect(cmd, data) {
+  if (cmd === 'detail') detail.value?.open(data.v, data.el)
+  else if (cmd === 'remove') removeItem(data.v)
+}
+
+// 删除逻辑与照片墙共用（含权限判断的取舍，见 useMediaRemove）
+const { removeItem } = useMediaRemove([grid, recent, played, hero])
 
 // pct 续播进度百分比（0 = 无进度不画条）
 function pct(v) {

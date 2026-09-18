@@ -1,11 +1,18 @@
 /* 播放器外观（原在 Play.vue 的 scoped 块内）。
-   播放器容器由 utils/playerHost.js 自建、脱离 Vue 组件树（画中画要跨页面存活，
-   容器必须能整块搬走），拿不到 scoped 的 data-v 属性，样式因此全局化到 .wv-player。
-
-   为什么类名写两遍：scoped 编译出的前缀是 `.player[data-v-xxx]`，类+属性 = (0,2,0)；
-   只写一次 .wv-player 只有 (0,1,0)，与 ArtPlayer 运行时注入的同级规则打平，而它的
-   <style> 排在产物 CSS 之后就赢了（玻璃胶囊会被打回原样，pip-check 抓到过一次）。
-   `.wv-player.wv-player` 把那一档特异性原样补回来，逐条与迁移前等价。规则本身一条未改。 */
+ *
+ * 为什么必须全局：点网页全屏时 ArtPlayer 会把 .art-video-player 整块搬到 <body>
+ * （artplayer.mjs 的 FULLSCREEN_WEB_IN_BODY 默认 true），页面里的 .player 容器就不再是
+ * 它的祖先，scoped 编译出的 `.player[data-v-xxx] xxx` 整批失配 —— 一进全屏，玻璃胶囊、
+ * 细进度条、手势徽章全部消失，只剩裸文本堆在屏幕左上角（红色进度条还在，因为那来自
+ * theme 选项、是运行时内联写到元素上的，不走 CSS）。
+ * 不要改用 FULLSCREEN_WEB_IN_BODY = false 来回避：.player 带着 glass 类，backdrop-filter
+ * 会给内部的 position:fixed 造出包含块，全屏铺不满，还得在全屏时额外摘掉磨砂，
+ * 等于把问题换成一个更隐蔽的前提（「祖先链上没有 transform/filter」）。
+ *
+ * 为什么类名写两遍：scoped 编译出的前缀是 `.player[data-v-xxx]`，类+属性 = (0,2,0)；
+ * 只写一次 .art-video-player 只有 (0,1,0)，与 ArtPlayer 运行时注入的同级规则打平，而它的
+ * <style> 排在产物 CSS 之后就赢了（玻璃胶囊会被打回原样）。
+ * `.art-video-player.art-video-player` 把那一档特异性原样补回来，逐条与迁移前等价。 */
 
 /* ---- YouTube 风格播放器（红色细进度条 + 液态玻璃控件）---- */
 /* 参考 YouTube 2025「液态玻璃」新版：底部控件不再是扁平白图标，而是每颗按钮各自
@@ -13,14 +20,11 @@
    进度条保持 YouTube 招牌：红色细条、悬停变粗、拖拽红点、全宽贴边。
    磨砂一律用 backdrop-filter（本项目 iOS 上验证安全的方案，backdrop 全保留不受影响），
    绝不用 filter:blur（会在 iOS 触发极光式重光栅化卡死，见项目历史）。 */
-/* 容器铺满宿主：在播放页是 .player-slot（16/9 的玻璃底，播放器未就位时就是它在顶着），
-   寄存时是 #wv-player-park。两处宿主都有确定高度，容器自己不再定宽高比。 */
-.wv-player {
-  width: 100%;
-  height: 100%;
-  overflow: hidden;
-}
-.wv-player.wv-player .art-video-player {
+/* 这条写三遍：它调的几个变量 ArtPlayer 在 `.art-video-player.art-mobile` 里也在调
+   （--art-control-height、--art-bottom-gap），那条是 (0,2,0)、且注入在产物 CSS 之后，
+   打平就轮不到我们。迁移前这里是 (0,3,0)（.player + [data-v] + .art-video-player），
+   照原样补回，手机上的控件高度与底部留白才不会被打回 ArtPlayer 的值。 */
+.art-video-player.art-video-player.art-video-player {
   --art-progress-height: 5px;                     /* 悬停态条高；静止态取其半（~2.5px），细如 YouTube */
   --art-progress-color: rgba(255, 255, 255, .22); /* 未播放轨道 */
   --art-loaded-color: rgba(255, 255, 255, .45);   /* 已缓冲段 */
@@ -30,30 +34,49 @@
   --art-control-icon-scale: 1;
   --art-bottom-gap: 14px;
   --art-widget-background: rgba(255, 255, 255, .06);  /* 弹出层底色：与下方控件胶囊同透明度（关了 backdrop 后此变量才真正生效） */
+  /* 设置面板与选择列表最高不超过播放器自己。ArtPlayer 给的是定值（桌面 300px、手机 180px），
+     而手机上播放器只有 ~206px 高（390 屏减页边距后 16:9），面板从控件行往上顶，选项一多就
+     被播放器的 overflow 裁掉半截。两个面板自带 overflow-y:auto，压到装得下即可，内部自行滚动。
+     百分比按定位祖先（.art-video-player）的高度算，桌面与全屏下 min() 取 300px，保持原样。 */
+  --art-settings-max-height: min(300px, calc(100% - var(--art-control-height) - 10px));
+  --art-selector-max-height: min(300px, calc(100% - var(--art-control-height) - 10px));
+}
+/* 触屏长按播放器时，iOS 会把这一下当成选词：浮出那枚椭圆放大镜，把「按住倍速」整个盖掉；
+   长按图片/链接还会弹系统菜单。两个属性都可继承，设在播放器根上一次覆盖全部后代 ——
+   控件文字、notice、手势徽章（「10 秒」「2 倍速播放中」）都在里面，只给 <video> 设会漏掉它们。
+   -webkit- 那份不能省：ArtPlayer 自己只写了不带前缀的 user-select，而 WebKit 长期只认
+   带前缀的写法。-webkit-touch-callout 只挡系统菜单、挡不住文字选区，两个缺一不可
+   （媒体库卡片的同类问题见 utils/contextMenu.js）。
+   ArtPlayer 给信息面板的 .art-info-content 单独写了 user-select:all，直接命中元素、
+   优先级高于这里的继承值，视频信息照样能复制。 */
+.art-video-player.art-video-player {
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
 }
 /* 进度条全宽贴边（YouTube 招牌）：抵消底栏左右内边距，红条从边到边；
    底栏 overflow:hidden，圆点在 0% 处半探出左缘会被裁掉，恰是 YouTube 的观感。 */
-.wv-player.wv-player .art-bottom .art-progress {
+.art-video-player.art-video-player .art-bottom .art-progress {
   margin-left: calc(var(--art-padding) * -1);
   margin-right: calc(var(--art-padding) * -1);
 }
 /* 左右分组：清掉 ArtPlayer 的负边距（原本让图标视觉贴边），胶囊之间留呼吸间距 */
-.wv-player.wv-player .art-controls-left,
-.wv-player.wv-player .art-controls-right {
+.art-video-player.art-video-player .art-controls-left,
+.art-video-player.art-video-player .art-controls-right {
   margin: 0;
   gap: 8px;
   align-items: center;
 }
-.wv-player.wv-player .art-controls { padding-bottom: 8px; }
+.art-video-player.art-video-player .art-controls { padding-bottom: 8px; }
 /* ArtPlayer 检测到手机 UA（.art-mobile）会给两个控件组加负边距让图标贴边——玻璃胶囊
    贴边很难看；上面的 margin:0 与它平级打平、而 ArtPlayer 样式是运行时注入排在产物 CSS
    之后会赢，这里按更高特异性压回。 */
-.wv-player.wv-player .art-video-player.art-mobile .art-controls-left { margin-left: 0; }
-.wv-player.wv-player .art-video-player.art-mobile .art-controls-right { margin-right: 0; }
+.art-video-player.art-video-player.art-mobile .art-controls-left { margin-left: 0; }
+.art-video-player.art-video-player.art-mobile .art-controls-right { margin-right: 0; }
 /* 每颗控件 = 一枚液态玻璃胶囊：近乎透明的底 + 弱磨砂（透背后画面）+ 顶部高光描边 + 轻投影。
    要点：blur 压到 7px 才透（16px 会糊成厚磨砂），底色降到 .06、靠 saturate/brightness 提折射感
    与更亮的高光内描边把玻璃「形状」勾出来 —— 这才是液态玻璃而非磨砂玻璃。 */
-.wv-player.wv-player .art-controls .art-control {
+.art-video-player.art-video-player .art-controls .art-control {
   opacity: 1;                     /* 玻璃底恒显，不再靠透明度淡入淡出 */
   min-width: 42px;
   min-height: 38px;
@@ -66,19 +89,19 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), inset 0 -1px 2px rgba(0, 0, 0, .12), 0 2px 10px rgba(0, 0, 0, .22);
   transition: background var(--art-transition-duration) ease;
 }
-.wv-player.wv-player .art-controls .art-control:hover { background: rgba(255, 255, 255, .18); }
+.art-video-player.art-video-player .art-controls .art-control:hover { background: rgba(255, 255, 255, .18); }
 /* 时间胶囊：左右多留白、数字等宽不抖，贴近 YouTube「1:26 / 4:02」 */
-.wv-player.wv-player .art-control-time {
+.art-video-player.art-video-player .art-control-time {
   padding: 0 12px;
   font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 /* 二级弹窗（设置 / 音量竖条 / 画质选择 / 右键菜单）同款通透液态玻璃：
    弱模糊透背后画面 + 高光内描边成形，跟胶囊一个配方，不再是 Image#3 那种厚暗磨砂。 */
-.wv-player.wv-player .art-settings,
-.wv-player.wv-player .art-selector-list,
-.wv-player.wv-player .art-contextmenus,
-.wv-player.wv-player .art-volume-inner {
+.art-video-player.art-video-player .art-settings,
+.art-video-player.art-video-player .art-selector-list,
+.art-video-player.art-video-player .art-contextmenus,
+.art-video-player.art-video-player .art-volume-inner {
   color: #fff;                                    /* 白字，和按钮白图标一致 */
   -webkit-backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
   backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
@@ -87,9 +110,9 @@
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), 0 8px 28px rgba(0, 0, 0, .3);
   text-shadow: 0 1px 3px rgba(0, 0, 0, .7);       /* 白字在亮画面上靠深色投影保可读（图标本有描边） */
 }
-/* 中间大播放态图标：液态玻璃圆 + 纯三角（图标已在 playerHost 换成无实心圆的三角）。
+/* 中间大播放态图标：液态玻璃圆 + 纯三角（图标已在 Play.vue 的 mount() 换成无实心圆的三角）。
    仅暂停/点按时浮现，玻璃圆透背后画面 + 高光描边，三角白色带投影保对比。 */
-.wv-player.wv-player .art-state {
+.art-video-player.art-video-player .art-state {
   width: 76px;
   height: 76px;
   border-radius: 50%;
@@ -99,7 +122,7 @@
   backdrop-filter: blur(10px) saturate(1.8) brightness(1.1);
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 6px 22px rgba(0, 0, 0, .3);
 }
-.wv-player.wv-player .art-state .art-icon {
+.art-video-player.art-video-player .art-state .art-icon {
   width: 32px;  /* 定像素并与 svg 的 width/height 属性一致：原 42% 的百分比链在 iOS WebKit
                    会把内层 svg 解析成 0 高（只剩玻璃圆没三角）；原 filter:drop-shadow 也是
                    iOS 光栅化雷区（同极光教训）一并去掉，对比度交给玻璃圆的底色+描边 */
@@ -107,38 +130,105 @@
   margin-left: 3px; /* 三角视觉重心偏左，右移一点看着才居中 */
 }
 
-/* ---- 画中画寄存宿主 ---- */
-/* 人离开播放页、视频还在系统小窗里播时，容器搬到这里继续挂在文档上。
-   只能离屏，不能 display:none / visibility:hidden —— 那会让 WebKit 判定元素不可渲染，
-   连带把小窗收掉。尺寸留 320×180 而非 0：给渲染树一个正常的视频盒子。 */
-#wv-player-park {
-  position: fixed;
-  left: -9999px;
+/* ---- 手势反馈：双击左右 ±10 秒的光晕、按住倍速的提示条 ---- */
+/* 半圆光晕（YouTube 招牌的 D 形）：外缘贴屏、内缘鼓成半椭圆。
+   只用 rgba 底 + opacity 过渡，不碰 filter:blur —— 高频触发的动画走那条路
+   会在 iOS 触发重光栅化卡死（见项目历史）。 */
+.art-video-player.art-video-player .ges-zone {
+  position: absolute;
   top: 0;
-  width: 320px;
-  height: 180px;
-  pointer-events: none;
-  z-index: -1;
+  bottom: 0;
+  width: 35%; /* 与 playerGestures.js 的 SIDE_RATIO 对齐 */
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(255, 255, 255, .13);
+  opacity: 0;
+  transition: opacity .42s ease-out; /* 松手后缓缓退场 */
 }
+.art-video-player.art-video-player .ges-zone.is-on {
+  opacity: 1;
+  transition: opacity .08s ease-out; /* 亮起要跟手，慢一点就不像是这一击打出来的 */
+}
+.art-video-player.art-video-player .ges-back { left: 0; border-radius: 0 50% 50% 0 / 0 50% 50% 0; }
+.art-video-player.art-video-player .ges-fwd { right: 0; border-radius: 50% 0 0 50% / 50% 0 0 50%; }
+/* 徽章：与控件胶囊同一套液态玻璃配方 */
+.art-video-player.art-video-player .ges-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: 11px 18px;
+  border-radius: 15px;
+  color: #fff;
+  font-size: 13px;
+  font-variant-numeric: tabular-nums; /* 10→20→30 累加时数字不左右抖 */
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .2);
+  -webkit-backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), 0 6px 22px rgba(0, 0, 0, .28);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .7);
+}
+.art-video-player.art-video-player .ges-arrows path { fill: #fff; opacity: .3; }
+.art-video-player.art-video-player .ges-back .ges-arrows { transform: scaleX(-1); } /* 同一份箭头，左侧翻过来指向后退 */
+/* 三枚三角依次点亮，朝快进方向流动 */
+.art-video-player.art-video-player .ges-zone.is-on .ges-arrows path:nth-child(1) { animation: ges-arrow .75s linear infinite; }
+.art-video-player.art-video-player .ges-zone.is-on .ges-arrows path:nth-child(2) { animation: ges-arrow .75s linear .17s infinite; }
+.art-video-player.art-video-player .ges-zone.is-on .ges-arrows path:nth-child(3) { animation: ges-arrow .75s linear .34s infinite; }
+@keyframes ges-arrow {
+  0%, 70%, 100% { opacity: .3; }
+  25% { opacity: 1; }
+}
+/* 倍速提示：顶部居中一枚胶囊，只在按住期间出现 */
+.art-video-player.art-video-player .ges-boost {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 14px;
+  border-radius: 999px;
+  color: #fff;
+  font-size: 13px;
+  white-space: nowrap;
+  background: rgba(255, 255, 255, .06);
+  border: 1px solid rgba(255, 255, 255, .2);
+  -webkit-backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), 0 6px 22px rgba(0, 0, 0, .28);
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .7);
+  opacity: 0;
+  transform: translate(-50%, -6px);
+  transition: opacity .18s ease-out, transform .18s ease-out;
+}
+.art-video-player.art-video-player .ges-boost.is-on { opacity: 1; transform: translate(-50%, 0); }
+/* 动画只在提示条露面时跑，收起来就别让它在后台空转 */
+.art-video-player.art-video-player .ges-boost path { fill: #fff; }
+.art-video-player.art-video-player .ges-boost.is-on path { animation: ges-arrow .75s linear infinite; }
+.art-video-player.art-video-player .ges-boost.is-on path:nth-child(2) { animation-delay: .17s; }
 
 /* ---- 移动端：控件收一号 ---- */
 /* 390px 屏减页边距后控件行只有 ~350px，桌面尺度（胶囊 42 + gap 8 + 时间胶囊两侧 12px）
    七颗排不下会挤成一团。胶囊 36/34、图标 20、gap 5、时间字号 12，整行 ~320px 落进一行
    还留呼吸空间；控件行高回 44 给触控留高度（.art-mobile 压成 38 太矮）。 */
 @media (max-width: 768px) {
-  .wv-player { border-radius: 14px; }
-  .wv-player.wv-player .art-video-player {
+  .art-video-player.art-video-player.art-video-player {
     --art-control-icon-size: 20px;
     --art-padding: 8px;
     --art-control-height: 44px;
   }
-  .wv-player.wv-player .art-controls-left,
-  .wv-player.wv-player .art-controls-right { gap: 5px; }
-  .wv-player.wv-player .art-controls .art-control {
+  .art-video-player.art-video-player .art-controls-left,
+  .art-video-player.art-video-player .art-controls-right { gap: 5px; }
+  .art-video-player.art-video-player .art-controls .art-control {
     min-width: 36px;
     min-height: 34px;
     border-radius: 12px;
     padding: 0 2px;
   }
-  .wv-player.wv-player .art-control-time { padding: 0 7px; font-size: 12px; }
+  .art-video-player.art-video-player .art-control-time { padding: 0 7px; font-size: 12px; }
+  /* 手势反馈同步收一号：390px 屏上原尺寸的徽章会压掉半个画面 */
+  .art-video-player.art-video-player .ges-badge { gap: 4px; padding: 9px 14px; font-size: 12px; }
+  .art-video-player.art-video-player .ges-boost { top: 10px; padding: 6px 12px; font-size: 12px; }
 }

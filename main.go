@@ -2,14 +2,12 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"mime"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -53,6 +51,8 @@ func main() {
 
 	port := env("NL_PORT", "5243")
 	dataDir := env("NL_DATA_DIR", "./data")
+	// 本地存储的备用目录：建出来备用，但**不再自动挂载** —— 挂什么盘由用户在后台自己定，
+	// 装完就凭空多出一个「/本地存储」属于替用户做主。想用它，后台添加本地驱动指到这里即可。
 	filesDir := env("NL_FILES_DIR", "./files")
 	if err := os.MkdirAll(filesDir, 0o755); err != nil {
 		log.Fatalf("创建文件目录失败: %v", err)
@@ -96,26 +96,6 @@ func main() {
 			"  密  码: %s\n"+
 			"  （仅本次显示，请登录后修改）\n"+
 			"==================================", name, pw)
-	}
-
-	// 首启自动挂载本地存储
-	var storageCount int
-	if err := d.QueryRow(`SELECT COUNT(*) FROM storages`).Scan(&storageCount); err != nil {
-		log.Fatalf("查询存储失败: %v", err)
-	}
-	if storageCount == 0 {
-		abs, err := filepath.Abs(filesDir)
-		if err != nil {
-			abs = filesDir
-		}
-		cfgJSON, _ := json.Marshal(map[string]string{"root_path": abs})
-		if _, err := d.Exec(
-			`INSERT INTO storages(mount_path, driver, config, ord, enabled, status, created_at)
-			 VALUES('/本地存储', 'local', ?, 0, 1, '', ?)`,
-			string(cfgJSON), time.Now().UTC().Format(time.RFC3339)); err != nil {
-			log.Fatalf("初始化本地存储失败: %v", err)
-		}
-		log.Printf("已自动挂载本地存储: /本地存储 -> %s", abs)
 	}
 
 	f := fs.New(d)

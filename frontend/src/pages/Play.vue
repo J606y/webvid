@@ -40,6 +40,7 @@ import { rawUrl, hlsUrl, fromParams } from '../utils/path'
 import { pipMode, isPipActive, enterPip, exitPip } from '../utils/pip'
 import { hevcCap, demoteHevc } from '../utils/codec'
 import { attachMediaSession } from '../utils/mediaSession'
+import { attachPlayerGestures } from '../utils/playerGestures'
 
 const route = useRoute()
 // path 冻结在进入播放页时的值（不跟 route 变）：离开时路由先改、组件后卸载，
@@ -52,6 +53,16 @@ const name = computed(() => path.value.split('/').filter(Boolean).pop() || '')
 // （对云盘是一次网络往返）就能确定直连播放，进页立刻挂播放器秒开。
 // 其余格式交 /video/info 探测决策（hls = remux/转码，unsupported = 下载兜底）。
 const DIRECT_EXTS = new Set(['mp4', 'webm', 'mov', 'm4v'])
+
+// iPhone 不给任意元素用 Fullscreen API（document 上连 webkitFullscreenEnabled 都没有），
+// ArtPlayer 据此退到 $video.webkitEnterFullscreen()，那是把画面整个交给系统 AVPlayer ——
+// 液态玻璃控件、双击快进、长按倍速全部失效，换成 iOS 自己那套。这种设备上干脆不给原生
+// 全屏按钮，只留网页全屏（纯 CSS 撑满，不碰原生 API，手势照常）。
+// 按能力判断而不是认 UA：iPad 与桌面支持元素全屏，全屏后 DOM 还是我们的，没必要砍。
+const CAN_ELEMENT_FULLSCREEN = !!(
+  document.fullscreenEnabled || document.webkitFullscreenEnabled
+  || document.mozFullScreenEnabled || document.msFullscreenEnabled
+)
 
 // 直连格式无需探测，起手即定 'direct'（进页首帧就渲染播放器，不闪占位）；
 // 其余留空 ''，模板落到「检测格式中…」占位，探测回来再切成 hls/unsupported。
@@ -67,11 +78,12 @@ let resumeAt = 0        // 续播起点（秒），起播后定位到此处
 let reportTimer = null  // 进度定时上报句柄
 let pipAdded = false    // 画中画按钮是否已加（每次 mount 重置，能力要等元数据才准）
 let detachMS = null     // 系统「正在播放」会话的摘除句柄
+let detachGes = null    // 双击快进/长按倍速手势的摘除句柄
 let curHevc = false     // 本次直出靠的是本机自报的 HEVC 能力（解码失败时据此降级）
 
 // 画中画图标：SF Symbols 的 pip.enter 形制（外框 + 右下角小窗）。
 // width/height 必须显式写死——只有 viewBox 的 svg 在 iOS WebKit 的百分比尺寸链里会解析成
-// 0 高，iPhone 上图标直接消失（同下方 .art-state 三角的教训）。
+// 0 高，iPhone 上图标直接消失（同 player.css 里 .art-state 三角的教训）。
 const PIP_ICON = '<svg class="art-icon art-icon-pip" xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24">'
   + '<path fill-rule="evenodd" d="M3 4.5h18A1.5 1.5 0 0 1 22.5 6v12a1.5 1.5 0 0 1-1.5 1.5H3A1.5 1.5 0 0 1 1.5 18V6A1.5 1.5 0 0 1 3 4.5Zm.2 1.7v11.6h17.6V6.2H3.2Z"></path>'
   + '<rect x="11.8" y="10.8" width="8.4" height="6" rx="1"></rect>'
@@ -174,6 +186,8 @@ function teardown() {
   if (reportTimer) { clearTimeout(reportTimer); reportTimer = null }
   // 先摘系统会话再销毁播放器：否则片名与封面会留在灵动岛上，指着一个已经不在播的视频
   if (detachMS) { detachMS(); detachMS = null }
+  // 手势要赶在播放器销毁前摘掉：正按住倍速时离页，得把倍率还回去
+  if (detachGes) { detachGes(); detachGes = null }
   if (art) {
     try { report(art.currentTime) } catch { /* 末次进度，忽略异常 */ }
     art.destroy(true)
@@ -215,13 +229,13 @@ async function mount(url, isHls) {
     // 关掉自带 pip：它只走标准 W3C 的 requestPictureInPicture，iPhone 上没有这个 API，
     // 按钮点了没反应。改用下方 addPipControl 按真实能力加按钮（见 utils/pip.js）。
     pip: false,
-    fullscreen: true,
+    fullscreen: CAN_ELEMENT_FULLSCREEN,
     fullscreenWeb: true,
     hotkey: true,
     autoSize: false,
     autoplay: true,
     // 中间大播放态图标换成纯三角（去掉 ArtPlayer 自带的实心圆），
-    // 下方 .art-state 用液态玻璃圆承托 —— 圆由玻璃画、三角只是白色glyph。
+    // player.css 里 .art-state 用液态玻璃圆承托 —— 圆由玻璃画、三角只是白色glyph。
     // svg 必须带显式 width/height 属性（ArtPlayer 自带图标全都带）：只有 viewBox 的
     // svg 在 iOS WebKit 的百分比尺寸链里会解析成 0 高，iPhone 上三角直接消失只剩玻璃圆。
     icons: {
@@ -271,6 +285,8 @@ async function mount(url, isHls) {
   pipAdded = false
   // 接上系统「正在播放」：iOS 锁屏与灵动岛拿到片名、封面、进度与控件
   detachMS = attachMediaSession(art, path.value)
+  // 双击左右 ±10 秒、按住 2 倍速（会改写 ArtPlayer 的双击语义，见 playerGestures.js）
+  detachGes = attachPlayerGestures(art)
 
   // 续播定位：direct / Safari 原生 HLS 走 video.currentTime；hls.js 已在 startPosition 处理
   art.on('ready', () => {
@@ -290,7 +306,9 @@ async function mount(url, isHls) {
       if (art && !art.paused) report(art.currentTime)
     }, 10000)
   })
-  art.on('video:pause', () => report(art.currentTime))
+  // 桌面端双击快进时，手势层会把 ArtPlayer 那次单击 toggle 原样撤销，
+  // 留下一个「暂停事件到达时其实已经在播」的瞬间 —— 那不是真暂停，不必上报。
+  art.on('video:pause', () => { if (!art.playing) report(art.currentTime) })
   art.on('video:seeked', () => report(art.currentTime))
   art.on('video:ended', () => report(art.duration || 0, true)) // 播完 → 后端归零，下次从头
 }
@@ -315,100 +333,11 @@ onBeforeUnmount(teardown)
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
 }
+/* 播放器自身的皮肤在全局 assets/player.css —— 网页全屏时 ArtPlayer 会把
+   .art-video-player 搬到 <body>，scoped 前缀跟不过去（见那个文件的抬头）。
+   这里只留页面自己的容器。 */
 .player { aspect-ratio: 16/9; overflow: hidden; }
 
-/* ---- YouTube 风格播放器（红色细进度条 + 液态玻璃控件）---- */
-/* 参考 YouTube 2025「液态玻璃」新版：底部控件不再是扁平白图标，而是每颗按钮各自
-   坐在一枚半透明磨砂玻璃胶囊上（backdrop-filter 实时模糊背后画面 + 顶部高光描边）。
-   进度条保持 YouTube 招牌：红色细条、悬停变粗、拖拽红点、全宽贴边。
-   磨砂一律用 backdrop-filter（本项目 iOS 上验证安全的方案，backdrop 全保留不受影响），
-   绝不用 filter:blur（会在 iOS 触发极光式重光栅化卡死，见项目历史）。 */
-.player :deep(.art-video-player) {
-  --art-progress-height: 5px;                     /* 悬停态条高；静止态取其半（~2.5px），细如 YouTube */
-  --art-progress-color: rgba(255, 255, 255, .22); /* 未播放轨道 */
-  --art-loaded-color: rgba(255, 255, 255, .45);   /* 已缓冲段 */
-  --art-hover-color: rgba(255, 255, 255, .5);     /* 鼠标前方的预览高亮 */
-  --art-indicator-size: 13px;                     /* 拖拽圆点（红色，悬停浮现） */
-  --art-control-icon-size: 22px;                  /* 图标收到 YouTube 尺度，好落进玻璃胶囊 */
-  --art-control-icon-scale: 1;
-  --art-bottom-gap: 14px;
-  --art-widget-background: rgba(255, 255, 255, .06);  /* 弹出层底色：与下方控件胶囊同透明度（关了 backdrop 后此变量才真正生效） */
-}
-/* 进度条全宽贴边（YouTube 招牌）：抵消底栏左右内边距，红条从边到边；
-   底栏 overflow:hidden，圆点在 0% 处半探出左缘会被裁掉，恰是 YouTube 的观感。 */
-.player :deep(.art-bottom .art-progress) {
-  margin-left: calc(var(--art-padding) * -1);
-  margin-right: calc(var(--art-padding) * -1);
-}
-/* 左右分组：清掉 ArtPlayer 的负边距（原本让图标视觉贴边），胶囊之间留呼吸间距 */
-.player :deep(.art-controls-left),
-.player :deep(.art-controls-right) {
-  margin: 0;
-  gap: 8px;
-  align-items: center;
-}
-.player :deep(.art-controls) { padding-bottom: 8px; }
-/* ArtPlayer 检测到手机 UA（.art-mobile）会给两个控件组加负边距让图标贴边——玻璃胶囊
-   贴边很难看；上面的 margin:0 与它平级打平、而 ArtPlayer 样式是运行时注入排在产物 CSS
-   之后会赢，这里按更高特异性压回。 */
-.player :deep(.art-video-player.art-mobile .art-controls-left) { margin-left: 0; }
-.player :deep(.art-video-player.art-mobile .art-controls-right) { margin-right: 0; }
-/* 每颗控件 = 一枚液态玻璃胶囊：近乎透明的底 + 弱磨砂（透背后画面）+ 顶部高光描边 + 轻投影。
-   要点：blur 压到 7px 才透（16px 会糊成厚磨砂），底色降到 .06、靠 saturate/brightness 提折射感
-   与更亮的高光内描边把玻璃「形状」勾出来 —— 这才是液态玻璃而非磨砂玻璃。 */
-.player :deep(.art-controls .art-control) {
-  opacity: 1;                     /* 玻璃底恒显，不再靠透明度淡入淡出 */
-  min-width: 42px;
-  min-height: 38px;
-  padding: 0 4px;
-  border-radius: 13px;
-  background: rgba(255, 255, 255, .06);
-  border: 1px solid rgba(255, 255, 255, .2);
-  -webkit-backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
-  backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), inset 0 -1px 2px rgba(0, 0, 0, .12), 0 2px 10px rgba(0, 0, 0, .22);
-  transition: background var(--art-transition-duration) ease;
-}
-.player :deep(.art-controls .art-control:hover) { background: rgba(255, 255, 255, .18); }
-/* 时间胶囊：左右多留白、数字等宽不抖，贴近 YouTube「1:26 / 4:02」 */
-.player :deep(.art-control-time) {
-  padding: 0 12px;
-  font-size: 13px;
-  font-variant-numeric: tabular-nums;
-}
-/* 二级弹窗（设置 / 音量竖条 / 画质选择 / 右键菜单）同款通透液态玻璃：
-   弱模糊透背后画面 + 高光内描边成形，跟胶囊一个配方，不再是 Image#3 那种厚暗磨砂。 */
-.player :deep(.art-settings),
-.player :deep(.art-selector-list),
-.player :deep(.art-contextmenus),
-.player :deep(.art-volume-inner) {
-  color: #fff;                                    /* 白字，和按钮白图标一致 */
-  -webkit-backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
-  backdrop-filter: blur(7px) saturate(1.8) brightness(1.08);
-  border: 1px solid rgba(255, 255, 255, .2);
-  border-radius: 14px;
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .38), 0 8px 28px rgba(0, 0, 0, .3);
-  text-shadow: 0 1px 3px rgba(0, 0, 0, .7);       /* 白字在亮画面上靠深色投影保可读（图标本有描边） */
-}
-/* 中间大播放态图标：液态玻璃圆 + 纯三角（图标已在 mount() 换成无实心圆的三角）。
-   仅暂停/点按时浮现，玻璃圆透背后画面 + 高光描边，三角白色带投影保对比。 */
-.player :deep(.art-state) {
-  width: 76px;
-  height: 76px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, .14);
-  border: 1px solid rgba(255, 255, 255, .3);
-  -webkit-backdrop-filter: blur(10px) saturate(1.8) brightness(1.1);
-  backdrop-filter: blur(10px) saturate(1.8) brightness(1.1);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .45), 0 6px 22px rgba(0, 0, 0, .3);
-}
-.player :deep(.art-state .art-icon) {
-  width: 32px;  /* 定像素并与 svg 的 width/height 属性一致：原 42% 的百分比链在 iOS WebKit
-                   会把内层 svg 解析成 0 高（只剩玻璃圆没三角）；原 filter:drop-shadow 也是
-                   iOS 光栅化雷区（同极光教训）一并去掉，对比度交给玻璃圆的底色+描边 */
-  height: 32px;
-  margin-left: 3px; /* 三角视觉重心偏左，右移一点看着才居中 */
-}
 .unsupported, .detecting {
   padding: 70px 24px; text-align: center;
   display: flex; flex-direction: column; align-items: center; gap: 12px;
@@ -436,23 +365,7 @@ onBeforeUnmount(teardown)
     width: 100%;
     margin: auto 0; /* 头部之下剩余空间垂直居中 */
   }
-  /* 底栏控件收一号：390px 屏减页边距后控件行只有 ~350px，桌面尺度（胶囊 42 + gap 8 +
-     时间胶囊两侧 12px）七颗排不下会挤成一团。胶囊 36/34、图标 20、gap 5、时间字号 12，
-     整行 ~320px 落进一行还留呼吸空间；控件行高回 44 给触控留高度（.art-mobile 压成 38 太矮）。 */
-  .player :deep(.art-video-player) {
-    --art-control-icon-size: 20px;
-    --art-padding: 8px;
-    --art-control-height: 44px;
-  }
-  .player :deep(.art-controls-left),
-  .player :deep(.art-controls-right) { gap: 5px; }
-  .player :deep(.art-controls .art-control) {
-    min-width: 36px;
-    min-height: 34px;
-    border-radius: 12px;
-    padding: 0 2px;
-  }
-  .player :deep(.art-control-time) { padding: 0 7px; font-size: 12px; }
+  /* 播放器控件在窄屏收一号，同样在 assets/player.css */
   .unsupported, .detecting { margin: auto 0; } /* 兜底/探测占位同样居中，不再吊在顶部 */
 }
 </style>

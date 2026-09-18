@@ -38,6 +38,7 @@ const pct = computed(() => progressPct(props.video?.position, props.video?.durat
   background: #14141d;
   transition: transform 0.22s ease, box-shadow 0.22s ease;
 }
+/* 长按让开原生行为（touch-callout / user-select）由 v-menu 指令设在卡片根上，两个属性都可继承 */
 .art img { position: relative; z-index: 1; width: 100%; height: 100%; object-fit: cover; display: block; }
 .abs { position: absolute; inset: 0; }
 .v-card:hover .art {

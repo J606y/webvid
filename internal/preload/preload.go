@@ -622,7 +622,9 @@ func (s *Service) process(ctx context.Context, gen int, u *user.User, fr fileRow
 			s.noteFail(gen, ctx, "取不到封面", err)
 		}
 	}
-	// 视频源信息：direct 扩展名由 handler 按扩展名秒判，无需 ffprobe；其余探测并回写 media_info。
+	// 视频源信息：探测并回写 media_info。direct 扩展名（mp4 系）播放时确实用不着 ffprobe，
+	// 但详情卡要显示编码/分辨率/帧率/码率，只能从这里来，所以它们也在探测之列
+	// （判据见 media.ProbeStatus）。
 	if fr.needProbe {
 		fi := model.FileInfo{Name: fr.name, Size: fr.size, Modified: parseMod(fr.modified)}
 		pctx, cancel := context.WithTimeout(ctx, probeTimeout)

@@ -5,6 +5,13 @@
 /docker-test/
 /_shots/
 /frontend/_shots/
+# 播放手势验收的一次性产物：ffmpeg 造的样本片与截图，跑一次自己会生成
+/frontend/_gesture-shots/
+/frontend/_gesture-sample.mp4
+/frontend/_dock-shots/
+# 发版前草拟的更新日志与随手截的图，都是过程产物
+/_release-*.md
+/_shot.png
 # e2e 用的一次性实例（独立端口+独立数据目录，跑完即删）
 /_e2e_data/
 /_e2e_files/

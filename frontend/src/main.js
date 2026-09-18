@@ -4,7 +4,7 @@ import App from './App.vue'
 import router from './router'
 import 'element-plus/theme-chalk/dark/css-vars.css'
 import './assets/glass.css'
-import './assets/player.css' // 播放器容器脱离 Vue 组件树（画中画跨页存活），样式只能全局
+import './assets/player.css' // 网页全屏时播放器会被搬到 body，scoped 跟不过去，样式只能全局
 
 const app = createApp(App)
 // 兜底：组件渲染/生命周期抛错与未捕获 promise rejection 只记录，不留白屏噪音

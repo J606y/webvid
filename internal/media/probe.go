@@ -40,10 +40,17 @@ func LookTool(name string) string {
 }
 
 type probeStream struct {
-	CodecType   string `json:"codec_type"`
-	CodecName   string `json:"codec_name"`
-	PixFmt      string `json:"pix_fmt"`
-	Disposition struct {
+	CodecType string `json:"codec_type"`
+	CodecName string `json:"codec_name"`
+	PixFmt    string `json:"pix_fmt"`
+	Width     int    `json:"width"`
+	Height    int    `json:"height"`
+	// 帧率是 "24000/1001" 这样的分数串。avg 是全片平均（变帧率的片子按它才诚实），
+	// r 是基准值；avg 对某些流是 "0/0"，那时回落到 r。
+	AvgFrameRate string `json:"avg_frame_rate"`
+	RFrameRate   string `json:"r_frame_rate"`
+	BitRate      string `json:"bit_rate"` // 十进制字符串；MKV 的流级码率常常缺失，兜底见 decide
+	Disposition  struct {
 		AttachedPic int `json:"attached_pic"`
 	} `json:"disposition"`
 }
@@ -52,7 +59,24 @@ type probeOut struct {
 	Streams []probeStream `json:"streams"`
 	Format  struct {
 		Duration string `json:"duration"`
+		BitRate  string `json:"bit_rate"`
+		Size     string `json:"size"`
 	} `json:"format"`
+}
+
+// parseRate 解析 ffprobe 的分数帧率（"24000/1001" → 23.976）。
+// 空串、"0/0"、除零一律返回 0 = 未知。
+func parseRate(s string) float64 {
+	num, den, ok := strings.Cut(s, "/")
+	if !ok {
+		return 0
+	}
+	n, err1 := strconv.ParseFloat(num, 64)
+	d, err2 := strconv.ParseFloat(den, 64)
+	if err1 != nil || err2 != nil || d == 0 {
+		return 0
+	}
+	return n / d
 }
 
 // Decision 是探测后的 HLS 播放决策（direct/unsupported 在 handler 层判定）。
@@ -68,6 +92,13 @@ type Decision struct {
 	HasVideo  bool
 	HasAudio  bool
 	Duration  float64 // 秒；<=0 = 未知
+
+	// 以下是给人看的源规格（详情卡显示），不参与播放决策。空 / 0 = 未知，前端略过不显示。
+	VideoCodec string  // ffprobe 的 codec_name 原值（h264/hevc/av1…），展示名由前端映射
+	Width      int     // 像素
+	Height     int     // 像素
+	FPS        float64 // 帧率
+	BitRate    int64   // bps
 
 	videoTag string // -tag:v 值（HEVC 直出时为 hvc1），空 = 不加
 }
@@ -178,10 +209,26 @@ func decide(po *probeOut) Decision {
 			if !d.VideoCopy {
 				d.VideoHEVC = hevcLevel(st)
 			}
+			d.VideoCodec = st.CodecName
+			d.Width, d.Height = st.Width, st.Height
+			if d.FPS = parseRate(st.AvgFrameRate); d.FPS == 0 {
+				d.FPS = parseRate(st.RFrameRate)
+			}
+			d.BitRate, _ = strconv.ParseInt(st.BitRate, 10, 64)
 		case st.CodecType == "audio" && !d.HasAudio:
 			d.HasAudio = true
 			d.AudioCopy = playableAudio[st.CodecName]
 			d.AudioAAC = st.CodecName == "aac"
+		}
+	}
+	// 码率兜底：MKV 一类容器不写流级码率，退到整体码率（含音频，偏高一点点，但回答
+	// 「这片子多大码」够诚实）；再没有就按文件大小除时长估。三条都落空即 0 = 未知。
+	if d.BitRate == 0 {
+		d.BitRate, _ = strconv.ParseInt(po.Format.BitRate, 10, 64)
+	}
+	if d.BitRate == 0 && d.Duration > 0 {
+		if sz, err := strconv.ParseInt(po.Format.Size, 10, 64); err == nil && sz > 0 {
+			d.BitRate = int64(float64(sz) * 8 / d.Duration)
 		}
 	}
 	return d

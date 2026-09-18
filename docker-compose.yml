@@ -7,7 +7,7 @@ services:
       - "5243:5243"
     volumes:
       - ./data:/data    # 数据库/缩略图缓存/转码临时文件
-      - ./files:/files  # 首启自动挂载为「/本地存储」
+      - ./files:/files  # 本地存储备用目录（需在后台自行添加挂载）
     # 容器内以非 root 用户 webvid(uid=1000) 运行（见 Dockerfile）。上面两个是 bind mount，
     # 容器内 uid=1000 能否写入取决于宿主机 ./data、./files 目录本身的属主/权限，与镜像内
     # chown 无关。二选一：

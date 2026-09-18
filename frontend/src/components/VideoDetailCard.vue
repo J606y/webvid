@@ -27,6 +27,9 @@
           <span class="dim">{{ formatSize(video.size) }}</span>
         </div>
         <div class="vdc-rows">
+          <!-- 源规格随 /video/info 异步到达；mp4 一类直连视频靠后台预载探出来，
+               还没轮到就整行不出现（宁可没有，也不留一行空占位） -->
+          <div v-if="specsText" class="vdc-row"><span class="k">视频</span><span class="v">{{ specsText }}</span></div>
           <div class="vdc-row"><span class="k">文件名</span><span class="v">{{ video.name }}</span></div>
           <div class="vdc-row">
             <span class="k">所在目录</span>
@@ -64,7 +67,10 @@ import { fetchVideoInfo } from '../utils/videoInfo'
 import { useHeroDialog } from '../utils/heroDialog'
 import { extractVibrant } from '../utils/monet'
 import { thumbUrl, playRoute, filesRoute, parent } from '../utils/path'
-import { formatSize, formatTime, hideImg, stripExt, formatDuration, progressPct } from '../utils/file'
+import {
+  formatSize, formatTime, hideImg, stripExt, formatDuration, progressPct,
+  codecLabel, formatFps, formatBitrate,
+} from '../utils/file'
 
 const router = useRouter()
 const visible = ref(false)
@@ -111,6 +117,17 @@ const strategyText = computed(() => {
 const durationText = computed(() => {
   const s = Math.round(info.value?.duration || 0)
   return s ? formatDuration(s) : ''
+})
+// 源规格一行：编码 · 分辨率 · 帧率 · 码率。缺哪项就少哪项，不占位、不写「未知」。
+const specsText = computed(() => {
+  const i = info.value
+  if (!i) return ''
+  return [
+    codecLabel(i.video_codec),
+    i.width && i.height ? `${i.width}×${i.height}` : '',
+    formatFps(i.fps),
+    formatBitrate(i.bitrate),
+  ].filter(Boolean).join(' · ')
 })
 
 // ---- iOS 式 hero 转场：卡片从点击的封面处放大展开、关闭缩回原位（详见 utils/heroDialog）----
@@ -182,7 +199,14 @@ function goDir() {
   overflow: hidden;
   background: var(--glass-bg, rgba(255, 255, 255, 0.07));
   border: 1px solid var(--glass-border, rgba(255, 255, 255, 0.14));
-  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.65);
+  /* 外圈高光描边：玻璃靠边界成形。上缘最亮（光从上方来）、整圈一道弱光勾出厚度、
+     下缘再补一点点反射，三层叠起来才有 iOS 那种「一块真玻璃」的立体感，
+     单靠一条 border 只会像贴了张半透明纸。 */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.34),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.1),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06),
+    0 30px 80px rgba(0, 0, 0, 0.65);
 }
 .el-dialog.vdc::before { /* 玻璃顶部高光线（同 .glass 签名） */
   content: '';

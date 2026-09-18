@@ -1,8 +1,12 @@
 /* ---- 液态玻璃设计令牌 ---- */
 :root {
-  --glass-bg: rgba(255, 255, 255, 0.07);
-  --glass-border: rgba(255, 255, 255, 0.14);
-  --glass-blur: 28px;
+  /* 玻璃的「透」来自低模糊 + 强折射，不是来自低底色：底色再淡，blur 一厚背后就成了
+     一片色块，看不出形状，观感是厚磨砂而非玻璃。28px 正是这个毛病。压到 14px 能看清
+     背后轮廓，折射感改由 saturate/brightness 与更亮的描边补出来 —— 播放器控件早先
+     就是这么调的（那边 7px，面积小可以更薄；卡片面积大，太薄会显脏）。 */
+  --glass-bg: rgba(255, 255, 255, 0.06);
+  --glass-border: rgba(255, 255, 255, 0.18);
+  --glass-blur: 14px;
   --radius-card: 16px;
   --radius-panel: 24px;
   --text-main: #e9e9f2;
@@ -71,9 +75,11 @@ body.infuse-mode .aurora span { opacity: 0.12; }
   background: var(--glass-bg);
   border: 1px solid var(--glass-border);
   border-radius: var(--radius-card);
-  backdrop-filter: blur(var(--glass-blur)) saturate(1.7);
-  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.7);
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.35);
+  /* brightness 补回薄玻璃丢掉的通透感，inset 高光把玻璃的上缘「厚度」勾出来 ——
+     玻璃靠边界成形，模糊一薄就更依赖这两笔 */
+  backdrop-filter: blur(var(--glass-blur)) saturate(1.8) brightness(1.06);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(1.8) brightness(1.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.24), 0 8px 32px rgba(0, 0, 0, 0.35);
 }
 .glass::before {
   content: '';
@@ -83,10 +89,26 @@ body.infuse-mode .aurora span { opacity: 0.12; }
   pointer-events: none;
 }
 .glass-panel { border-radius: var(--radius-panel); }
-.glass-hover { transition: transform 0.25s ease, box-shadow 0.25s ease; }
-.glass-hover:hover {
-  transform: scale(1.05);
-  box-shadow: 0 14px 44px rgba(90, 130, 255, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+.glass-hover {
+  transition: transform 0.25s ease, box-shadow 0.25s ease;
+  /* iOS 点击时那块灰色高亮会盖在按压动效上，两者打架 */
+  -webkit-tap-highlight-color: transparent;
+}
+/* 只给真有指针的设备做 hover：触屏上 :hover 会在点完之后粘住不退，
+   卡片僵在放大态，看着像界面卡了 */
+@media (hover: hover) {
+  .glass-hover:hover {
+    transform: scale(1.05);
+    box-shadow: 0 14px 44px rgba(90, 130, 255, 0.28), inset 0 0 0 1px rgba(255, 255, 255, 0.12);
+  }
+}
+/* 触屏的按压反馈：按下放大、松手弹回。时长压到 0.12s 才跟得上手指，
+   0.25s 的话手指抬起来了动效还在走 */
+@media (hover: none) {
+  .glass-hover:active {
+    transform: scale(1.03);
+    transition-duration: 0.12s;
+  }
 }
 @supports not (backdrop-filter: blur(1px)) {
   .glass { background: rgba(20, 20, 30, 0.92); }
@@ -136,7 +158,7 @@ body.infuse-mode .aurora span { opacity: 0.12; }
 /* ---- Element Plus 融入暗色玻璃 ---- */
 html.dark {
   --el-bg-color: rgba(22, 24, 40, 0.62);          /* 弹窗/抽屉底色：半透明，靠 backdrop-filter 出玻璃感 */
-  --el-bg-color-overlay: rgba(26, 28, 46, 0.6);   /* 下拉/气泡底色 */
+  --el-bg-color-overlay: rgba(26, 28, 46, 0.42);  /* 下拉/气泡底色：压薄让玻璃透出背后，厚底色会把 backdrop-filter 的功夫盖掉 */
   --el-fill-color-blank: transparent;
   --el-fill-color-light: rgba(255, 255, 255, 0.06);
   --el-fill-color: rgba(255, 255, 255, 0.08);
@@ -217,8 +239,11 @@ html.dark .el-popper {
   border: 1px solid var(--glass-border);
   border-radius: 14px;
   overflow: hidden;
-  backdrop-filter: blur(24px) saturate(1.7);
-  -webkit-backdrop-filter: blur(24px) saturate(1.7);
+  /* 与 .glass 同一配方：24px 会把背后糊成色块，观感是磨砂而不是玻璃。
+     压到 14px 看得见背后轮廓，通透感由 saturate/brightness 与上缘高光补。 */
+  backdrop-filter: blur(14px) saturate(1.8) brightness(1.06);
+  -webkit-backdrop-filter: blur(14px) saturate(1.8) brightness(1.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.22), 0 12px 36px rgba(0, 0, 0, 0.4);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
 }
 html.dark .el-popper.is-dark { background: rgba(28, 30, 48, 0.65); }

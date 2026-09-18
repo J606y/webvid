@@ -36,7 +36,7 @@ REPO="J606y/webvid"                           # GitHub 仓库
 APP="webvid"                                   # 二进制 / 服务名 / 管理命令名
 INSTALL_DIR="${WEBVID_DIR:-/opt/webvid}"       # 安装目录（可用环境变量覆盖）
 DATA_DIR="${INSTALL_DIR}/data"                 # 数据库/缩略图/转码缓存（含机密 newlist.db）
-FILES_DIR="${INSTALL_DIR}/files"               # 首启自动挂载的本地存储
+FILES_DIR="${INSTALL_DIR}/files"               # 本地存储备用目录（需在后台自行添加挂载）
 PORT="${WEBVID_PORT:-5243}"                    # 监听端口（NL_PORT）/ Docker 映射端口
 SERVICE_FILE="/etc/systemd/system/${APP}.service"
 BIN="${INSTALL_DIR}/${APP}"                    # systemd 后端的 app 二进制
@@ -321,7 +321,7 @@ services:
       - "${PORT}:5243"
     volumes:
       - ./data:/data     # 数据库/缩略图缓存/转码临时文件
-      - ./files:/files   # 首启自动挂载为「/本地存储」
+      - ./files:/files   # 本地存储备用目录（需在后台自行添加挂载）
     environment:
       TZ: Asia/Shanghai${pw_env}
     restart: unless-stopped
@@ -435,8 +435,9 @@ show_access() {
   echo "  部署后端：  $(current_backend)"
   echo "  安装目录：  ${INSTALL_DIR}"
   echo "  数据目录：  ${DATA_DIR}"
-  echo "  本地存储：  ${FILES_DIR}  (自动挂载为「/本地存储」)"
+  echo "  本地目录：  ${FILES_DIR}  (留给本地存储，需在后台添加挂载)"
   echo "${C_GREEN}${C_BOLD}============================================${C_RST}"
+  echo "  首次登录后到后台「存储」添加要挂的盘，存储列表初始为空。"
   echo "  管理命令： ${APP} {start|stop|restart|status|log|update|reset-password}"
   echo "  或直接输入 ${C_BOLD}${APP}${C_RST} 进入交互菜单。"
   echo "  ${C_YELLOW}公网部署请置于 HTTPS 反向代理之后（本服务不内置 TLS）。${C_RST}"

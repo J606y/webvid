@@ -190,6 +190,13 @@ func (s *Server) offlineFetch(ctx context.Context, u *user.User, t *task.Task, j
 	if name == "" {
 		name = offlineFilename(resp, job.url)
 	}
+	// 没有扩展名就补一个。本项目认文件类型全靠扩展名——能不能播、进不进媒体库、
+	// 显示哪个图标都由它决定，存成「电影」这样的名字，下完就是个谁也打不开的文件。
+	// 自定义名不带后缀是一种，URL 末段本身没后缀（…/video?id=1）是另一种，都在这兜住。
+	// HLS 那条路在 hlsOutName 里早就强制补 .mp4 了，这里补的是普通下载漏掉的一半。
+	if path.Ext(name) == "" {
+		name += offlineExt(resp, job.url)
+	}
 	t.SetFile(name)
 	if resp.ContentLength > 0 {
 		t.SetTotal(resp.ContentLength)
@@ -228,6 +235,49 @@ func offlineFilename(resp *http.Response, srcURL string) string {
 		}
 	}
 	return "download.bin"
+}
+
+// ctExt 常见 Content-Type 对应的扩展名。不用 mime.ExtensionsByType：它按字典序返回
+// 一串候选（video/mp4 会先给出 .f4v），取第一个往往不是人们期待的那个。
+var ctExt = map[string]string{
+	"video/mp4": ".mp4", "video/x-matroska": ".mkv", "video/webm": ".webm",
+	"video/quicktime": ".mov", "video/x-msvideo": ".avi", "video/mp2t": ".ts",
+	"video/x-flv": ".flv", "video/mpeg": ".mpg", "video/3gpp": ".3gp",
+	"audio/mpeg": ".mp3", "audio/flac": ".flac", "audio/x-flac": ".flac",
+	"audio/mp4": ".m4a", "audio/ogg": ".ogg", "audio/wav": ".wav", "audio/x-wav": ".wav",
+	"image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+	"image/webp": ".webp", "image/avif": ".avif", "image/heic": ".heic",
+	"application/pdf": ".pdf", "application/zip": ".zip",
+}
+
+// offlineExt 推断该补什么扩展名（含前导点），推不出返回 ""。
+//
+// Content-Type 优先：那是源站对这份数据的自我声明，比地址可靠。只有它含糊
+// （octet-stream 之类没进表的）时才退到 URL 末段——反过来会被 /download.php?id=1
+// 这类地址骗去补一个 .php，比没有扩展名更糟。
+func offlineExt(resp *http.Response, srcURL string) string {
+	if ct := resp.Header.Get("Content-Type"); ct != "" {
+		if mt, _, err := mime.ParseMediaType(ct); err == nil {
+			if e, ok := ctExt[strings.ToLower(strings.TrimSpace(mt))]; ok {
+				return e
+			}
+		}
+	}
+	if pu, err := url.Parse(srcURL); err == nil {
+		// 限长：太长的多半不是扩展名，是路径里的随机串
+		e := strings.ToLower(path.Ext(pu.Path))
+		if len(e) >= 2 && len(e) <= 6 && !pageExt[e] {
+			return e
+		}
+	}
+	return ""
+}
+
+// pageExt 这些是页面/脚本入口，不是文件类型。/dl.php?id=1 返回的可能是任意东西，
+// 补成「电影.php」比压根不补更误导人 —— 宁可没有扩展名，也不要一个错的。
+var pageExt = map[string]bool{
+	".php": true, ".asp": true, ".aspx": true, ".jsp": true, ".jspx": true,
+	".cgi": true, ".do": true, ".action": true, ".html": true, ".htm": true, ".shtml": true,
 }
 
 // isHLS 判定响应是否为 HLS 播放列表：Content-Type 含 mpegurl（apple/x-mpegurl 等），

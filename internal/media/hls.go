@@ -347,17 +347,21 @@ func (s *Service) loadInfo(logical string, fi model.FileInfo) (Decision, bool) {
 	var (
 		d                            Decision
 		vc, vh, ac, aa, hv, ha, size int64
+		w, h                         int64
 	)
 	mod := modKey(fi.Modified)
 	err := s.db.QueryRow(
-		`SELECT size, video_copy, video_hevc, audio_copy, audio_aac, has_video, has_audio, duration FROM media_info
+		`SELECT size, video_copy, video_hevc, audio_copy, audio_aac, has_video, has_audio, duration,
+		        video_codec, width, height, fps, bitrate FROM media_info
 		 WHERE path=? AND modified=?`, logical, mod).
-		Scan(&size, &vc, &vh, &ac, &aa, &hv, &ha, &d.Duration)
+		Scan(&size, &vc, &vh, &ac, &aa, &hv, &ha, &d.Duration,
+			&d.VideoCodec, &w, &h, &d.FPS, &d.BitRate)
 	if err != nil || size != fi.Size {
 		return Decision{}, false
 	}
 	d.VideoCopy, d.AudioCopy, d.AudioAAC, d.HasVideo, d.HasAudio = vc == 1, ac == 1, aa == 1, hv == 1, ha == 1
 	d.VideoHEVC = int(vh)
+	d.Width, d.Height = int(w), int(h)
 	return d, true
 }
 
@@ -368,12 +372,14 @@ func (s *Service) saveInfo(logical string, fi model.FileInfo, d Decision) {
 	}
 	_, err := s.db.Exec(
 		`INSERT OR REPLACE INTO media_info
-		 (path,size,modified,video_copy,video_hevc,audio_copy,audio_aac,has_video,has_audio,duration,probed_at)
-		 VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
+		 (path,size,modified,video_copy,video_hevc,audio_copy,audio_aac,has_video,has_audio,duration,
+		  video_codec,width,height,fps,bitrate,probed_at)
+		 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		logical, fi.Size, modKey(fi.Modified),
 		util.BoolInt(d.VideoCopy), d.VideoHEVC,
 		util.BoolInt(d.AudioCopy), util.BoolInt(d.AudioAAC), util.BoolInt(d.HasVideo), util.BoolInt(d.HasAudio),
-		d.Duration, time.Now().UTC().Format(time.RFC3339))
+		d.Duration, d.VideoCodec, d.Width, d.Height, d.FPS, d.BitRate,
+		time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		log.Printf("[media] media_info 写入失败 %s: %v", logical, err)
 	}

@@ -1,8 +1,13 @@
 package db
 
-// media_info 旧库升级路径：加 video_hevc 列时只清「当时判为要重编码」的那批（video_copy=0），
-// 它们正是 HEVC 直出可能受益的全部；已经在直出的那批结论不会变，不该跟着重探。
-// 新库重开不得误清。
+// media_info 旧库升级路径。
+//
+// 历史上加 video_hevc 列时只清「当时判为要重编码」的那批（video_copy=0）—— 它们正是
+// HEVC 直出可能受益的全部。但自从补源规格列（video_codec/width/height/fps/bitrate）那条
+// 迁移落地，紧随其后的整表清理会把它覆盖：旧行一个规格字段都没有，留着只会让老片子的
+// 详情卡永远空着，所以一行不留、全库重探。这里断言的是**升级后的最终状态**。
+//
+// 新库重开不得误清 —— 这条始终有效，也是本测试最要紧的一半。
 
 import (
 	"database/sql"
@@ -48,15 +53,14 @@ func TestMigrateMediaInfoVideoHEVC(t *testing.T) {
 	if err := d.QueryRow(`SELECT COUNT(*) FROM media_info WHERE video_hevc=0`).Scan(&n); err != nil {
 		t.Fatalf("video_hevc 列不存在: %v", err)
 	}
-	var path string
-	if err := d.QueryRow(`SELECT path FROM media_info`).Scan(&path); err != nil {
-		t.Fatalf("升级后应恰好留下直出那一行: %v", err)
+	// 规格列齐全：缺任何一列这句就会报错
+	if err := d.QueryRow(
+		`SELECT COUNT(*) FROM media_info WHERE video_codec='' AND width=0 AND height=0 AND fps=0 AND bitrate=0`,
+	).Scan(&n); err != nil {
+		t.Fatalf("源规格列不存在: %v", err)
 	}
-	if path != "/vid/remux.mkv" {
-		t.Fatalf("留下的应是原本直出的那行，实际 %q", path)
-	}
-	if err := d.QueryRow(`SELECT COUNT(*) FROM media_info`).Scan(&n); err != nil || n != 1 {
-		t.Fatalf("只该清掉 video_copy=0 的那批: n=%d err=%v", n, err)
+	if err := d.QueryRow(`SELECT COUNT(*) FROM media_info`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("补规格列时应清空整表强制重探: n=%d err=%v", n, err)
 	}
 
 	// 新 schema 库重开：ALTER 重复列失败 → 不得误清
@@ -70,7 +74,8 @@ func TestMigrateMediaInfoVideoHEVC(t *testing.T) {
 		t.Fatalf("Open 重开: %v", err)
 	}
 	defer d.Close()
-	if err := d.QueryRow(`SELECT COUNT(*) FROM media_info`).Scan(&n); err != nil || n != 2 {
+	// 上面补规格列时已把表清空，所以此刻只有刚插进去的这一行
+	if err := d.QueryRow(`SELECT COUNT(*) FROM media_info`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("重开不应清缓存: n=%d err=%v", n, err)
 	}
 }

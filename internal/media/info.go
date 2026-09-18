@@ -15,9 +15,6 @@ var directPlayExts = map[string]bool{
 	"mp4": true, "m4v": true, "mov": true, "webm": true,
 }
 
-// IsDirectExt 报告扩展名是否为浏览器原生可播容器（无需探测）。
-func IsDirectExt(name string) bool { return directPlayExts[model.Ext(name)] }
-
 // ProbeState 是某个文件的源信息此刻在缓存里的处境。
 type ProbeState int
 
@@ -69,8 +66,11 @@ func (s *Service) Probed() ProbedSet {
 // 算进总数只会让进度条一开局就停在已缓存占比上。
 // cached 由 Probed 预先拉好；命中判据与 Decide 走的 loadInfo 是同一套
 // （path + size + modified 全等才算数）。
+// direct 扩展名也要探：播放它们确实不需要 ffprobe（扩展名一看就秒开），但详情卡要显示
+// 编码/分辨率/帧率/码率，而那只能从探测里来。预载本就在逐个拉数据抽封面，顺手探一次的
+// 增量很小，换来的是全库规格齐备、详情卡秒回 —— 见 Info 的 direct 分支只查缓存不现探。
 func (s *Service) ProbeStatus(cached ProbedSet, logical string, fi model.FileInfo) ProbeState {
-	if model.ExtType(fi.Name) != "video" || IsDirectExt(fi.Name) {
+	if model.ExtType(fi.Name) != "video" {
 		return ProbeNone
 	}
 	if r, ok := cached[logical]; ok && r.size == fi.Size && r.mod == modKey(fi.Modified) {
@@ -91,6 +91,29 @@ type PlayInfo struct {
 	// HEVC 为真表示这次之所以能直出，靠的是客户端自报的 HEVC 解码能力。
 	// 前端据此知道「万一真解不动，该降级重试的是这一项」，不必对着所有解码失败瞎猜。
 	HEVC bool `json:"hevc,omitempty"`
+
+	// 源规格：详情卡显示用，不参与播放决策。空 / 0 = 未知（omitempty 直接不下发），
+	// 前端略过该项。VideoCodec 是 ffprobe 原值（h264/hevc…），展示名由前端映射。
+	VideoCodec string  `json:"video_codec,omitempty"`
+	Width      int     `json:"width,omitempty"`
+	Height     int     `json:"height,omitempty"`
+	FPS        float64 `json:"fps,omitempty"`
+	BitRate    int64   `json:"bitrate,omitempty"`
+}
+
+// withSpecs 把探测到的源规格抄进播放信息。
+//
+// 时长照抄：direct 分支此前不带它，详情卡上 mp4 只显示规格不显示时长、旁边的 mkv
+// 两样都有，同一张卡两种面貌。
+//
+// 视频规格则要看有没有视频流：纯音频套个 .mp4 壳的文件，编码/分辨率/帧率全是空，
+// 只剩一个码率挂在「视频」标题下，不如整行不出。
+func (p PlayInfo) withSpecs(d Decision) PlayInfo {
+	p.Duration = d.Duration
+	if d.HasVideo {
+		p.VideoCodec, p.Width, p.Height, p.FPS, p.BitRate = d.VideoCodec, d.Width, d.Height, d.FPS, d.BitRate
+	}
+	return p
 }
 
 // Info 解析文件的播放策略：direct 扩展名秒回、非视频 unsupported、其余经探测
@@ -100,7 +123,14 @@ type PlayInfo struct {
 // 设备上 HEVC 直接原样封装，一个核都不用；不支持的照旧重编码。
 func (s *Service) Info(ctx context.Context, u *user.User, logical string, fi model.FileInfo, hevcCap int) PlayInfo {
 	if directPlayExts[model.Ext(fi.Name)] {
-		return PlayInfo{Strategy: "direct"}
+		pi := PlayInfo{Strategy: "direct"}
+		// 规格只从缓存捎带，绝不现场探测 —— direct 的全部意义就是进页秒开，
+		// 为了一行技术信息去起 ffprobe 是本末倒置。预载会把库里补齐（见 ProbeStatus），
+		// 还没轮到的先空着，前端略过不显示。
+		if d, ok := s.loadInfo(logical, fi); ok {
+			pi = pi.withSpecs(d)
+		}
+		return pi
 	}
 	if model.ExtType(fi.Name) != "video" {
 		return PlayInfo{Strategy: "unsupported", Message: "该文件不是可播放的视频格式"}
@@ -121,5 +151,5 @@ func (s *Service) Info(ctx context.Context, u *user.User, logical string, fi mod
 		reason = "remux"
 	}
 	return PlayInfo{Strategy: "hls", Reason: reason, Duration: dec.Duration,
-		HEVC: dec.videoTag == "hvc1"}
+		HEVC: dec.videoTag == "hvc1"}.withSpecs(dec)
 }

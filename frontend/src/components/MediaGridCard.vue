@@ -4,7 +4,7 @@
        缩略图源路径与点击行为由父级注入：Files 用 join(当前目录,名)、Search 用 it.path。
        选择框与操作菜单默认关闭（搜索页只看不管），文件管理传入后才出现。 -->
   <div class="g-card glass glass-hover" :class="{ picked: selected }" @click="$emit('open')">
-    <div class="g-thumb">
+    <div ref="thumb" class="g-thumb">
       <img v-if="hasThumb" :src="thumbUrl(thumbPath, 320)" loading="lazy" @error="hideImg" />
       <div class="thumb-fallback abs">
         <el-icon :size="34" :class="{ folder: isDir }">
@@ -18,10 +18,13 @@
       </span>
 
       <span v-if="actions.length" class="more" @click.stop>
-        <el-dropdown trigger="click" @command="$emit('command', $event)">
+        <el-dropdown trigger="click" @command="onCommand">
           <el-button class="more-btn" circle size="small" :icon="MoreFilled" />
           <template #dropdown>
             <el-dropdown-menu>
+              <el-dropdown-item v-if="actions.includes('detail')" command="detail" :icon="InfoFilled">
+                详情
+              </el-dropdown-item>
               <el-dropdown-item v-if="actions.includes('rename')" command="rename" :icon="EditPen">
                 重命名
               </el-dropdown-item>
@@ -41,7 +44,8 @@
 </template>
 
 <script setup>
-import { MoreFilled, EditPen, Download, Delete } from '@element-plus/icons-vue'
+import { ref } from 'vue'
+import { MoreFilled, EditPen, Download, Delete, InfoFilled } from '@element-plus/icons-vue'
 import { iconMap as icons } from '../utils/icons'
 import { thumbUrl } from '../utils/path'
 import { hideImg } from '../utils/file'
@@ -54,10 +58,17 @@ defineProps({
   isDir: { type: Boolean, default: false },
   selectable: { type: Boolean, default: false },
   selected: { type: Boolean, default: false },
-  // 操作菜单项，由父级按写权限与文件类型决定：rename / download / remove
+  // 操作菜单项，由父级按写权限与文件类型决定：detail / rename / download / remove
   actions: { type: Array, default: () => [] },
 })
-defineEmits(['open', 'update:selected', 'command'])
+const emit = defineEmits(['open', 'update:selected', 'command'])
+
+const thumb = ref(null)
+// 详情卡要从封面处放大展开（同视频库的 hero 转场），所以把缩略图元素一并交给父级当起点。
+// 多带一个参数对只关心命令名的调用方无碍。
+function onCommand(cmd) {
+  emit('command', cmd, thumb.value)
+}
 </script>
 
 <style scoped>
